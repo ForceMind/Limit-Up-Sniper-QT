@@ -638,10 +638,26 @@
                 <div><div class="text-xs text-neutral-500">状态</div><div class="font-semibold mt-1">{{ evolutionStatus.status || '-' }}</div></div>
                 <div><div class="text-xs text-neutral-500">代数</div><div class="font-semibold mt-1">{{ evolutionStatus.generations || ((evolutionStatus.last_run || {}).generations) || 0 }}</div></div>
                 <div><div class="text-xs text-neutral-500">种群</div><div class="font-semibold mt-1">{{ evolutionStatus.population_size || ((evolutionStatus.last_run || {}).population_size) || 0 }}</div></div>
-                <div><div class="text-xs text-neutral-500">更新时间</div><div class="font-semibold mt-1">{{ shortTime(evolutionStatus.updated_at || ((evolutionStatus.last_run || {}).updated_at)) }}</div></div>
+                <div><div class="text-xs text-neutral-500">更新时间</div><div class="font-semibold mt-1">{{ shortTime(evolutionStatus.finished_at || evolutionStatus.updated_at || ((evolutionStatus.last_run || {}).updated_at)) }}</div></div>
               </div>
-              <div class="px-4 pb-4 text-sm">
-                <pre class="bg-neutral-100 p-3 rounded-md overflow-auto max-h-[300px]">{{ compactJson(evolutionStatus.best || evolutionStatus.last_run || {}) }}</pre>
+              <div class="table-wrap overflow-auto max-h-[360px]">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                    <tr><th class="px-3 py-2 text-left">模型</th><th class="px-3 py-2 text-right">目标</th><th class="px-3 py-2 text-right">收益</th><th class="px-3 py-2 text-right">回撤</th><th class="px-3 py-2 text-right">胜率</th><th class="px-3 py-2 text-right">交易</th><th class="px-3 py-2 text-right">操作</th></tr>
+                  </thead>
+                  <tbody class="divide-y divide-neutral-100">
+                    <tr v-for="model in evolutionModels" :key="model.id" class="hover:bg-neutral-50">
+                      <td class="px-3 py-2"><div class="font-semibold">{{ model.name }}</div><div class="text-xs text-neutral-500">{{ model.id }}</div></td>
+                      <td class="px-3 py-2 text-right">{{ fixed(model.objective) }}</td>
+                      <td class="px-3 py-2 text-right" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</td>
+                      <td class="px-3 py-2 text-right">{{ pct(model.max_drawdown_pct) }}</td>
+                      <td class="px-3 py-2 text-right">{{ pct(model.win_rate) }}</td>
+                      <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
+                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">应用</button></td>
+                    </tr>
+                    <tr v-if="!evolutionModels.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -929,6 +945,7 @@
           aiRecords: {},
           notificationStatus: {},
           evolutionStatus: {},
+          strategyModels: {},
           fitResult: {},
           syncResult: {},
           adminResult: {},
@@ -968,6 +985,7 @@
             { key: 'max_positions', label: '最大持仓数', step: 1 },
             { key: 'top_n', label: '每日候选数', step: 1 },
             { key: 'paper_max_hold_days', label: '模拟持仓天数', step: 1 },
+            { key: 'account_initial_cash', label: '账户初始资金', step: 10000 },
             { key: 'paper_position_value', label: '单票资金', step: 10000 },
             { key: 'sentiment_weight', label: '情绪权重', step: 0.01 },
             { key: 'event_weight', label: '事件权重', step: 0.01 },
@@ -1023,6 +1041,10 @@
         aiFailureItems() { return this.aiFailures.items || []; },
         aiRecordItems() { return this.aiRecords.items || []; },
         fitCandidates() { return this.fitResult.candidates || []; },
+        evolutionModels() {
+          const direct = this.evolutionStatus.models || [];
+          return direct.length ? direct : (this.strategyModels.items || []);
+        },
         minuteCacheCount() {
           const dates = this.biyingStatus.cache_dates || {};
           return Object.values(dates).reduce((sum, value) => sum + Number(value || 0), 0);
@@ -1256,6 +1278,7 @@
           this.aiUsage = snapshot.ai_usage || this.aiUsage;
           this.notificationStatus = snapshot.notification_status || this.notificationStatus;
           this.evolutionStatus = snapshot.evolution_status || this.evolutionStatus;
+          this.strategyModels = snapshot.strategy_models || this.strategyModels;
           this.dashboard = snapshot.dashboard || this.dashboard;
           this.tradingAccount = snapshot.trading_account || this.tradingAccount;
           this.newsFeed = snapshot.news || this.newsFeed;
@@ -1485,6 +1508,13 @@
           } finally {
             this.evolving = false;
           }
+        },
+        async applyEvolutionModel(model) {
+          if (!model || !model.id) return;
+          const q = new URLSearchParams({ model_id: model.id });
+          const result = await this.api(`/api/quant/model/apply?${q.toString()}`, { method: 'POST' });
+          this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
+          await this.refreshAll();
         },
         async loadTimeline(quiet = false) {
           this.timelineLoading = !quiet;

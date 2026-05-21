@@ -203,6 +203,7 @@ def frontend_snapshot(
         "news": quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True),
         "recommendations": quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n),
         "daily_plan": quant_engine.daily_plan(as_of=as_of, limit_days=120),
+        "strategy_models": strategy_evolution.models(),
     }
 
 
@@ -216,6 +217,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None)):
         "ai_usage": ai_usage_summary(),
         "notification_status": trade_notifier.status(),
         "evolution_status": strategy_evolution.status(),
+        "strategy_models": strategy_evolution.models(),
         "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
         "trading_account": quant_engine.trading_account(as_of=as_of, limit=1000),
         "news": quant_engine.news_feed(as_of=as_of, limit=120, fallback_latest=True),
@@ -342,6 +344,16 @@ def quant_fit_strategy(
 @app.get("/api/quant/evolution/status")
 def quant_evolution_status():
     return strategy_evolution.status()
+
+
+@app.get("/api/quant/models")
+def quant_strategy_models():
+    return strategy_evolution.models()
+
+
+@app.post("/api/quant/model/apply")
+def quant_apply_strategy_model(model_id: str = Query(...)):
+    return strategy_evolution.apply_model(model_id)
 
 
 @app.post("/api/quant/evolve_strategy")
@@ -572,7 +584,7 @@ def quant_correlation(as_of: Optional[str] = Query(default=None), hold_days: int
 def quant_timeline(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
-    initial_cash: float = Query(default=1_000_000.0, gt=0),
+    initial_cash: Optional[float] = Query(default=None, gt=0),
     max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
@@ -591,7 +603,7 @@ def quant_timeline(
 def quant_intraday_timeline(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
-    initial_cash: float = Query(default=1_000_000.0, gt=0),
+    initial_cash: Optional[float] = Query(default=None, gt=0),
     max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),

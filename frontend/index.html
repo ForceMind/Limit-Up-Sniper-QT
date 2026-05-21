@@ -108,7 +108,7 @@
       .news-row .row-main { grid-template-columns: minmax(58px, auto) minmax(0, 1fr) minmax(54px, auto); }
       .news-title { font-size: 14px; line-height: 19px; font-weight: 800; }
       .news-meta { color: #7b8494; font-size: 11px; line-height: 17px; }
-      .mobile-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 70; height: 64px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #101620; border-top: 1px solid #252d39; }
+      .mobile-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 70; height: 64px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); background: #101620; border-top: 1px solid #252d39; }
       .mobile-tabbar button { color: #c8d0dc; font-size: 11px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
       .mobile-tabbar .nav-icon { position: relative; width: 21px; height: 21px; display: block; }
       .nav-overview::before { content: ""; position: absolute; left: 3px; top: 3px; width: 6px; height: 6px; background: currentColor; box-shadow: 9px 0 0 currentColor, 0 9px 0 currentColor, 9px 9px 0 currentColor; }
@@ -119,6 +119,8 @@
       .nav-deals::after { content: ""; position: absolute; left: 7px; top: 8px; width: 7px; height: 2px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
       .nav-news::before { content: ""; position: absolute; left: 5px; top: 3px; width: 12px; height: 15px; border: 2px solid currentColor; border-top-right-radius: 4px; }
       .nav-news::after { content: ""; position: absolute; left: 8px; top: 8px; width: 6px; height: 2px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
+      .nav-strategy::before { content: ""; position: absolute; left: 3px; top: 4px; width: 15px; height: 13px; border: 2px solid currentColor; }
+      .nav-strategy::after { content: ""; position: absolute; left: 7px; top: 8px; width: 7px; height: 2px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
       .mobile-tabbar button.active { background: #dc1728; color: #fff; }
       .desktop-only { display: none !important; }
       .mobile-page:not(.active-mobile) { display: none !important; }
@@ -135,7 +137,7 @@
       <form @submit.prevent="loginFrontend" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4">
         <div>
           <h1 class="text-xl font-semibold">前台登录</h1>
-          <p class="mt-1 text-sm text-neutral-500">请输入前台交易终端账号。首次使用请先进入后台完成初始化。</p>
+          <p class="mt-1 text-sm text-neutral-500">请输入前台交易终端账号。如未初始化，请联系管理员处理。</p>
         </div>
         <label class="block text-sm">
           <span class="block text-xs text-neutral-500 mb-1">用户名</span>
@@ -147,7 +149,6 @@
         </label>
         <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
         <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '登录中' : '登录前台' }}</button>
-        <a href="/admin" class="block text-center text-sm text-neutral-600 hover:text-neutral-900">去后台初始化或管理配置</a>
       </form>
     </div>
     <div v-else-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登录状态...</div>
@@ -160,7 +161,6 @@
           <span class="market-pill">{{ scheduler.market_open ? '交易中' : '休市' }}</span>
         </div>
         <div class="flex items-center gap-2">
-          <a href="/admin" class="account-select">后台管理</a>
           <button @click="logout" class="account-select">退出</button>
         </div>
       </div>
@@ -227,6 +227,10 @@
             <button class="summary-tile text-left" @click="setMobileView('news')">
               <div class="label">最新新闻</div>
               <div class="value">{{ latestNewsCount }}</div>
+            </button>
+            <button class="summary-tile text-left" @click="setMobileView('strategy')">
+              <div class="label">策略模型</div>
+              <div class="value">{{ strategyItems.length }}</div>
             </button>
           </div>
           <div class="mobile-panel-head border-t border-neutral-100">
@@ -389,6 +393,42 @@
           </div>
         </section>
 
+        <section v-show="mobileView === 'strategy'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">多策略模型</div>
+              <div class="mobile-panel-sub">遗传进化生成的可复用策略，前台只展示不修改</div>
+            </div>
+            <span class="mobile-link">共 {{ strategyItems.length }}</span>
+          </div>
+          <article v-for="model in strategyItems" :key="'m-model-' + model.id" class="signal-row">
+            <div class="row-main">
+              <div>
+                <div class="stock-name">{{ model.name || model.id }}</div>
+                <div class="stock-code">排名 {{ model.rank || '-' }} 路 {{ shortTime(model.generated_at) }}</div>
+                <div class="tag-line">
+                  <span class="tag">持仓 {{ fixed((model.params || {}).max_positions, 0) }}</span>
+                  <span class="tag">单票 {{ money((model.params || {}).paper_position_value) }}</span>
+                </div>
+              </div>
+              <div>
+                <div class="row-desc line-clamp-2">买入阈值 {{ fixed((model.params || {}).buy_threshold) }}，止损 {{ fixed((model.params || {}).stop_loss_pct) }}%，止盈 {{ fixed((model.params || {}).take_profit_pct) }}%</div>
+                <div class="mini-metrics">
+                  <span>目标<strong>{{ fixed(model.objective) }}</strong></span>
+                  <span>收益<strong>{{ pct(model.return_pct) }}</strong></span>
+                  <span>回撤<strong>{{ pct(model.max_drawdown_pct) }}</strong></span>
+                </div>
+              </div>
+              <div>
+                <div class="score-buy" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</div>
+                <div class="score-sell">{{ pct(model.win_rate) }}</div>
+                <div class="score-sell mt-2">{{ model.closed_trades || 0 }} 笔</div>
+              </div>
+            </div>
+          </article>
+          <div v-if="!strategyItems.length" class="p-10 text-center text-neutral-500 text-sm">暂无进化策略模型，请在后台启动遗传进化。</div>
+        </section>
+
         <section v-show="mobileView === 'news'" class="mobile-panel">
           <div class="mobile-panel-head">
             <div>
@@ -431,6 +471,7 @@
         <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }"><span class="nav-icon nav-buy"></span>买入</button>
         <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }"><span class="nav-icon nav-position"></span>持仓</button>
         <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }"><span class="nav-icon nav-deals"></span>成交</button>
+        <button @click="setMobileView('strategy')" :class="{ active: mobileView === 'strategy' }"><span class="nav-icon nav-strategy"></span>策略</button>
         <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }"><span class="nav-icon nav-news"></span>新闻</button>
       </nav>
     </div>
@@ -442,7 +483,6 @@
           <div class="text-xs text-neutral-300 mt-1">模拟账户、持仓、成交、交割单和每日买入计划</div>
         </div>
         <div class="header-actions flex flex-wrap items-center gap-2">
-          <a href="/admin" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm inline-flex items-center">后台管理</a>
           <input v-model="asOf" type="date" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm outline-none focus:border-red-500">
           <button @click="loadAll" :disabled="loading" class="h-9 px-3 bg-red-600 text-white text-sm disabled:opacity-50">
             {{ loading ? '刷新中' : '刷新' }}
@@ -552,6 +592,50 @@
             <div class="text-xs text-neutral-500 mt-1">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
           </div>
           <div v-if="!recentLogs.length" class="p-3 text-sm text-neutral-500">暂无运行日志</div>
+        </div>
+      </section>
+
+      <section class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'strategy' }">
+        <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 class="font-semibold">多策略模型</h2>
+            <div class="text-xs text-neutral-500">遗传进化生成的可复用策略，前台只查看运行表现和关键参数</div>
+          </div>
+          <div class="text-xs text-neutral-500">模型 {{ strategyItems.length }} 个</div>
+        </div>
+        <div class="table-wrap overflow-auto max-h-[360px]">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+              <tr>
+                <th class="text-left px-3 py-2">模型</th>
+                <th class="text-right px-3 py-2">目标</th>
+                <th class="text-right px-3 py-2">收益</th>
+                <th class="text-right px-3 py-2">回撤</th>
+                <th class="text-right px-3 py-2">胜率</th>
+                <th class="text-right px-3 py-2">交易</th>
+                <th class="text-right px-3 py-2">买入阈值</th>
+                <th class="text-right px-3 py-2">单票资金</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="model in strategyItems" :key="'model-' + model.id" class="border-b border-neutral-100 hover:bg-neutral-50">
+                <td class="px-3 py-2">
+                  <div class="font-semibold">{{ model.name || model.id }}</div>
+                  <div class="text-xs text-neutral-500">{{ model.id }}</div>
+                </td>
+                <td class="px-3 py-2 text-right">{{ fixed(model.objective) }}</td>
+                <td class="px-3 py-2 text-right" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</td>
+                <td class="px-3 py-2 text-right">{{ pct(model.max_drawdown_pct) }}</td>
+                <td class="px-3 py-2 text-right">{{ pct(model.win_rate) }}</td>
+                <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
+                <td class="px-3 py-2 text-right">{{ fixed((model.params || {}).buy_threshold) }}</td>
+                <td class="px-3 py-2 text-right">{{ money((model.params || {}).paper_position_value) }}</td>
+              </tr>
+              <tr v-if="!strategyItems.length">
+                <td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化策略模型，请在后台启动遗传进化。</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -990,6 +1074,7 @@
           jobStatus: {},
           jobLogs: {},
           recommendations: {},
+          strategyModels: {},
           newsFeed: {},
           syncResult: {},
           tabs: [
@@ -1057,6 +1142,7 @@
           return window.innerWidth <= 767 ? items.slice(0, mobileLimit) : items;
         },
         historyDays() { return this.plan.history_days || []; },
+        strategyItems() { return this.strategyModels.items || []; },
         summary() { return this.plan.timeline_summary || {}; },
         rules() {
           return {
@@ -1070,7 +1156,7 @@
         this.clockTimer = window.setInterval(this.updateClock, 30000);
         this.asOf = this.localToday();
         const initialView = new URLSearchParams(window.location.search).get('view');
-        if (['overview', 'buy', 'positions', 'deals', 'news'].includes(initialView)) {
+        if (['overview', 'buy', 'positions', 'deals', 'strategy', 'news'].includes(initialView)) {
           this.mobileView = initialView;
         }
         this.initAuth();
@@ -1125,7 +1211,7 @@
             this.auth.password = '';
             await this.loadAll();
           } catch (err) {
-            this.auth.error = this.auth.setupRequired ? '系统还没有初始化，请先进入后台设置账号。' : String(err.message || err);
+            this.auth.error = this.auth.setupRequired ? '系统还没有初始化，请联系管理员设置账号。' : String(err.message || err);
           } finally {
             this.auth.loading = false;
           }
@@ -1147,6 +1233,7 @@
             this.accountView = snapshot.trading_account || {};
             this.newsFeed = snapshot.news || {};
             this.recommendations = snapshot.recommendations || {};
+            this.strategyModels = snapshot.strategy_models || {};
             this.plan = snapshot.daily_plan || {};
             if (!this.asOf) this.asOf = this.accountView.as_of || this.plan.as_of || this.asOf;
           } finally {
@@ -1211,6 +1298,7 @@
           if (view === 'overview' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'buy' && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'buy' && !this.plan.as_of) this.loadPlan(true);
+          if (view === 'strategy' && !this.strategyModels.items) this.loadAll();
           if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'news' && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'deals') this.activeTab = 'deals';

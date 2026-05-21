@@ -45,6 +45,41 @@ class StrategyEvolution:
         payload = read_json(self.state_file, {})
         return payload if isinstance(payload, dict) else {"status": "idle"}
 
+    def models(self) -> Dict[str, Any]:
+        payload = self.status()
+        items = payload.get("models") if isinstance(payload.get("models"), list) else []
+        active_params = quant_engine.strategy_params()
+        return {
+            "status": "ok",
+            "active": {
+                "id": "active",
+                "name": "当前运行策略",
+                "source": "runtime",
+                "reusable": True,
+                "params": active_params,
+            },
+            "items": items,
+            "count": len(items),
+            "updated_at": payload.get("finished_at") or payload.get("updated_at") or "",
+        }
+
+    def apply_model(self, model_id: str) -> Dict[str, Any]:
+        payload = self.status()
+        models = payload.get("models") if isinstance(payload.get("models"), list) else []
+        for model in models:
+            if str(model.get("id")) != str(model_id):
+                continue
+            params = model.get("params") if isinstance(model.get("params"), dict) else {}
+            result = quant_engine.update_strategy_params(params)
+            payload["applied_model"] = {
+                "id": model.get("id"),
+                "name": model.get("name"),
+                "applied_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            write_json(self.state_file, payload)
+            return {"status": "ok", "model": model, "strategy_params": result.get("strategy_params")}
+        return {"status": "not_found", "message": "model not found"}
+
     def run(
         self,
         generations: int = 4,
@@ -64,9 +99,11 @@ class StrategyEvolution:
             population = self._initial_population(base, population_size)
             history = []
             best: Optional[Dict[str, Any]] = None
+            last_evaluated: List[Dict[str, Any]] = []
             for generation in range(1, generations + 1):
                 evaluated = [self._evaluate(candidate, start_date=start_date, end_date=end_date) for candidate in population]
                 evaluated.sort(key=lambda item: item["objective"], reverse=True)
+                last_evaluated = evaluated
                 if best is None or evaluated[0]["objective"] > best["objective"]:
                     best = evaluated[0]
                 history.append(
@@ -81,15 +118,22 @@ class StrategyEvolution:
                 )
                 population = self._next_generation(evaluated, population_size)
 
+            finished_at = datetime.now().isoformat(timespec="seconds")
+            model_source = list(last_evaluated)
+            if best and not any(item.get("params") == best.get("params") for item in model_source):
+                model_source.append(best)
+                model_source.sort(key=lambda item: item["objective"], reverse=True)
+            models = self._build_models(model_source, finished_at)
+
             applied = False
-            if apply_best and best:
-                quant_engine.update_strategy_params(best["params"])
+            if apply_best and models:
+                quant_engine.update_strategy_params(models[0]["params"])
                 applied = True
 
             result = {
                 "status": "ok",
                 "started_at": started_at,
-                "finished_at": datetime.now().isoformat(timespec="seconds"),
+                "finished_at": finished_at,
                 "duration_ms": round((time.time() - started_ts) * 1000, 2),
                 "generations": generations,
                 "population_size": population_size,
@@ -97,6 +141,8 @@ class StrategyEvolution:
                 "end_date": end_date,
                 "applied": applied,
                 "best": best,
+                "best_model": models[0] if models else {},
+                "models": models,
                 "history": history,
             }
             write_json(self.state_file, result)
@@ -123,6 +169,29 @@ class StrategyEvolution:
             population.append(self._mutate(child, scale=0.18))
         return population[:population_size]
 
+    def _build_models(self, evaluated: List[Dict[str, Any]], finished_at: str) -> List[Dict[str, Any]]:
+        stamp = "".join(ch for ch in finished_at if ch.isdigit())[:14]
+        models = []
+        for rank, item in enumerate(evaluated[:20], start=1):
+            params = quant_engine.strategy_params(item.get("params", {}))
+            models.append(
+                {
+                    "id": f"evo-{stamp}-{rank:02d}",
+                    "name": f"进化策略 #{rank}",
+                    "source": "genetic_evolution",
+                    "reusable": True,
+                    "generated_at": finished_at,
+                    "rank": rank,
+                    "objective": item.get("objective", 0),
+                    "return_pct": item.get("return_pct", 0),
+                    "max_drawdown_pct": item.get("max_drawdown_pct", 0),
+                    "win_rate": item.get("win_rate", 0),
+                    "closed_trades": item.get("closed_trades", 0),
+                    "params": params,
+                }
+            )
+        return models
+
     def _mutate(self, params: Dict[str, Any], scale: float) -> Dict[str, float]:
         mutated = dict(params)
         for key, bounds in GENES.items():
@@ -138,7 +207,6 @@ class StrategyEvolution:
             result = quant_engine.walk_forward(
                 start_date=start_date,
                 end_date=end_date,
-                initial_cash=1_000_000.0,
                 max_positions=int(params["max_positions"]),
                 hold_days=int(params["max_hold_days"]),
                 top_n=int(params["top_n"]),

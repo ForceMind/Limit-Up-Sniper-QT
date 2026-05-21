@@ -45,7 +45,8 @@ DEFAULT_STRATEGY_PARAMS = {
     "max_positions": 5.0,
     "top_n": 5.0,
     "paper_max_hold_days": 6.0,
-    "paper_position_value": 180000.0,
+    "account_initial_cash": 200000.0,
+    "paper_position_value": 30000.0,
     "sentiment_coef": 32.0,
     "ai_score_coef": 5.0,
     "event_impact_weight": 0.62,
@@ -884,13 +885,14 @@ class QuantEngine:
         payload = read_json(STATE_FILE, {})
         if not isinstance(payload, dict):
             payload = {}
-        payload.setdefault("cash", 1_000_000.0)
         payload.setdefault("positions", [])
         payload.setdefault("trades", [])
         payload.setdefault(
             "model_weights",
             {"sentiment": 0.35, "event": 0.25, "technical": 0.25, "risk": 0.15},
         )
+        raw_strategy_params = payload.get("strategy_params") if isinstance(payload.get("strategy_params"), dict) else {}
+        has_configured_initial_cash = "account_initial_cash" in raw_strategy_params
         if "strategy_params" not in payload:
             weights = payload.get("model_weights") if isinstance(payload.get("model_weights"), dict) else {}
             payload["strategy_params"] = {
@@ -900,6 +902,28 @@ class QuantEngine:
                 "technical_weight": safe_float(weights.get("technical"), DEFAULT_STRATEGY_PARAMS["technical_weight"]),
                 "risk_weight": safe_float(weights.get("risk"), DEFAULT_STRATEGY_PARAMS["risk_weight"]),
             }
+        payload["strategy_params"] = self._normalize_strategy_params(payload.get("strategy_params"))
+        default_cash = payload["strategy_params"]["account_initial_cash"]
+        positions = payload.get("positions") if isinstance(payload.get("positions"), list) else []
+        trades = payload.get("trades") if isinstance(payload.get("trades"), list) else []
+        legacy_initial_cash = 1_000_000.0
+        stored_initial_cash = safe_float(payload.get("initial_cash"), 0)
+        stored_cash = safe_float(payload.get("cash"), 0)
+        if (
+            not has_configured_initial_cash
+            and not positions
+            and not trades
+            and (stored_initial_cash <= 0 or abs(stored_initial_cash - legacy_initial_cash) < 0.01)
+            and (stored_cash <= 0 or abs(stored_cash - legacy_initial_cash) < 0.01)
+        ):
+            payload["initial_cash"] = default_cash
+            payload["cash"] = default_cash
+            return payload
+        initial_cash = safe_float(payload.get("initial_cash"), default_cash)
+        if initial_cash <= 0:
+            initial_cash = default_cash
+        payload["initial_cash"] = initial_cash
+        payload.setdefault("cash", initial_cash)
         return payload
 
     def _save_state(self, state: Dict[str, Any]) -> None:
@@ -927,7 +951,8 @@ class QuantEngine:
         params["paper_max_hold_days"] = max(1.0, min(60.0, params["paper_max_hold_days"]))
         params["max_positions"] = max(1.0, min(20.0, params["max_positions"]))
         params["top_n"] = max(1.0, min(50.0, params["top_n"]))
-        params["paper_position_value"] = max(10000.0, min(2_000_000.0, params["paper_position_value"]))
+        params["account_initial_cash"] = max(10000.0, min(10_000_000.0, params["account_initial_cash"]))
+        params["paper_position_value"] = max(5000.0, min(2_000_000.0, params["paper_position_value"]))
         params["sentiment_coef"] = clamp(params["sentiment_coef"], 0, 80)
         params["ai_score_coef"] = clamp(params["ai_score_coef"], 0, 20)
         params["event_impact_weight"] = clamp(params["event_impact_weight"], 0, 1)
@@ -974,9 +999,15 @@ class QuantEngine:
                 self._thread_local.strategy_params_override = old
 
     def update_strategy_params(self, updates: Dict[str, Any]) -> Dict[str, Any]:
-        params = self.strategy_params(updates)
         state = self._load_state()
+        old_initial_cash = safe_float(state.get("initial_cash"), DEFAULT_STRATEGY_PARAMS["account_initial_cash"])
+        old_cash = safe_float(state.get("cash"), old_initial_cash)
+        params = self.strategy_params(updates)
         state["strategy_params"] = params
+        if isinstance(updates, dict) and "account_initial_cash" in updates:
+            new_initial_cash = params["account_initial_cash"]
+            state["initial_cash"] = new_initial_cash
+            state["cash"] = round(max(0.0, old_cash + new_initial_cash - old_initial_cash), 2)
         state["model_weights"] = {
             "sentiment": params["sentiment_weight"],
             "event": params["event_weight"],
@@ -989,8 +1020,12 @@ class QuantEngine:
 
     def reset_strategy_params(self) -> Dict[str, Any]:
         state = self._load_state()
+        old_initial_cash = safe_float(state.get("initial_cash"), DEFAULT_STRATEGY_PARAMS["account_initial_cash"])
+        old_cash = safe_float(state.get("cash"), old_initial_cash)
         params = self._normalize_strategy_params(DEFAULT_STRATEGY_PARAMS)
         state["strategy_params"] = params
+        state["initial_cash"] = params["account_initial_cash"]
+        state["cash"] = round(max(0.0, old_cash + params["account_initial_cash"] - old_initial_cash), 2)
         state["model_weights"] = {
             "sentiment": params["sentiment_weight"],
             "event": params["event_weight"],
@@ -1231,12 +1266,13 @@ class QuantEngine:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        initial_cash: float = 1_000_000.0,
+        initial_cash: Optional[float] = None,
         max_positions: Optional[int] = None,
         hold_days: Optional[int] = None,
         top_n: Optional[int] = None,
     ) -> Dict[str, Any]:
         params = self.strategy_params()
+        initial_cash = max(1.0, safe_float(initial_cash, params["account_initial_cash"]))
         max_positions = int(max_positions or params["max_positions"])
         hold_days = int(hold_days or params["max_hold_days"])
         top_n = int(top_n or params["top_n"])
@@ -1672,13 +1708,14 @@ class QuantEngine:
         self,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        initial_cash: float = 1_000_000.0,
+        initial_cash: Optional[float] = None,
         max_positions: Optional[int] = None,
         hold_days: Optional[int] = None,
         top_n: Optional[int] = None,
         use_daily_fallback: bool = True,
     ) -> Dict[str, Any]:
         params = self.strategy_params()
+        initial_cash = max(1.0, safe_float(initial_cash, params["account_initial_cash"]))
         max_positions = int(max_positions or params["max_positions"])
         hold_days = int(hold_days or params["max_hold_days"])
         top_n = int(top_n or params["top_n"])
@@ -2215,7 +2252,8 @@ class QuantEngine:
         as_of = as_of or self.latest_event_date()
         state = self._load_state()
         positions = state.get("positions") if isinstance(state.get("positions"), list) else []
-        cash = safe_float(state.get("cash"), 1_000_000.0)
+        params = self.strategy_params()
+        cash = safe_float(state.get("cash"), params["account_initial_cash"])
         updated_positions = []
         total_value = cash
         for pos in positions:
@@ -2293,7 +2331,8 @@ class QuantEngine:
         daily_settlement: Dict[str, Dict[str, float]] = {}
         total_fees = 0.0
         realized_pnl = 0.0
-        initial_asset = safe_float(state.get("initial_cash"), 1_000_000.0)
+        params = self.strategy_params()
+        initial_asset = safe_float(state.get("initial_cash"), params["account_initial_cash"])
         adjusted_cash = initial_asset
 
         for index, trade in enumerate(visible_trades, start=1):
@@ -2487,7 +2526,7 @@ class QuantEngine:
                 }
             )
 
-        state_cash = safe_float(state.get("cash"), 1_000_000.0)
+        state_cash = safe_float(state.get("cash"), initial_asset)
         total_asset = adjusted_cash + market_value
         total_pnl = total_asset - initial_asset
         settlement_rows = []
@@ -2544,7 +2583,8 @@ class QuantEngine:
         state = self._load_state()
         recommendations = self.recommendations(as_of=as_of, lookback_days=2, top_n=20)
         by_code = {item["code"]: item for item in recommendations.get("items", [])}
-        cash = safe_float(state.get("cash"), 1_000_000.0)
+        state.setdefault("initial_cash", params["account_initial_cash"])
+        cash = safe_float(state.get("cash"), params["account_initial_cash"])
         positions = state.get("positions") if isinstance(state.get("positions"), list) else []
         trades = state.get("trades") if isinstance(state.get("trades"), list) else []
         next_positions = []
@@ -2705,33 +2745,28 @@ class QuantEngine:
         ]
 
         results = []
-        old_override = self._strategy_params_override
-        try:
-            for item in candidates:
-                self._strategy_params_override = item["params"]
+        for item in candidates:
+            with self.temporary_strategy_params(item["params"]):
                 timeline = self.walk_forward(
                     start_date=start_date,
                     end_date=end_date,
-                    initial_cash=1_000_000.0,
                 )
-                return_pct = safe_float(timeline.get("return_pct"), 0)
-                drawdown = abs(safe_float(timeline.get("max_drawdown_pct"), 0))
-                win_rate = safe_float(timeline.get("win_rate"), 0)
-                closed_trades = safe_float(timeline.get("closed_trades"), 0)
-                objective = return_pct - drawdown * 0.35 + win_rate * 0.02 + min(closed_trades, 30) * 0.015
-                results.append(
-                    {
-                        "name": item["name"],
-                        "objective": round(objective, 4),
-                        "return_pct": round(return_pct, 3),
-                        "max_drawdown_pct": round(safe_float(timeline.get("max_drawdown_pct"), 0), 3),
-                        "win_rate": round(win_rate, 2),
-                        "closed_trades": int(closed_trades),
-                        "params": item["params"],
-                    }
-                )
-        finally:
-            self._strategy_params_override = old_override
+            return_pct = safe_float(timeline.get("return_pct"), 0)
+            drawdown = abs(safe_float(timeline.get("max_drawdown_pct"), 0))
+            win_rate = safe_float(timeline.get("win_rate"), 0)
+            closed_trades = safe_float(timeline.get("closed_trades"), 0)
+            objective = return_pct - drawdown * 0.35 + win_rate * 0.02 + min(closed_trades, 30) * 0.015
+            results.append(
+                {
+                    "name": item["name"],
+                    "objective": round(objective, 4),
+                    "return_pct": round(return_pct, 3),
+                    "max_drawdown_pct": round(safe_float(timeline.get("max_drawdown_pct"), 0), 3),
+                    "win_rate": round(win_rate, 2),
+                    "closed_trades": int(closed_trades),
+                    "params": item["params"],
+                }
+            )
 
         results.sort(key=lambda item: item["objective"], reverse=True)
         best = results[0] if results else {"params": base}
