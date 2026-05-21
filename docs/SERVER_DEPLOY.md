@@ -187,26 +187,25 @@ http://服务器IP:8000/
 http://服务器IP:8000/admin
 ```
 
+首次打开后台会进入初始化页，需要创建两个账号：后台管理员账号和前台交易终端账号。后台账号用于配置密钥、触发任务和运维操作；前台账号只用于查看交易终端。账号哈希保存在 `backend/data/auth.json`，运行配置保存在 `backend/data/config.json`，二者都属于服务器本地文件，不要提交到 Git。
+
 ## 健康检查
 
 ```bash
-curl http://127.0.0.1:8000/api/status
-curl http://127.0.0.1:8000/api/jobs/status
-curl http://127.0.0.1:8000/api/data/biying/status
-curl http://127.0.0.1:8000/api/data/coverage
-curl http://127.0.0.1:8000/api/ai/usage
-curl http://127.0.0.1:8000/api/notifications/status
-curl http://127.0.0.1:8000/api/quant/evolution/status
+curl http://127.0.0.1:8000/api/auth/status
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" http://127.0.0.1:8000/api/status
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" http://127.0.0.1:8000/api/jobs/status
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" http://127.0.0.1:8000/api/config/status
 ```
 
 手动触发任务：
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/jobs/news/fetch?hours=12&pages=5&page_size=20"
-curl -X POST "http://127.0.0.1:8000/api/jobs/ai/analyze?max_items=8&batch_size=4"
-curl -X POST "http://127.0.0.1:8000/api/jobs/market/sync?source=auto&max_codes=80&include_latest=true"
-curl -X POST "http://127.0.0.1:8000/api/jobs/trading/run?notify=true"
-curl -X POST "http://127.0.0.1:8000/api/quant/evolve_strategy?generations=4&population_size=16&apply_best=false"
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/api/jobs/news/fetch?hours=12&pages=5&page_size=20"
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/api/jobs/ai/analyze?max_items=8&batch_size=4"
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/api/jobs/market/sync?source=auto&max_codes=80&include_latest=true"
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/api/jobs/trading/run?notify=true"
+curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/api/quant/evolve_strategy?generations=4&population_size=16&apply_best=false"
 ```
 
 ## 自动任务

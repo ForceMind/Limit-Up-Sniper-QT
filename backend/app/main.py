@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import BackgroundTasks, Body, FastAPI, Query
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,6 +23,16 @@ from app.quant.jobs import job_manager
 from app.quant.monitoring import ai_failures, ai_records_feed, ai_usage_summary, data_coverage
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
+from app.quant.security import (
+    auth_status,
+    login,
+    require_request_scope,
+    required_scope_for_api,
+    runtime_config_form,
+    runtime_config_status,
+    setup_auth,
+    update_runtime_config,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -85,6 +95,17 @@ if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    required_scope = required_scope_for_api(request.url.path, request.method)
+    if required_scope:
+        try:
+            require_request_scope(request, required_scope)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
+
+
 @app.on_event("startup")
 async def startup_jobs():
     if _env_flag("QUANT_SCHEDULER_ENABLED", default=True):
@@ -96,6 +117,38 @@ async def startup_jobs():
 @app.on_event("shutdown")
 async def shutdown_jobs():
     await job_manager.stop()
+
+
+@app.get("/api/auth/status")
+def api_auth_status():
+    return auth_status()
+
+
+@app.post("/api/auth/setup")
+def api_auth_setup(payload: Dict[str, Any] = Body(default_factory=dict)):
+    return setup_auth(payload)
+
+
+@app.post("/api/auth/login")
+def api_auth_login(payload: Dict[str, Any] = Body(default_factory=dict)):
+    return login(payload)
+
+
+@app.get("/api/config/status")
+def api_config_status():
+    return runtime_config_status()
+
+
+@app.get("/api/config/runtime")
+def api_config_runtime():
+    return runtime_config_form()
+
+
+@app.post("/api/config/runtime")
+def api_update_config_runtime(payload: Dict[str, Any] = Body(default_factory=dict)):
+    result = update_runtime_config(payload)
+    job_manager._append_log("warning", "runtime config updated", job="admin_config", stage="saved")
+    return result
 
 
 @app.get("/api/status")

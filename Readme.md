@@ -103,6 +103,9 @@ cp .env.example .env
 - `EMAIL_ENABLED`：是否启用邮件通知
 - `SMTP_SERVER`、`SMTP_USER`、`SMTP_PASSWORD`、`EMAIL_TO`：邮件配置
 - `NEWS_FETCH_INTERVAL_SECONDS`、`AI_ANALYSIS_INTERVAL_SECONDS`、`MARKET_SYNC_INTERVAL_SECONDS`：自动任务间隔
+- `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
+
+首次部署后先访问 `/admin`，后台会要求初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
 ## 数据与 Git 规则
 

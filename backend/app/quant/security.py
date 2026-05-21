@@ -1,0 +1,427 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import secrets
+import time
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from fastapi import HTTPException, Request
+
+from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, read_json, safe_float, write_json
+
+
+AUTH_FILE = DATA_DIR / "auth.json"
+CONFIG_FILE = DATA_DIR / "config.json"
+PBKDF2_ITERATIONS = 200_000
+TOKEN_TTL_SECONDS = int(safe_float(os.getenv("QT_AUTH_TOKEN_TTL_SECONDS"), 12 * 60 * 60))
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _load_auth() -> Dict[str, Any]:
+    payload = read_json(AUTH_FILE, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_auth(payload: Dict[str, Any]) -> None:
+    write_json(AUTH_FILE, payload)
+
+
+def _hash_password(password: str) -> Dict[str, Any]:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return {
+        "algorithm": "pbkdf2_sha256",
+        "iterations": PBKDF2_ITERATIONS,
+        "salt": salt,
+        "hash": digest,
+    }
+
+
+def _verify_password(password: str, record: Dict[str, Any]) -> bool:
+    try:
+        iterations = int(record.get("iterations") or PBKDF2_ITERATIONS)
+        salt = str(record.get("salt") or "")
+        expected = str(record.get("hash") or "")
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password).encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return bool(expected) and hmac.compare_digest(digest, expected)
+    except Exception:
+        return False
+
+
+def _b64_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64_decode(text: str) -> bytes:
+    padded = text + ("=" * (-len(text) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _token_secret(auth: Optional[Dict[str, Any]] = None) -> str:
+    payload = auth if auth is not None else _load_auth()
+    secret = str(payload.get("token_secret") or "").strip()
+    if secret:
+        return secret
+    secret = secrets.token_urlsafe(32)
+    payload["token_secret"] = secret
+    payload.setdefault("updated_at", _now_iso())
+    _save_auth(payload)
+    return secret
+
+
+def _scope_satisfies(actual: str, required: str) -> bool:
+    return actual == required or (actual == "admin" and required == "frontend")
+
+
+def create_token(scope: str, username: str) -> str:
+    auth = _load_auth()
+    body = {
+        "scope": str(scope),
+        "sub": str(username),
+        "exp": int(time.time()) + max(TOKEN_TTL_SECONDS, 600),
+    }
+    body_b64 = _b64_encode(
+        __import__("json").dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    signature = hmac.new(_token_secret(auth).encode("utf-8"), body_b64.encode("ascii"), hashlib.sha256).digest()
+    return f"{body_b64}.{_b64_encode(signature)}"
+
+
+def verify_token(token: str, required_scope: str) -> Dict[str, Any]:
+    token = str(token or "").strip()
+    if "." not in token:
+        raise HTTPException(status_code=401, detail="missing or invalid token")
+    body_b64, signature_b64 = token.split(".", 1)
+    auth = _load_auth()
+    expected = hmac.new(_token_secret(auth).encode("utf-8"), body_b64.encode("ascii"), hashlib.sha256).digest()
+    try:
+        actual = _b64_decode(signature_b64)
+        payload = __import__("json").loads(_b64_decode(body_b64).decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="missing or invalid token") from exc
+    if not hmac.compare_digest(actual, expected):
+        raise HTTPException(status_code=401, detail="missing or invalid token")
+    if int(payload.get("exp") or 0) < int(time.time()):
+        raise HTTPException(status_code=401, detail="token expired")
+    scope = str(payload.get("scope") or "")
+    if not _scope_satisfies(scope, required_scope):
+        raise HTTPException(status_code=403, detail="insufficient permission")
+    return payload
+
+
+def auth_status() -> Dict[str, Any]:
+    payload = _load_auth()
+    users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
+    admin = users.get("admin") if isinstance(users.get("admin"), dict) else {}
+    frontend = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
+    admin_configured = bool(admin.get("username") and admin.get("password"))
+    frontend_configured = bool(frontend.get("username") and frontend.get("password"))
+    return {
+        "status": "ok",
+        "setup_required": not (admin_configured and frontend_configured),
+        "admin_configured": admin_configured,
+        "frontend_configured": frontend_configured,
+        "admin_username": str(admin.get("username") or ""),
+        "frontend_username": str(frontend.get("username") or ""),
+        "token_ttl_seconds": max(TOKEN_TTL_SECONDS, 600),
+    }
+
+
+def _clean_username(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _clean_password(value: Any) -> str:
+    return str(value or "")
+
+
+def setup_auth(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not auth_status()["setup_required"]:
+        raise HTTPException(status_code=409, detail="auth is already configured")
+    admin_username = _clean_username(payload.get("admin_username") or payload.get("username") or "admin")
+    admin_password = _clean_password(payload.get("admin_password") or payload.get("password"))
+    frontend_username = _clean_username(payload.get("frontend_username") or "trader")
+    frontend_password = _clean_password(payload.get("frontend_password"))
+    if len(admin_username) < 3 or len(frontend_username) < 3:
+        raise HTTPException(status_code=400, detail="username must be at least 3 characters")
+    if len(admin_password) < 8 or len(frontend_password) < 8:
+        raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+    auth = {
+        "version": 1,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "token_secret": secrets.token_urlsafe(32),
+        "users": {
+            "admin": {"username": admin_username, "password": _hash_password(admin_password)},
+            "frontend": {"username": frontend_username, "password": _hash_password(frontend_password)},
+        },
+    }
+    _save_auth(auth)
+    return {
+        "status": "ok",
+        "setup_required": False,
+        "admin_username": admin_username,
+        "frontend_username": frontend_username,
+        "token": create_token("admin", admin_username),
+        "scope": "admin",
+    }
+
+
+def login(payload: Dict[str, Any]) -> Dict[str, Any]:
+    scope = str(payload.get("scope") or "frontend").strip().lower()
+    if scope not in {"admin", "frontend"}:
+        raise HTTPException(status_code=400, detail="invalid login scope")
+    status = auth_status()
+    if status["setup_required"]:
+        raise HTTPException(status_code=401, detail="setup required")
+    username = _clean_username(payload.get("username"))
+    password = _clean_password(payload.get("password"))
+    auth = _load_auth()
+    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
+    record = users.get(scope) if isinstance(users.get(scope), dict) else {}
+    if username != str(record.get("username") or "") or not _verify_password(password, record.get("password") or {}):
+        raise HTTPException(status_code=401, detail="username or password is incorrect")
+    return {
+        "status": "ok",
+        "scope": scope,
+        "username": username,
+        "token": create_token(scope, username),
+        "token_ttl_seconds": max(TOKEN_TTL_SECONDS, 600),
+    }
+
+
+def require_request_scope(request: Request, required_scope: str) -> Dict[str, Any]:
+    if auth_status()["setup_required"]:
+        raise HTTPException(status_code=401, detail="setup required")
+    authorization = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    token = ""
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    token = token or str(request.headers.get("x-qt-token") or "").strip()
+    return verify_token(token, required_scope)
+
+
+def required_scope_for_api(path: str, method: str) -> Optional[str]:
+    if str(method).upper() == "OPTIONS":
+        return None
+    if path.startswith("/api/auth/"):
+        return None
+    if not path.startswith("/api/"):
+        return None
+    if path.startswith(("/api/admin", "/api/config", "/api/ai", "/api/notifications")):
+        return "admin"
+    if path.startswith("/api/quant/evolution"):
+        return "admin"
+    if str(method).upper() != "GET":
+        return "admin"
+    return "frontend"
+
+
+def _read_config() -> Dict[str, Any]:
+    payload = read_json(CONFIG_FILE, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_config(payload: Dict[str, Any]) -> None:
+    write_json(CONFIG_FILE, payload)
+
+
+def _first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _mask_secret(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "*" * len(text)
+    return f"{text[:3]}***{text[-4:]}"
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _source(env_value: Optional[str], config_value: Any) -> str:
+    if env_value is not None and str(env_value).strip():
+        return "env"
+    if str(config_value or "").strip():
+        return "config"
+    return ""
+
+
+def runtime_config_status() -> Dict[str, Any]:
+    cfg = _read_config()
+    api_keys = cfg.get("api_keys") if isinstance(cfg.get("api_keys"), dict) else {}
+    ai_cfg = cfg.get("ai_cost_config") if isinstance(cfg.get("ai_cost_config"), dict) else {}
+    default_ai = ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {}
+    data_cfg = cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {}
+    email_cfg = cfg.get("email_config") if isinstance(cfg.get("email_config"), dict) else {}
+
+    deepseek_env = _first_env("DEEPSEEK_API_KEY")
+    deepseek_key = deepseek_env or str(api_keys.get("deepseek") or "").strip()
+    model_env = _first_env("DEEPSEEK_MODEL")
+    model = model_env or str(default_ai.get("model") or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL
+
+    biying_key_env = _first_env("BIYING_LICENSE_KEY")
+    biying_key = biying_key_env or str(data_cfg.get("biying_license_key") or "").strip()
+    biying_endpoint_env = _first_env("BIYING_ENDPOINT")
+    biying_endpoint = biying_endpoint_env or str(data_cfg.get("biying_endpoint") or "https://api.biyingapi.com").strip()
+    biying_enabled_env = os.getenv("BIYING_ENABLED")
+    biying_enabled = _env_bool("BIYING_ENABLED", bool(data_cfg.get("biying_enabled")) or bool(biying_key))
+
+    smtp_server_env = _first_env("SMTP_SERVER", "EMAIL_SMTP_SERVER")
+    smtp_user_env = _first_env("SMTP_USER", "EMAIL_SMTP_USER")
+    smtp_password_env = _first_env("SMTP_PASSWORD", "EMAIL_SMTP_PASSWORD")
+    email_to_env = _first_env("EMAIL_TO", "RECIPIENT_EMAIL")
+    smtp_server = smtp_server_env or str(email_cfg.get("smtp_server") or "").strip()
+    smtp_user = smtp_user_env or str(email_cfg.get("smtp_user") or "").strip()
+    smtp_password = smtp_password_env or str(email_cfg.get("smtp_password") or "").strip()
+    email_to = email_to_env or str(email_cfg.get("recipient_email") or "").strip()
+    email_enabled = _env_bool("EMAIL_ENABLED", bool(email_cfg.get("enabled")))
+
+    return {
+        "status": "ok",
+        "config_exists": CONFIG_FILE.exists(),
+        "config_file": str(CONFIG_FILE),
+        "auth": auth_status(),
+        "deepseek": {
+            "configured": bool(deepseek_key),
+            "api_key_masked": _mask_secret(deepseek_key),
+            "api_key_source": _source(deepseek_env, api_keys.get("deepseek")),
+            "model": model,
+            "model_source": _source(model_env, default_ai.get("model")) or "default",
+        },
+        "biying": {
+            "enabled": bool(biying_enabled and biying_key),
+            "configured": bool(biying_key),
+            "license_key_masked": _mask_secret(biying_key),
+            "license_key_source": _source(biying_key_env, data_cfg.get("biying_license_key")),
+            "endpoint": biying_endpoint,
+            "endpoint_source": _source(biying_endpoint_env, data_cfg.get("biying_endpoint")) or "default",
+            "minute_limit": int(safe_float(_first_env("BIYING_MINUTE_LIMIT") or data_cfg.get("biying_minute_limit"), 3000)),
+            "enabled_source": "env" if biying_enabled_env is not None else ("config" if "biying_enabled" in data_cfg else ""),
+        },
+        "email": {
+            "enabled": bool(email_enabled and smtp_server and smtp_user and smtp_password and email_to),
+            "configured": bool(smtp_server and smtp_user and smtp_password and email_to),
+            "smtp_server": smtp_server,
+            "smtp_user": smtp_user,
+            "recipient_email": email_to,
+            "smtp_password_masked": _mask_secret(smtp_password),
+            "smtp_password_source": _source(smtp_password_env, email_cfg.get("smtp_password")),
+            "enabled_source": "env" if os.getenv("EMAIL_ENABLED") is not None else ("config" if "enabled" in email_cfg else ""),
+        },
+    }
+
+
+def runtime_config_form() -> Dict[str, Any]:
+    cfg = _read_config()
+    email_cfg = cfg.get("email_config") if isinstance(cfg.get("email_config"), dict) else {}
+    api_keys = cfg.get("api_keys") if isinstance(cfg.get("api_keys"), dict) else {}
+    ai_cfg = cfg.get("ai_cost_config") if isinstance(cfg.get("ai_cost_config"), dict) else {}
+    default_ai = ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {}
+    data_cfg = cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {}
+    return {
+        "status": "ok",
+        "form": {
+            "deepseek_api_key": "",
+            "deepseek_model": _first_env("DEEPSEEK_MODEL") or str(default_ai.get("model") or DEFAULT_AI_MODEL),
+            "biying_enabled": _env_bool("BIYING_ENABLED", bool(data_cfg.get("biying_enabled"))),
+            "biying_license_key": "",
+            "biying_endpoint": _first_env("BIYING_ENDPOINT") or str(data_cfg.get("biying_endpoint") or "https://api.biyingapi.com"),
+            "biying_minute_limit": int(safe_float(_first_env("BIYING_MINUTE_LIMIT") or data_cfg.get("biying_minute_limit"), 3000)),
+            "email_enabled": _env_bool("EMAIL_ENABLED", bool(email_cfg.get("enabled"))),
+            "smtp_server": _first_env("SMTP_SERVER", "EMAIL_SMTP_SERVER") or str(email_cfg.get("smtp_server") or ""),
+            "smtp_port": int(safe_float(_first_env("SMTP_PORT", "EMAIL_SMTP_PORT") or email_cfg.get("smtp_port"), 465)),
+            "smtp_user": _first_env("SMTP_USER", "EMAIL_SMTP_USER") or str(email_cfg.get("smtp_user") or ""),
+            "smtp_password": "",
+            "email_to": _first_env("EMAIL_TO", "RECIPIENT_EMAIL") or str(email_cfg.get("recipient_email") or ""),
+            "smtp_use_ssl": _env_bool("SMTP_USE_SSL", bool(email_cfg.get("smtp_use_ssl", True))),
+        },
+        "secrets": {
+            "deepseek_api_key": bool(_first_env("DEEPSEEK_API_KEY") or api_keys.get("deepseek")),
+            "biying_license_key": bool(_first_env("BIYING_LICENSE_KEY") or data_cfg.get("biying_license_key")),
+            "smtp_password": bool(_first_env("SMTP_PASSWORD", "EMAIL_SMTP_PASSWORD") or email_cfg.get("smtp_password")),
+        },
+        "sources": runtime_config_status(),
+    }
+
+
+def update_runtime_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = _read_config()
+    email_cfg = dict(cfg.get("email_config") if isinstance(cfg.get("email_config"), dict) else {})
+    api_keys = dict(cfg.get("api_keys") if isinstance(cfg.get("api_keys"), dict) else {})
+    ai_cfg = dict(cfg.get("ai_cost_config") if isinstance(cfg.get("ai_cost_config"), dict) else {})
+    default_ai = dict(ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {})
+    data_cfg = dict(cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {})
+
+    if str(payload.get("deepseek_api_key") or "").strip():
+        api_keys["deepseek"] = str(payload.get("deepseek_api_key") or "").strip()
+    if "deepseek_model" in payload:
+        default_ai["provider"] = "deepseek"
+        default_ai["model"] = str(payload.get("deepseek_model") or DEFAULT_AI_MODEL).strip() or DEFAULT_AI_MODEL
+
+    if "biying_enabled" in payload:
+        data_cfg["biying_enabled"] = _bool_value(payload.get("biying_enabled"))
+    if str(payload.get("biying_license_key") or "").strip():
+        data_cfg["biying_license_key"] = str(payload.get("biying_license_key") or "").strip()
+    if "biying_endpoint" in payload:
+        data_cfg["biying_endpoint"] = str(payload.get("biying_endpoint") or "https://api.biyingapi.com").strip() or "https://api.biyingapi.com"
+    if "biying_minute_limit" in payload:
+        data_cfg["biying_minute_limit"] = max(1, int(safe_float(payload.get("biying_minute_limit"), 3000)))
+
+    if "email_enabled" in payload:
+        email_cfg["enabled"] = _bool_value(payload.get("email_enabled"))
+    if "smtp_server" in payload:
+        email_cfg["smtp_server"] = str(payload.get("smtp_server") or "").strip()
+    if "smtp_port" in payload:
+        email_cfg["smtp_port"] = max(1, int(safe_float(payload.get("smtp_port"), 465)))
+    if "smtp_user" in payload:
+        email_cfg["smtp_user"] = str(payload.get("smtp_user") or "").strip()
+    if str(payload.get("smtp_password") or "").strip():
+        email_cfg["smtp_password"] = str(payload.get("smtp_password") or "").strip()
+    if "email_to" in payload:
+        email_cfg["recipient_email"] = str(payload.get("email_to") or "").strip()
+    if "smtp_use_ssl" in payload:
+        email_cfg["smtp_use_ssl"] = _bool_value(payload.get("smtp_use_ssl"))
+
+    ai_cfg["default"] = default_ai
+    cfg["api_keys"] = api_keys
+    cfg["ai_cost_config"] = ai_cfg
+    cfg["data_provider_config"] = data_cfg
+    cfg["email_config"] = email_cfg
+    cfg["updated_at"] = _now_iso()
+    _save_config(cfg)
+    return runtime_config_form()

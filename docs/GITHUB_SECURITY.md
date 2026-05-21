@@ -29,6 +29,7 @@ backend/data/kline_cache/600002_2026-05-19.csv
 .env
 .env.*
 backend/data/config.json
+backend/data/auth.json
 backend/data/admin_credentials.json
 backend/data/ws_token_secret.txt
 backend/data/*.jsonl

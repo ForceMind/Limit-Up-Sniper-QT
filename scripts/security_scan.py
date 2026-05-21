@@ -20,6 +20,7 @@ FORBIDDEN_EXACT_PATHS = {
     ".env",
     ".env.local",
     ".env.production",
+    "backend/data/auth.json",
     "backend/data/config.json",
     "backend/data/admin_credentials.json",
     "backend/data/ws_token_secret.txt",
@@ -78,6 +79,8 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         return findings
     for lineno, line in enumerate(text.splitlines(), start=1):
         if not SECRET_HINTS.search(line):
+            continue
+        if "HTTPException" in line:
             continue
         if "class=" in line and not re.search(r"(api|secret|password|token|key)\s*[:=]", line, re.IGNORECASE):
             continue

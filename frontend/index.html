@@ -19,7 +19,6 @@
     .metric-card { min-height: 84px; }
     .terminal-panel { border: 1px solid #d4d4d8; background: #fff; }
     .mobile-only { display: none; }
-    .mobile-bottom-nav { display: none; }
     .compact-list { display: none; }
     .mobile-app { display: none; }
     .line-clamp-2 {
@@ -56,16 +55,13 @@
       .tab-strip { display: flex; overflow-x: auto; gap: 8px; padding-bottom: 4px; scrollbar-width: none; }
       .tab-strip::-webkit-scrollbar { display: none; }
       .tab-strip button { flex: 0 0 auto; white-space: nowrap; }
-      .mobile-bottom-nav { display: grid; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #151922; border-top: 1px solid #303846; }
-      .mobile-bottom-nav button, .mobile-bottom-nav a { min-height: 54px; color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; text-align: center; border-right: 1px solid #303846; }
-      .mobile-bottom-nav .active { background: #dc2626; }
       .mobile-only { display: block; }
       .mobile-app { display: flex; min-height: 100vh; flex-direction: column; background: #0d1119; color: #111827; }
-      .mobile-status { height: 28px; padding: 8px 20px 0; color: #e5e7eb; display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 600; }
-      .mobile-topbar { padding: 12px 18px 8px; color: #e5e7eb; display: flex; align-items: center; justify-content: space-between; }
+      .mobile-topbar { padding: 14px 18px 8px; color: #e5e7eb; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .mobile-kicker { color: #8fa0b7; font-size: 11px; line-height: 16px; font-weight: 700; }
       .mobile-date { color: #cbd5e1; font-weight: 700; letter-spacing: 0; }
       .market-pill { margin-left: 6px; font-size: 12px; color: #35b36b; }
-      .account-select { color: #cbd5e1; font-size: 13px; text-decoration: none; }
+      .account-select { min-height: 32px; padding: 0 10px; color: #cbd5e1; font-size: 13px; text-decoration: none; border: 1px solid #303846; display: inline-flex; align-items: center; }
       .mobile-red-card { margin: 6px 12px 0; padding: 16px 16px 14px; color: #fff; background: linear-gradient(155deg, #f51d2f 0%, #d71326 72%, #b90f1f 100%); border-radius: 10px; box-shadow: 0 12px 30px rgba(190, 15, 31, 0.3); }
       .mobile-red-card .label { color: rgba(255,255,255,0.72); font-size: 12px; }
       .mobile-red-card .big { font-size: 24px; line-height: 30px; font-weight: 800; letter-spacing: 0; }
@@ -114,7 +110,15 @@
       .news-meta { color: #7b8494; font-size: 11px; line-height: 17px; }
       .mobile-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 70; height: 64px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #101620; border-top: 1px solid #252d39; }
       .mobile-tabbar button { color: #c8d0dc; font-size: 11px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
-      .mobile-tabbar .nav-mark { width: 18px; height: 18px; border-radius: 5px; border: 1px solid currentColor; display: block; }
+      .mobile-tabbar .nav-icon { position: relative; width: 21px; height: 21px; display: block; }
+      .nav-overview::before { content: ""; position: absolute; left: 3px; top: 3px; width: 6px; height: 6px; background: currentColor; box-shadow: 9px 0 0 currentColor, 0 9px 0 currentColor, 9px 9px 0 currentColor; }
+      .nav-buy::before { content: ""; position: absolute; left: 6px; top: 4px; width: 9px; height: 9px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; transform: rotate(-45deg); }
+      .nav-buy::after { content: ""; position: absolute; left: 10px; top: 7px; width: 2px; height: 10px; background: currentColor; }
+      .nav-position::before { content: ""; position: absolute; left: 4px; top: 4px; width: 13px; height: 3px; background: currentColor; box-shadow: 0 6px 0 currentColor, 0 12px 0 currentColor; }
+      .nav-deals::before { content: ""; position: absolute; left: 4px; top: 3px; width: 13px; height: 15px; border: 2px solid currentColor; }
+      .nav-deals::after { content: ""; position: absolute; left: 7px; top: 8px; width: 7px; height: 2px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
+      .nav-news::before { content: ""; position: absolute; left: 5px; top: 3px; width: 12px; height: 15px; border: 2px solid currentColor; border-top-right-radius: 4px; }
+      .nav-news::after { content: ""; position: absolute; left: 8px; top: 8px; width: 6px; height: 2px; background: currentColor; box-shadow: 0 4px 0 currentColor; }
       .mobile-tabbar button.active { background: #dc1728; color: #fff; }
       .desktop-only { display: none !important; }
       .mobile-page:not(.active-mobile) { display: none !important; }
@@ -127,17 +131,38 @@
 </head>
 <body class="bg-[#eef1f5] text-neutral-900 min-h-screen">
   <div id="app" v-cloak class="min-h-screen">
+    <div v-if="authReady && !auth.token" class="min-h-screen flex items-center justify-center bg-[#eef1f5] p-4">
+      <form @submit.prevent="loginFrontend" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4">
+        <div>
+          <h1 class="text-xl font-semibold">前台登录</h1>
+          <p class="mt-1 text-sm text-neutral-500">请输入前台交易终端账号。首次使用请先进入后台完成初始化。</p>
+        </div>
+        <label class="block text-sm">
+          <span class="block text-xs text-neutral-500 mb-1">用户名</span>
+          <input v-model="auth.username" autocomplete="username" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+        </label>
+        <label class="block text-sm">
+          <span class="block text-xs text-neutral-500 mb-1">密码</span>
+          <input v-model="auth.password" type="password" autocomplete="current-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+        </label>
+        <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
+        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '登录中' : '登录前台' }}</button>
+        <a href="/admin" class="block text-center text-sm text-neutral-600 hover:text-neutral-900">去后台初始化或管理配置</a>
+      </form>
+    </div>
+    <div v-else-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登录状态...</div>
+    <template v-else>
     <div class="mobile-app">
-      <div class="mobile-status">
-        <span>{{ clockText || '18:06' }}</span>
-        <span>▮▮▮ 5G ▰</span>
-      </div>
       <div class="mobile-topbar">
         <div>
+          <div class="mobile-kicker">A股量化交易终端 · {{ clockText || '--:--' }}</div>
           <span class="mobile-date">{{ accountView.as_of || asOf || '-' }}</span>
           <span class="market-pill">{{ scheduler.market_open ? '交易中' : '休市' }}</span>
         </div>
-        <a href="/admin" class="account-select">模拟账户01⌄</a>
+        <div class="flex items-center gap-2">
+          <a href="/admin" class="account-select">后台管理</a>
+          <button @click="logout" class="account-select">退出</button>
+        </div>
       </div>
 
       <section class="mobile-red-card">
@@ -373,12 +398,12 @@
             <button class="mobile-link" @click="loadNews(true)">刷新</button>
           </div>
           <div class="mobile-segment">
-            <button class="active">高影响</button>
-            <button>利好</button>
-            <button>利空</button>
-            <button>已关联</button>
+            <button @click="newsFilter = 'impact'" :class="{ active: newsFilter === 'impact' }">高影响</button>
+            <button @click="newsFilter = 'positive'" :class="{ active: newsFilter === 'positive' }">利好</button>
+            <button @click="newsFilter = 'negative'" :class="{ active: newsFilter === 'negative' }">利空</button>
+            <button @click="newsFilter = 'linked'" :class="{ active: newsFilter === 'linked' }">已关联</button>
           </div>
-          <article v-for="event in mobileEventList" :key="'m-news-' + event.event_id" class="news-row">
+          <article v-for="event in filteredMobileEventList" :key="'m-news-' + event.event_id" class="news-row">
             <div class="row-main">
               <div class="news-meta">{{ shortTime(event.time || event.date) }}<br>{{ event.source || '事件' }}</div>
               <div>
@@ -397,16 +422,16 @@
               <div class="score-buy" :class="Number(event.sentiment || 0) < 0 ? 'text-green-700' : 'text-red-600'">{{ Number(event.sentiment || 0) < 0 ? '利空' : '利好' }}</div>
             </div>
           </article>
-          <div v-if="!mobileEventList.length" class="p-10 text-center text-neutral-500 text-sm">暂无结构化事件</div>
+          <div v-if="!filteredMobileEventList.length" class="p-10 text-center text-neutral-500 text-sm">当前筛选下暂无结构化事件</div>
         </section>
       </main>
 
       <nav class="mobile-tabbar">
-        <button @click="setMobileView('overview')" :class="{ active: mobileView === 'overview' }"><span class="nav-mark"></span>概览</button>
-        <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }"><span class="nav-mark"></span>买入</button>
-        <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }"><span class="nav-mark"></span>持仓</button>
-        <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }"><span class="nav-mark"></span>成交</button>
-        <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }"><span class="nav-mark"></span>新闻</button>
+        <button @click="setMobileView('overview')" :class="{ active: mobileView === 'overview' }"><span class="nav-icon nav-overview"></span>概览</button>
+        <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }"><span class="nav-icon nav-buy"></span>买入</button>
+        <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }"><span class="nav-icon nav-position"></span>持仓</button>
+        <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }"><span class="nav-icon nav-deals"></span>成交</button>
+        <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }"><span class="nav-icon nav-news"></span>新闻</button>
       </nav>
     </div>
 
@@ -422,9 +447,7 @@
           <button @click="loadAll" :disabled="loading" class="h-9 px-3 bg-red-600 text-white text-sm disabled:opacity-50">
             {{ loading ? '刷新中' : '刷新' }}
           </button>
-          <button @click="syncIntraday" :disabled="syncing" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm disabled:opacity-50">
-            {{ syncing ? '同步中' : '同步分时' }}
-          </button>
+          <button @click="logout" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">退出</button>
         </div>
       </div>
     </header>
@@ -935,13 +958,7 @@
       </section>
     </main>
 
-    <nav class="desktop-shell mobile-bottom-nav">
-      <button @click="setMobileView('overview')" :class="{ active: mobileView === 'overview' }">概览</button>
-      <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }">买入</button>
-      <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }">持仓</button>
-      <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }">成交</button>
-      <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }">新闻</button>
-    </nav>
+    </template>
   </div>
 
   <script>
@@ -953,10 +970,20 @@
           asOf: '',
           clockText: '',
           clockTimer: null,
+          authReady: false,
+          auth: {
+            token: localStorage.getItem('qt_front_token') || '',
+            username: '',
+            password: '',
+            loading: false,
+            error: '',
+            setupRequired: false,
+          },
           loading: false,
           syncing: false,
           activeTab: 'deals',
           mobileView: 'overview',
+          newsFilter: 'impact',
           plan: {},
           accountView: {},
           status: {},
@@ -1008,6 +1035,21 @@
             .sort((a, b) => Number(b.impact_score || 0) - Number(a.impact_score || 0))
             .slice(0, 12);
         },
+        filteredMobileEventList() {
+          const items = this.mobileEventList;
+          if (this.newsFilter === 'positive') {
+            return items.filter(event => Number(event.sentiment || 0) >= 0);
+          }
+          if (this.newsFilter === 'negative') {
+            return items.filter(event => Number(event.sentiment || 0) < 0);
+          }
+          if (this.newsFilter === 'linked') {
+            return items.filter(event => event.code || event.name);
+          }
+          return items.filter(event => Number(event.impact_score || 0) >= 70).length
+            ? items.filter(event => Number(event.impact_score || 0) >= 70)
+            : items;
+        },
         buyList() {
           const planned = this.plan.buy_list || [];
           const items = planned.length ? planned : ((this.recommendations.items || []).filter(item => String(item.action || '').includes('买入')));
@@ -1016,7 +1058,12 @@
         },
         historyDays() { return this.plan.history_days || []; },
         summary() { return this.plan.timeline_summary || {}; },
-        rules() { return this.plan.current_rules || this.recommendations.strategy_params || {}; },
+        rules() {
+          return {
+            ...(this.recommendations.strategy_params || {}),
+            ...(this.plan.current_rules || {}),
+          };
+        },
       },
       mounted() {
         this.updateClock();
@@ -1026,22 +1073,73 @@
         if (['overview', 'buy', 'positions', 'deals', 'news'].includes(initialView)) {
           this.mobileView = initialView;
         }
-        this.loadAll();
+        this.initAuth();
       },
       beforeUnmount() {
         if (this.clockTimer) window.clearInterval(this.clockTimer);
       },
       methods: {
         async api(url, options = {}) {
-          const res = await fetch(url, options);
-          if (!res.ok) throw new Error(await res.text());
+          const headers = new Headers(options.headers || {});
+          if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
+          const res = await fetch(url, { ...options, headers });
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              this.auth.token = '';
+              localStorage.removeItem('qt_front_token');
+            }
+            throw new Error(await res.text());
+          }
           return await res.json();
+        },
+        async initAuth() {
+          try {
+            const res = await fetch('/api/auth/status');
+            const status = await res.json();
+            this.auth.setupRequired = Boolean(status.setup_required);
+            if (!this.auth.token) return;
+            await this.loadAll();
+          } catch (err) {
+            this.auth.error = String(err.message || err);
+            this.auth.token = '';
+            localStorage.removeItem('qt_front_token');
+          } finally {
+            this.authReady = true;
+          }
+        },
+        async loginFrontend() {
+          this.auth.loading = true;
+          this.auth.error = '';
+          try {
+            const result = await this.api('/api/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                scope: 'frontend',
+                username: this.auth.username,
+                password: this.auth.password,
+              }),
+            });
+            this.auth.token = result.token || '';
+            localStorage.setItem('qt_front_token', this.auth.token);
+            this.auth.password = '';
+            await this.loadAll();
+          } catch (err) {
+            this.auth.error = this.auth.setupRequired ? '系统还没有初始化，请先进入后台设置账号。' : String(err.message || err);
+          } finally {
+            this.auth.loading = false;
+          }
+        },
+        logout() {
+          this.auth.token = '';
+          this.auth.password = '';
+          localStorage.removeItem('qt_front_token');
         },
         async loadAll() {
           this.loading = true;
           try {
             await this.loadMarketData(true);
-            Promise.allSettled([
+            await Promise.allSettled([
               this.api('/api/status').then(data => { this.status = data; }),
               this.api('/api/jobs/status').then(data => { this.jobStatus = data; }),
               this.api('/api/jobs/logs?limit=12').then(data => { this.jobLogs = data; }),
@@ -1050,12 +1148,12 @@
               if (window.innerWidth <= 767 && this.mobileView === 'news') {
                 await this.loadNews(true);
               } else {
-                this.loadNews(true);
+                await this.loadNews(true);
               }
             }
             if (window.innerWidth > 767 || ['overview', 'buy', 'deals', 'news'].includes(this.mobileView)) {
-              this.loadRecommendations(true);
-              window.setTimeout(() => this.loadPlan(true), 800);
+              await this.loadRecommendations(true);
+              await this.loadPlan(true);
             }
           } finally {
             this.loading = false;

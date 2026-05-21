@@ -67,6 +67,54 @@
 </head>
 <body class="bg-[#f4f6f8] text-neutral-900 min-h-screen">
   <div id="app" v-cloak class="min-h-screen">
+    <div v-if="authReady && !auth.token" class="min-h-screen flex items-center justify-center bg-[#f4f6f8] p-4">
+      <form v-if="auth.setupRequired" @submit.prevent="setupAuth" class="w-full max-w-xl bg-white border border-neutral-300 p-5 space-y-4">
+        <div>
+          <h1 class="text-xl font-semibold">首次初始化</h1>
+          <p class="mt-1 text-sm text-neutral-500">服务器还没有账号。这里会同时创建后台管理员账号和前台交易终端账号。</p>
+        </div>
+        <div class="grid gap-3 md:grid-cols-2">
+          <label class="block text-sm">
+            <span class="block text-xs text-neutral-500 mb-1">后台用户名</span>
+            <input v-model="setupForm.admin_username" autocomplete="username" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+          </label>
+          <label class="block text-sm">
+            <span class="block text-xs text-neutral-500 mb-1">后台密码</span>
+            <input v-model="setupForm.admin_password" type="password" autocomplete="new-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+          </label>
+          <label class="block text-sm">
+            <span class="block text-xs text-neutral-500 mb-1">前台用户名</span>
+            <input v-model="setupForm.frontend_username" autocomplete="username" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+          </label>
+          <label class="block text-sm">
+            <span class="block text-xs text-neutral-500 mb-1">前台密码</span>
+            <input v-model="setupForm.frontend_password" type="password" autocomplete="new-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+          </label>
+        </div>
+        <div class="text-xs text-neutral-500">密码至少 8 位。认证文件保存在服务器本地 `backend/data/auth.json`，不会提交到 Git。</div>
+        <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
+        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '初始化中' : '创建账号并进入后台' }}</button>
+      </form>
+
+      <form v-else @submit.prevent="loginAdmin" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4">
+        <div>
+          <h1 class="text-xl font-semibold">后台登录</h1>
+          <p class="mt-1 text-sm text-neutral-500">后台账号可以修改配置、触发同步、运行 AI 和执行运维操作。</p>
+        </div>
+        <label class="block text-sm">
+          <span class="block text-xs text-neutral-500 mb-1">用户名</span>
+          <input v-model="auth.username" autocomplete="username" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+        </label>
+        <label class="block text-sm">
+          <span class="block text-xs text-neutral-500 mb-1">密码</span>
+          <input v-model="auth.password" type="password" autocomplete="current-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+        </label>
+        <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
+        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '登录中' : '登录后台' }}</button>
+      </form>
+    </div>
+    <div v-else-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#f4f6f8] text-sm text-neutral-500">正在检查登录状态...</div>
+    <template v-else>
     <div class="app-shell grid min-h-screen xl:grid-cols-[220px_minmax(0,1fr)_390px]">
       <aside class="sidebar bg-white border-r border-neutral-200 p-4 xl:sticky xl:top-0 xl:h-screen">
         <div class="sidebar-brand mb-5">
@@ -98,6 +146,7 @@
             <span class="font-semibold truncate max-w-[110px]">{{ status.ai_model || '-' }}</span>
           </div>
           <a href="/" class="block h-9 leading-9 text-center border border-neutral-300 bg-white text-sm hover:bg-neutral-50">前台买入列表</a>
+          <button @click="logout" class="block w-full h-9 border border-neutral-300 bg-white text-sm hover:bg-neutral-50">退出后台</button>
         </div>
       </aside>
 
@@ -589,6 +638,120 @@
           </div>
         </section>
 
+        <section v-if="activeTab === 'settings'" class="space-y-4">
+          <div class="grid grid-cols-1 2xl:grid-cols-[360px_1fr] gap-4">
+            <div class="panel p-4 space-y-3">
+              <div>
+                <div class="font-semibold">账号与权限</div>
+                <div class="text-xs text-neutral-500 mt-1">后台和前台分开登录，后台 token 可以访问全部接口，前台 token 只能读取交易终端数据。</div>
+              </div>
+              <div class="grid grid-cols-2 gap-3 text-sm">
+                <div class="border border-neutral-200 p-3">
+                  <div class="text-xs text-neutral-500">后台账号</div>
+                  <div class="font-semibold mt-1">{{ authConfig.admin_username || '-' }}</div>
+                  <div class="text-xs mt-1" :class="authConfig.admin_configured ? 'text-emerald-700' : 'text-red-700'">{{ authConfig.admin_configured ? '已配置' : '未配置' }}</div>
+                </div>
+                <div class="border border-neutral-200 p-3">
+                  <div class="text-xs text-neutral-500">前台账号</div>
+                  <div class="font-semibold mt-1">{{ authConfig.frontend_username || '-' }}</div>
+                  <div class="text-xs mt-1" :class="authConfig.frontend_configured ? 'text-emerald-700' : 'text-red-700'">{{ authConfig.frontend_configured ? '已配置' : '未配置' }}</div>
+                </div>
+              </div>
+              <div class="text-xs text-neutral-500">如需改账号密码，当前版本先删除服务器本地 `backend/data/auth.json` 后重新初始化。不要把这个文件提交到 Git。</div>
+            </div>
+
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between gap-3">
+                <div>
+                  <div class="font-semibold">服务器运行配置</div>
+                  <div class="text-xs text-neutral-500 mt-1">保存到 `backend/data/config.json`。环境变量仍然优先生效，后台保存不会覆盖当前进程里的环境变量。</div>
+                </div>
+                <button @click="loadRuntimeConfig(false)" :disabled="configLoading" class="h-9 px-3 border border-neutral-300 bg-white text-sm disabled:opacity-50">{{ configLoading ? '读取中' : '重新读取' }}</button>
+              </div>
+              <div class="p-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
+                <div class="space-y-3">
+                  <div class="font-semibold">DeepSeek AI</div>
+                  <div class="text-xs" :class="deepseekConfig.configured ? 'text-emerald-700' : 'text-red-700'">
+                    {{ deepseekConfig.configured ? '已配置' : '未配置' }} · {{ deepseekConfig.api_key_source || '无来源' }}
+                  </div>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">模型</span>
+                    <input v-model="configForm.deepseek_model" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">API Key</span>
+                    <input v-model="configForm.deepseek_api_key" type="password" placeholder="留空表示不修改已有密钥" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                </div>
+
+                <div class="space-y-3">
+                  <div class="font-semibold">必盈行情</div>
+                  <div class="text-xs" :class="biyingConfig.configured ? 'text-emerald-700' : 'text-red-700'">
+                    {{ biyingConfig.configured ? '已配置' : '未配置' }} · {{ biyingConfig.license_key_source || '无来源' }}
+                  </div>
+                  <label class="inline-flex items-center gap-2 text-sm">
+                    <input v-model="configForm.biying_enabled" type="checkbox" class="accent-neutral-900">
+                    启用必盈分时行情
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">License Key</span>
+                    <input v-model="configForm.biying_license_key" type="password" placeholder="留空表示不修改已有授权" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">接口地址</span>
+                    <input v-model="configForm.biying_endpoint" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">每分钟请求上限</span>
+                    <input v-model.number="configForm.biying_minute_limit" type="number" min="1" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                </div>
+
+                <div class="space-y-3">
+                  <div class="font-semibold">邮件通知</div>
+                  <div class="text-xs" :class="emailConfig.configured ? 'text-emerald-700' : 'text-red-700'">
+                    {{ emailConfig.configured ? '已配置' : '未配置' }} · {{ emailConfig.smtp_password_source || '无来源' }}
+                  </div>
+                  <label class="inline-flex items-center gap-2 text-sm">
+                    <input v-model="configForm.email_enabled" type="checkbox" class="accent-neutral-900">
+                    启用邮件通知
+                  </label>
+                  <div class="grid grid-cols-2 gap-3">
+                    <label class="block text-sm col-span-2">
+                      <span class="block text-xs text-neutral-500 mb-1">SMTP 服务器</span>
+                      <input v-model="configForm.smtp_server" class="w-full h-9 px-2 border border-neutral-300">
+                    </label>
+                    <label class="block text-sm">
+                      <span class="block text-xs text-neutral-500 mb-1">端口</span>
+                      <input v-model.number="configForm.smtp_port" type="number" min="1" class="w-full h-9 px-2 border border-neutral-300">
+                    </label>
+                    <label class="flex items-end gap-2 h-[57px] text-sm">
+                      <input v-model="configForm.smtp_use_ssl" type="checkbox" class="accent-neutral-900 mb-3">
+                      <span class="mb-2">SSL</span>
+                    </label>
+                  </div>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">SMTP 用户</span>
+                    <input v-model="configForm.smtp_user" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">SMTP 密码</span>
+                    <input v-model="configForm.smtp_password" type="password" placeholder="留空表示不修改已有密码" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                  <label class="block text-sm">
+                    <span class="block text-xs text-neutral-500 mb-1">收件邮箱</span>
+                    <input v-model="configForm.email_to" class="w-full h-9 px-2 border border-neutral-300">
+                  </label>
+                </div>
+              </div>
+              <div class="px-4 py-3 border-t border-neutral-200 flex flex-wrap items-center justify-between gap-3">
+                <div class="text-sm" :class="configMessage.includes('失败') ? 'text-red-700' : 'text-neutral-500'">{{ configMessage || '修改密钥后，下一次任务运行会读取最新配置。' }}</div>
+                <button @click="saveRuntimeConfig" :disabled="configSaving" class="h-10 px-4 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ configSaving ? '保存中' : '保存配置' }}</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section v-if="activeTab === 'ops'" class="space-y-4">
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
@@ -677,6 +840,7 @@
         </div>
       </aside>
     </div>
+    </template>
   </div>
 
   <script>
@@ -692,6 +856,7 @@
             { key: 'analysis', label: '全程复盘' },
             { key: 'data', label: '数据与AI' },
             { key: 'strategy', label: '策略进化' },
+            { key: 'settings', label: '配置与安全' },
             { key: 'ops', label: '运维' },
           ],
           jobCards: [
@@ -709,6 +874,21 @@
           activeTab: 'overview',
           tradeView: 'positions',
           asOf: '',
+          authReady: false,
+          auth: {
+            token: localStorage.getItem('qt_admin_token') || '',
+            username: '',
+            password: '',
+            loading: false,
+            error: '',
+            setupRequired: false,
+          },
+          setupForm: {
+            admin_username: 'admin',
+            admin_password: '',
+            frontend_username: 'trader',
+            frontend_password: '',
+          },
           autoRefresh: true,
           loading: false,
           timelineLoading: false,
@@ -739,6 +919,11 @@
           fitResult: {},
           syncResult: {},
           adminResult: {},
+          configStatus: {},
+          configForm: {},
+          configLoading: false,
+          configSaving: false,
+          configMessage: '',
           activeTimeline: {},
           selectedDayDate: '',
           tradeMode: 'intraday',
@@ -785,6 +970,10 @@
       },
       computed: {
         scheduler() { return this.jobStatus.scheduler || {}; },
+        authConfig() { return (this.configStatus.auth || {}); },
+        deepseekConfig() { return (this.configStatus.deepseek || {}); },
+        biyingConfig() { return (this.configStatus.biying || {}); },
+        emailConfig() { return (this.configStatus.email || {}); },
         data() { return this.dashboard.data || {}; },
         newsCount() { return this.data.news_count || ((this.jobStatus.news_fetcher || {}).history_count) || 0; },
         aiRecordCount() { return this.data.ai_record_count || ((this.jobStatus.ai_analyzer || {}).records) || 0; },
@@ -827,34 +1016,124 @@
             if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
             if (!this.activeTimeline.start_date) this.loadTimeline(false);
           }
+          if (value === 'settings' && !Object.keys(this.configForm || {}).length) {
+            this.loadRuntimeConfig(false);
+          }
         },
       },
       async mounted() {
         this.asOf = this.localChinaToday();
         this.syncForm.date = this.asOf;
         this.timelineForm.end_date = this.asOf;
-        this.fetchLogs();
-        this.refreshAll();
-        window.setTimeout(() => {
-          this.loadDailyPlan(true);
-          this.loadTimeline(true);
-        }, 1500);
-        this.refreshTimer = window.setInterval(() => {
-          if (this.autoRefresh && !this.loading) this.refreshAll(true);
-        }, 60000);
-        this.logTimer = window.setInterval(() => this.fetchLogs(), 8000);
         window.addEventListener('resize', this.resizeChart);
+        await this.initAuth();
       },
       beforeUnmount() {
-        if (this.refreshTimer) window.clearInterval(this.refreshTimer);
-        if (this.logTimer) window.clearInterval(this.logTimer);
+        this.stopTimers();
         window.removeEventListener('resize', this.resizeChart);
       },
       methods: {
         async api(url, options = {}) {
-          const res = await fetch(url, options);
-          if (!res.ok) throw new Error(await res.text());
+          const headers = new Headers(options.headers || {});
+          if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
+          const res = await fetch(url, { ...options, headers });
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              this.auth.token = '';
+              localStorage.removeItem('qt_admin_token');
+              this.stopTimers();
+            }
+            throw new Error(await res.text());
+          }
           return await res.json();
+        },
+        async initAuth() {
+          try {
+            const res = await fetch('/api/auth/status');
+            const status = await res.json();
+            this.auth.setupRequired = Boolean(status.setup_required);
+            if (!this.auth.token) return;
+            await this.afterAuthReady();
+          } catch (err) {
+            this.auth.error = String(err.message || err);
+            this.auth.token = '';
+            localStorage.removeItem('qt_admin_token');
+          } finally {
+            this.authReady = true;
+          }
+        },
+        async afterAuthReady() {
+          await this.loadRuntimeConfig(true);
+          await this.fetchLogs();
+          await this.refreshAll();
+          window.setTimeout(() => {
+            this.loadDailyPlan(true);
+            this.loadTimeline(true);
+          }, 1500);
+          if (!this.refreshTimer) {
+            this.refreshTimer = window.setInterval(() => {
+              if (this.autoRefresh && !this.loading) this.refreshAll(true);
+            }, 60000);
+          }
+          if (!this.logTimer) {
+            this.logTimer = window.setInterval(() => this.fetchLogs(), 8000);
+          }
+        },
+        async setupAuth() {
+          this.auth.loading = true;
+          this.auth.error = '';
+          try {
+            const result = await this.api('/api/auth/setup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.setupForm),
+            });
+            this.auth.token = result.token || '';
+            localStorage.setItem('qt_admin_token', this.auth.token);
+            this.auth.setupRequired = false;
+            this.setupForm.admin_password = '';
+            this.setupForm.frontend_password = '';
+            await this.afterAuthReady();
+          } catch (err) {
+            this.auth.error = String(err.message || err);
+          } finally {
+            this.auth.loading = false;
+          }
+        },
+        async loginAdmin() {
+          this.auth.loading = true;
+          this.auth.error = '';
+          try {
+            const result = await this.api('/api/auth/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                scope: 'admin',
+                username: this.auth.username,
+                password: this.auth.password,
+              }),
+            });
+            this.auth.token = result.token || '';
+            localStorage.setItem('qt_admin_token', this.auth.token);
+            this.auth.password = '';
+            await this.afterAuthReady();
+          } catch (err) {
+            this.auth.error = String(err.message || err);
+          } finally {
+            this.auth.loading = false;
+          }
+        },
+        stopTimers() {
+          if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+          if (this.logTimer) window.clearInterval(this.logTimer);
+          this.refreshTimer = null;
+          this.logTimer = null;
+        },
+        logout() {
+          this.auth.token = '';
+          this.auth.password = '';
+          localStorage.removeItem('qt_admin_token');
+          this.stopTimers();
         },
         async refreshAll(quiet = false) {
           if (!quiet) this.loading = true;
@@ -1021,6 +1300,38 @@
             this.clientError = String(err.message || err);
           } finally {
             this.restarting = false;
+          }
+        },
+        async loadRuntimeConfig(quiet = true) {
+          this.configLoading = !quiet;
+          try {
+            const result = await this.api('/api/config/runtime');
+            this.configForm = { ...(result.form || {}) };
+            this.configStatus = (result.sources || {});
+            this.configMessage = '';
+          } catch (err) {
+            if (!quiet) this.configMessage = `读取失败：${String(err.message || err)}`;
+          } finally {
+            this.configLoading = false;
+          }
+        },
+        async saveRuntimeConfig() {
+          this.configSaving = true;
+          this.configMessage = '';
+          try {
+            const result = await this.api('/api/config/runtime', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.configForm),
+            });
+            this.configForm = { ...(result.form || {}) };
+            this.configStatus = (result.sources || {});
+            this.configMessage = '配置已保存。环境变量优先生效；如果当前进程已用环境变量覆盖，需要重启服务后才会看到后台配置接管。';
+            await this.refreshAll(true);
+          } catch (err) {
+            this.configMessage = `保存失败：${String(err.message || err)}`;
+          } finally {
+            this.configSaving = false;
           }
         },
         async saveStrategy() {
