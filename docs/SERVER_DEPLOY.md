@@ -118,12 +118,13 @@ backend/data/qt.err.log
 
 - 根目录应该只保留项目入口、配置模板和文档，避免运维脚本散落在最外层。
 - `scripts/` 是脚本实现目录，方便维护、复用和权限管理。
-- `qt.sh` 是人用入口，负责把命令转发给 `scripts/qt.sh`。
+- `qt.sh` 是人用入口，负责把命令转发给 `scripts/qt.sh`；`scripts/qt.sh` 提供中文帮助、步骤日志、状态查看和部署环境检查。
 
 `install_server.sh` 会尽量把 `scripts/qt.sh` 安装为 `/usr/local/bin/qt`。安装成功后，可以直接使用：
 
 ```bash
 qt status
+qt doctor
 qt restart
 qt update
 qt backup

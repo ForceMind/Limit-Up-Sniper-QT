@@ -8,16 +8,23 @@ usage() {
   cat <<EOF
 涨停狙击手项目命令
 
-在项目根目录执行：
-  bash qt.sh install          第一次部署服务器：安装依赖并注册 systemd 服务
-  bash qt.sh                  日常一键更新：等同于 bash qt.sh update
-  bash qt.sh update           备份数据、拉取代码、更新依赖、重启服务
-  bash qt.sh restart          重启服务
-  bash qt.sh status           查看服务进程和 API 状态
-  bash qt.sh logs             查看实时日志
-  bash qt.sh backup           备份 backend/data
-  bash qt.sh restore <tar.gz> 从备份恢复 backend/data
-  bash qt.sh scan             执行 GitHub 上传前安全扫描
+推荐用法：
+  bash qt.sh install          第一次部署服务器
+  bash qt.sh                  日常一键更新，等同于 bash qt.sh update
+  bash qt.sh status           查看服务、Git 版本和 API 状态
+  bash qt.sh doctor           检查部署环境和脚本权限
+
+常用命令：
+  install | deploy | init     第一次部署
+  update  | upgrade | up      备份数据、拉取代码、更新依赖、重启服务
+  restart | start | reload    重启服务
+  stop                        停止服务
+  status | ps                 查看状态
+  logs   | log                查看实时日志
+  backup | bak                备份 backend/data
+  restore <tar.gz>            从备份恢复 backend/data
+  scan   | security           GitHub 上传前安全扫描
+  doctor | check              部署环境检查
 
 这个根目录脚本是给人使用的统一入口。
 具体安装、更新、备份、恢复、重启逻辑仍放在 scripts/ 目录，避免根目录堆满运维脚本。

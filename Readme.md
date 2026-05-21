@@ -176,6 +176,7 @@ bash qt.sh
 常用运维命令：
 
 ```bash
+bash qt.sh doctor
 bash qt.sh status
 bash qt.sh restart
 bash qt.sh logs
@@ -188,11 +189,12 @@ bash qt.sh scan
 
 - 根目录只保留项目入口、配置模板和文档，避免一堆运维脚本混在代码入口旁边。
 - `scripts/` 里的 `install_server.sh`、`update_server.sh`、`backup_data.sh`、`restore_data.sh` 是实现细节，方便维护和复用。
-- 根目录 `qt.sh` 是给人使用的统一入口，它会转发到 `scripts/qt.sh`。
+- 根目录 `qt.sh` 是给人使用的统一入口，它会转发到 `scripts/qt.sh`；`scripts/qt.sh` 提供中文帮助、步骤日志、状态查看和部署环境检查。
 - 首次安装后，服务器会尽量创建系统快捷命令 `/usr/local/bin/qt`，以后也可以直接用：
 
 ```bash
 qt status
+qt doctor
 qt update
 qt restart
 qt logs
