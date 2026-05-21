@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>A股量化交易终端</title>
+  <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    [v-cloak] { display: none; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; max-width: 100%; overflow-x: hidden; }
+    body { letter-spacing: 0; max-width: 100%; overflow-x: hidden; }
+    input, button { max-width: 100%; }
+    *, *::before, *::after { box-sizing: border-box; }
+    #app, .main-shell, .terminal-panel, .trade-grid, .trade-grid > *, section { max-width: 100%; min-width: 0; }
+    .table-wrap { scrollbar-width: thin; overflow-x: auto; max-width: 100%; min-width: 0; }
+    .table-wrap table { min-width: 760px; }
+    .metric-card { min-height: 84px; }
+    .terminal-panel { border: 1px solid #d4d4d8; background: #fff; }
+    .mobile-only { display: none; }
+    .mobile-bottom-nav { display: none; }
+    .compact-list { display: none; }
+    .mobile-app { display: none; }
+    .line-clamp-2 {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    @media (max-width: 767px) {
+      body { background: #0d1119; }
+      .desktop-shell { display: none !important; }
+      .page-header { padding: 14px 16px; }
+      .page-title { font-size: 20px; line-height: 26px; }
+      .header-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+      .header-actions input { grid-column: 1 / -1; width: 100%; }
+      .header-actions a, .header-actions button { width: 100%; justify-content: center; }
+      .main-shell { padding: 12px; padding-bottom: 78px; }
+      .main-shell > * { min-width: 0; max-width: 100%; }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px; }
+      .metric-card { min-height: 74px; padding: 10px; }
+      .metric-card .text-lg { font-size: 16px; line-height: 22px; }
+      .section-head { align-items: flex-start; gap: 8px; }
+      .section-head > div:last-child { text-align: left; }
+      .trade-grid { grid-template-columns: 1fr !important; }
+      .table-wrap table { min-width: 700px; }
+      .desktop-mobile-table { display: none !important; }
+      .compact-list { display: block; }
+      .compact-card { padding: 12px 14px; border-bottom: 1px solid #e5e7eb; }
+      .compact-card:last-child { border-bottom: 0; }
+      .compact-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+      .compact-meta div { min-width: 0; }
+      .compact-meta .label { color: #6b7280; font-size: 11px; line-height: 16px; }
+      .compact-meta .value { font-size: 13px; line-height: 18px; font-weight: 600; overflow-wrap: anywhere; }
+      .tab-strip { display: flex; overflow-x: auto; gap: 8px; padding-bottom: 4px; scrollbar-width: none; }
+      .tab-strip::-webkit-scrollbar { display: none; }
+      .tab-strip button { flex: 0 0 auto; white-space: nowrap; }
+      .mobile-bottom-nav { display: grid; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #151922; border-top: 1px solid #303846; }
+      .mobile-bottom-nav button, .mobile-bottom-nav a { min-height: 54px; color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; text-align: center; border-right: 1px solid #303846; }
+      .mobile-bottom-nav .active { background: #dc2626; }
+      .mobile-only { display: block; }
+      .mobile-app { display: flex; min-height: 100vh; flex-direction: column; background: #0d1119; color: #111827; }
+      .mobile-status { height: 28px; padding: 8px 20px 0; color: #e5e7eb; display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 600; }
+      .mobile-topbar { padding: 12px 18px 8px; color: #e5e7eb; display: flex; align-items: center; justify-content: space-between; }
+      .mobile-date { color: #cbd5e1; font-weight: 700; letter-spacing: 0; }
+      .market-pill { margin-left: 6px; font-size: 12px; color: #35b36b; }
+      .account-select { color: #cbd5e1; font-size: 13px; text-decoration: none; }
+      .mobile-red-card { margin: 6px 12px 0; padding: 16px 16px 14px; color: #fff; background: linear-gradient(155deg, #f51d2f 0%, #d71326 72%, #b90f1f 100%); border-radius: 10px; box-shadow: 0 12px 30px rgba(190, 15, 31, 0.3); }
+      .mobile-red-card .label { color: rgba(255,255,255,0.72); font-size: 12px; }
+      .mobile-red-card .big { font-size: 24px; line-height: 30px; font-weight: 800; letter-spacing: 0; }
+      .mobile-red-card .value { font-size: 16px; line-height: 22px; font-weight: 800; }
+      .mobile-red-card .fine { color: rgba(255,255,255,0.74); font-size: 11px; }
+      .mobile-red-grid { margin-top: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+      .mobile-red-bottom { margin-top: 13px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.18); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+      .mobile-content { flex: 1; margin-top: 12px; padding-bottom: 72px; background: #f3f5f8; border-radius: 18px 18px 0 0; overflow: hidden; }
+      .mobile-panel { background: #fff; border-radius: 18px 18px 0 0; min-height: calc(100vh - 294px); }
+      .mobile-panel-head { padding: 14px 18px 10px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid #edf0f4; }
+      .mobile-panel-title { font-size: 18px; line-height: 24px; font-weight: 800; }
+      .mobile-panel-sub { margin-top: 2px; color: #8a94a6; font-size: 12px; }
+      .mobile-link { color: #8a94a6; font-size: 12px; white-space: nowrap; }
+      .summary-grid { padding: 12px 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .summary-tile { padding: 12px; background: #f7f8fb; border: 1px solid #edf0f4; border-radius: 8px; }
+      .summary-tile .label { color: #7b8494; font-size: 12px; }
+      .summary-tile .value { margin-top: 4px; font-size: 20px; line-height: 24px; font-weight: 800; }
+      .mobile-log-list { padding: 0 14px 14px; }
+      .mobile-log-row { padding: 11px 0; border-top: 1px solid #edf0f4; display: flex; justify-content: space-between; gap: 12px; }
+      .mobile-log-row .msg { font-size: 13px; line-height: 18px; font-weight: 700; }
+      .mobile-log-row .meta { margin-top: 2px; color: #8a94a6; font-size: 11px; }
+      .signal-row, .holding-row, .deal-row, .news-row { padding: 13px 18px; border-bottom: 1px solid #edf0f4; }
+      .row-main { display: grid; grid-template-columns: minmax(82px, 0.9fr) minmax(0, 1.4fr) minmax(58px, auto); gap: 10px; align-items: start; }
+      .stock-name { font-size: 16px; line-height: 20px; font-weight: 800; }
+      .stock-code { color: #7b8494; font-size: 12px; line-height: 18px; }
+      .tag-line { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+      .tag { padding: 2px 6px; border-radius: 3px; background: #f2f4f7; color: #667085; font-size: 11px; line-height: 16px; }
+      .tag-red { background: #fff0f0; color: #d92331; }
+      .row-desc { color: #3f4654; font-size: 13px; line-height: 18px; }
+      .score-buy { color: #e11d2e; font-size: 18px; line-height: 22px; font-weight: 900; text-align: right; }
+      .score-sell { color: #747d8d; font-size: 11px; line-height: 16px; text-align: right; }
+      .mini-metrics { margin-top: 9px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; color: #7b8494; font-size: 11px; }
+      .mini-metrics strong { display: block; margin-top: 1px; color: #111827; font-size: 13px; }
+      .holding-row .row-main { grid-template-columns: minmax(92px, 1fr) minmax(104px, 1fr) minmax(88px, auto); }
+      .holding-mid { color: #7b8494; font-size: 12px; line-height: 18px; }
+      .holding-mid strong { color: #111827; font-size: 13px; }
+      .pnl-box { text-align: right; font-size: 13px; font-weight: 800; }
+      .frozen-note { margin-top: 5px; color: #d97706; font-size: 11px; text-align: right; }
+      .mobile-segment { padding: 12px 14px 0; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+      .mobile-segment::-webkit-scrollbar { display: none; }
+      .mobile-segment button { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d8dde6; background: #fff; color: #4b5563; font-size: 12px; }
+      .mobile-segment button.active { background: #151922; color: #fff; border-color: #151922; }
+      .deal-row .row-main { grid-template-columns: minmax(92px, 1fr) minmax(86px, 0.8fr) minmax(96px, auto); }
+      .news-row .row-main { grid-template-columns: minmax(58px, auto) minmax(0, 1fr) minmax(54px, auto); }
+      .news-title { font-size: 14px; line-height: 19px; font-weight: 800; }
+      .news-meta { color: #7b8494; font-size: 11px; line-height: 17px; }
+      .mobile-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 70; height: 64px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); background: #101620; border-top: 1px solid #252d39; }
+      .mobile-tabbar button { color: #c8d0dc; font-size: 11px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+      .mobile-tabbar .nav-mark { width: 18px; height: 18px; border-radius: 5px; border: 1px solid currentColor; display: block; }
+      .mobile-tabbar button.active { background: #dc1728; color: #fff; }
+      .desktop-only { display: none !important; }
+      .mobile-page:not(.active-mobile) { display: none !important; }
+    }
+    @media (max-width: 420px) {
+      .main-shell { padding-left: 10px; padding-right: 10px; }
+      .table-wrap table { min-width: 660px; }
+    }
+  </style>
+</head>
+<body class="bg-[#eef1f5] text-neutral-900 min-h-screen">
+  <div id="app" v-cloak class="min-h-screen">
+    <div class="mobile-app">
+      <div class="mobile-status">
+        <span>{{ clockText || '18:06' }}</span>
+        <span>▮▮▮ 5G ▰</span>
+      </div>
+      <div class="mobile-topbar">
+        <div>
+          <span class="mobile-date">{{ accountView.as_of || asOf || '-' }}</span>
+          <span class="market-pill">{{ scheduler.market_open ? '交易中' : '休市' }}</span>
+        </div>
+        <a href="/admin" class="account-select">模拟账户01⌄</a>
+      </div>
+
+      <section class="mobile-red-card">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="label">总资产(元)</div>
+            <div class="big">{{ money(account.total_asset) }}</div>
+          </div>
+          <div class="text-right">
+            <div class="label">今日收益 〉</div>
+            <div class="value">{{ signedMoney(account.total_pnl) }} ({{ signedPct(account.return_pct) }})</div>
+          </div>
+        </div>
+        <div class="mobile-red-grid">
+          <div>
+            <div class="label">可用资金</div>
+            <div class="value">{{ money(account.available_cash) }}</div>
+          </div>
+          <div>
+            <div class="label">持仓市值</div>
+            <div class="value">{{ money(account.market_value) }}</div>
+          </div>
+          <div>
+            <div class="label">浮动盈亏</div>
+            <div class="value">{{ signedMoney(account.unrealized_pnl) }}</div>
+          </div>
+        </div>
+        <div class="mobile-red-bottom">
+          <div>
+            <div class="label">今日成交/持仓</div>
+            <div class="big">{{ todayDeals.length }} / {{ positions.length }}</div>
+          </div>
+          <div>
+            <div class="label">T+1冻结</div>
+            <div class="big">{{ money(frozenMarketValue) }}</div>
+          </div>
+        </div>
+      </section>
+
+      <main class="mobile-content">
+        <section v-show="mobileView === 'overview'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">今日动作摘要</div>
+              <div class="mobile-panel-sub">概览只显示摘要，完整信号进入对应页面</div>
+            </div>
+            <button class="mobile-link" @click="loadAll">刷新</button>
+          </div>
+          <div class="summary-grid">
+            <button class="summary-tile text-left" @click="setMobileView('buy')">
+              <div class="label">买入信号</div>
+              <div class="value text-red-600">{{ buySignalCount }}</div>
+            </button>
+            <button class="summary-tile text-left" @click="setMobileView('deals')">
+              <div class="label">卖出触发</div>
+              <div class="value text-green-700">{{ todaySellCount }}</div>
+            </button>
+            <button class="summary-tile text-left" @click="setMobileView('positions')">
+              <div class="label">持仓预警</div>
+              <div class="value text-orange-700">{{ warningPositionCount }}</div>
+            </button>
+            <button class="summary-tile text-left" @click="setMobileView('news')">
+              <div class="label">最新新闻</div>
+              <div class="value">{{ latestNewsCount }}</div>
+            </button>
+          </div>
+          <div class="mobile-panel-head border-t border-neutral-100">
+            <div>
+              <div class="mobile-panel-title">系统运行</div>
+              <div class="mobile-panel-sub">新闻抓取、行情同步、AI分析和交易循环</div>
+            </div>
+            <span class="mobile-link">{{ scheduler.status || '-' }}</span>
+          </div>
+          <div class="summary-grid">
+            <div class="summary-tile">
+              <div class="label">交易时段</div>
+              <div class="value text-base" :class="scheduler.market_open ? 'text-red-600' : 'text-neutral-800'">{{ scheduler.market_open ? '开盘' : '休市' }}</div>
+            </div>
+            <div class="summary-tile">
+              <div class="label">下次新闻</div>
+              <div class="value text-base">{{ shortTime(scheduler.next_news_fetch_at) }}</div>
+            </div>
+          </div>
+          <div class="mobile-log-list">
+            <div v-for="item in recentLogs" :key="`m-${item.ts}-${item.job}-${item.message}`" class="mobile-log-row">
+              <div>
+                <div class="msg">{{ item.message || '-' }}</div>
+                <div class="meta">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
+              </div>
+              <div class="meta shrink-0">{{ shortTime(item.ts) }}</div>
+            </div>
+            <div v-if="!recentLogs.length" class="mobile-log-row text-neutral-500 text-sm">暂无运行日志</div>
+          </div>
+        </section>
+
+        <section v-show="mobileView === 'buy'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">买入信号</div>
+              <div class="mobile-panel-sub">买入阈值 {{ fixed(rules.buy_threshold) }} · 单票资金 {{ money(rules.paper_position_value) }}</div>
+            </div>
+            <span class="mobile-link">候选 {{ buyList.length }}</span>
+          </div>
+          <article v-for="item in buyList" :key="'m-buy-' + item.code" class="signal-row">
+            <div class="row-main">
+              <div>
+                <div class="stock-name">{{ item.name }}</div>
+                <div class="stock-code">{{ item.code }}</div>
+                <div class="tag-line">
+                  <span class="tag">{{ item.industry || '-' }}</span>
+                  <span class="tag tag-red">新闻 {{ item.event_count || 0 }}</span>
+                </div>
+              </div>
+              <div>
+                <div class="row-desc line-clamp-2">{{ item.reason || '-' }}</div>
+                <div class="mini-metrics">
+                  <span>情绪<strong>{{ fixed((item.components || {}).sentiment_score) }}</strong></span>
+                  <span>事件<strong>{{ fixed((item.components || {}).event_score) }}</strong></span>
+                  <span>风控<strong>{{ fixed((item.components || {}).risk_score) }}</strong></span>
+                </div>
+              </div>
+              <div>
+                <div class="score-buy">买 {{ fixed(item.buy_score) }}</div>
+                <div class="score-sell">卖 {{ fixed(item.sell_score) }}</div>
+                <div class="score-sell mt-2">{{ item.event_type || '事件' }}</div>
+              </div>
+            </div>
+          </article>
+          <div v-if="!buyList.length" class="p-10 text-center text-neutral-500 text-sm">这一天没有达到买入阈值的股票</div>
+        </section>
+
+        <section v-show="mobileView === 'positions'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">持仓 {{ positions.length }}</div>
+              <div class="mobile-panel-sub">分时估值 · A股T+1可用数量</div>
+            </div>
+            <button class="mobile-link" @click="loadMarketData(true)">刷新</button>
+          </div>
+          <article v-for="pos in positions" :key="'m-pos-' + pos.code" class="holding-row">
+            <div class="row-main">
+              <div>
+                <div class="stock-name">{{ pos.name }}</div>
+                <div class="stock-code">{{ pos.code }}</div>
+                <div class="stock-code">分时估值 {{ shortTime(pos.last_time || pos.last_date) }}</div>
+              </div>
+              <div class="holding-mid">
+                <div>持仓/可用 <strong>{{ qty(pos.qty) }} / {{ qty(pos.available_qty) }}</strong></div>
+                <div>成本/现价 <strong>{{ fixed(pos.cost_price, 3) }} / {{ fixed(pos.last_price, 3) }}</strong></div>
+                <div>市值 <strong>{{ money(pos.market_value) }}</strong></div>
+              </div>
+              <div class="pnl-box" :class="numClass(pos.pnl_amount)">
+                <div>{{ signedPct(pos.pnl_pct) }}</div>
+                <div>{{ signedMoney(pos.pnl_amount) }}</div>
+                <div v-if="pos.frozen_qty" class="frozen-note">T+1冻结 {{ qty(pos.frozen_qty) }}</div>
+              </div>
+            </div>
+          </article>
+          <div v-if="!positions.length" class="p-10 text-center text-neutral-500 text-sm">暂无持仓</div>
+        </section>
+
+        <section v-show="mobileView === 'deals'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">成交与交割</div>
+              <div class="mobile-panel-sub">今日成交 {{ todayDeals.length }} · 交割单 {{ deliveryRecords.length }}</div>
+            </div>
+            <span class="mobile-link" :class="numClass(account.realized_pnl)">已实现 {{ signedMoney(account.realized_pnl) }}</span>
+          </div>
+          <div class="mobile-segment">
+            <button v-for="tab in tabs" :key="'m-tab-' + tab.key" @click="activeTab = tab.key" :class="{ active: activeTab === tab.key }">{{ tab.label }}</button>
+          </div>
+          <div v-show="activeTab === 'deals'">
+            <article v-for="deal in historyDeals" :key="'m-deal-' + deal.deal_id" class="deal-row">
+              <div class="row-main">
+                <div>
+                  <div class="stock-name">{{ deal.name }}</div>
+                  <div class="stock-code">{{ deal.code }} · {{ shortTime(deal.time || deal.date) }}</div>
+                </div>
+                <div class="holding-mid">
+                  <div :class="sideClass(deal.side)"><strong>{{ deal.direction || deal.side }}</strong></div>
+                  <div>数量 <strong>{{ qty(deal.qty) }}</strong></div>
+                  <div>价格 <strong>{{ fixed(deal.price, 3) }}</strong></div>
+                </div>
+                <div class="pnl-box" :class="numClass(deal.realized_pnl)">
+                  <div>{{ money(deal.amount) }}</div>
+                  <div class="stock-code">费用 {{ money(deal.total_fee) }}</div>
+                  <div>{{ signedMoney(deal.realized_pnl) }}</div>
+                </div>
+              </div>
+              <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
+            </article>
+            <div v-if="!historyDeals.length" class="p-10 text-center text-neutral-500 text-sm">暂无历史成交</div>
+          </div>
+          <div v-show="activeTab === 'delivery'">
+            <article v-for="record in deliveryRecords" :key="'m-delivery-' + record.deal_id" class="deal-row">
+              <div class="row-main">
+                <div>
+                  <div class="stock-name">{{ record.name }}</div>
+                  <div class="stock-code">{{ record.code }} · {{ record.date }}</div>
+                </div>
+                <div class="holding-mid">
+                  <div :class="sideClass(record.side)"><strong>{{ record.direction }}</strong></div>
+                  <div>数量/价格 <strong>{{ qty(record.qty) }} / {{ fixed(record.price, 3) }}</strong></div>
+                  <div>费用 <strong>{{ money(record.total_fee) }}</strong></div>
+                </div>
+                <div class="pnl-box" :class="numClass(record.net_amount)">
+                  <div>清算</div>
+                  <div>{{ signedMoney(record.net_amount) }}</div>
+                </div>
+              </div>
+            </article>
+            <div v-if="!deliveryRecords.length" class="p-10 text-center text-neutral-500 text-sm">暂无交割记录</div>
+          </div>
+          <div v-show="activeTab === 'history'" class="p-4 space-y-3">
+            <article v-for="day in historyDays.slice(0, 8)" :key="'m-history-' + day.date" class="summary-tile">
+              <div class="flex items-center justify-between">
+                <strong>{{ day.date }}</strong>
+                <span :class="numClass(day.avg_sold_pnl_pct)">{{ pct(day.avg_sold_pnl_pct) }}</span>
+              </div>
+              <div class="mt-2 text-xs text-neutral-500">信号 {{ day.signal_count }} · 已卖 {{ day.sold_count }} · 持仓 {{ day.holding_count }}</div>
+            </article>
+            <div v-if="!historyDays.length" class="p-10 text-center text-neutral-500 text-sm">暂无历史计划收益</div>
+          </div>
+        </section>
+
+        <section v-show="mobileView === 'news'" class="mobile-panel">
+          <div class="mobile-panel-head">
+            <div>
+              <div class="mobile-panel-title">新闻与事件</div>
+              <div class="mobile-panel-sub">最新新闻 {{ latestNewsCount }} · 结构化事件 {{ structuredEvents.length }}</div>
+            </div>
+            <button class="mobile-link" @click="loadNews(true)">刷新</button>
+          </div>
+          <div class="mobile-segment">
+            <button class="active">高影响</button>
+            <button>利好</button>
+            <button>利空</button>
+            <button>已关联</button>
+          </div>
+          <article v-for="event in mobileEventList" :key="'m-news-' + event.event_id" class="news-row">
+            <div class="row-main">
+              <div class="news-meta">{{ shortTime(event.time || event.date) }}<br>{{ event.source || '事件' }}</div>
+              <div>
+                <div class="news-title line-clamp-2">{{ event.reason || event.text || '-' }}</div>
+                <div class="tag-line">
+                  <span class="tag">{{ event.industry || '-' }}</span>
+                  <span class="tag">{{ event.name || event.code || '-' }}</span>
+                  <span class="tag">{{ event.event_type || '-' }}</span>
+                </div>
+                <div class="mini-metrics">
+                  <span>情绪<strong>{{ fixed(event.sentiment, 3) }}</strong></span>
+                  <span>影响<strong>{{ fixed(event.impact_score) }}</strong></span>
+                  <span>AI<strong>{{ fixed(event.ai_score) }}</strong></span>
+                </div>
+              </div>
+              <div class="score-buy" :class="Number(event.sentiment || 0) < 0 ? 'text-green-700' : 'text-red-600'">{{ Number(event.sentiment || 0) < 0 ? '利空' : '利好' }}</div>
+            </div>
+          </article>
+          <div v-if="!mobileEventList.length" class="p-10 text-center text-neutral-500 text-sm">暂无结构化事件</div>
+        </section>
+      </main>
+
+      <nav class="mobile-tabbar">
+        <button @click="setMobileView('overview')" :class="{ active: mobileView === 'overview' }"><span class="nav-mark"></span>概览</button>
+        <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }"><span class="nav-mark"></span>买入</button>
+        <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }"><span class="nav-mark"></span>持仓</button>
+        <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }"><span class="nav-mark"></span>成交</button>
+        <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }"><span class="nav-mark"></span>新闻</button>
+      </nav>
+    </div>
+
+    <header class="desktop-shell page-header bg-[#151922] text-white border-b border-black px-4 py-3">
+      <div class="max-w-[1760px] mx-auto flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+        <div>
+          <h1 class="page-title text-xl font-semibold">A股量化交易终端</h1>
+          <div class="text-xs text-neutral-300 mt-1">模拟账户、持仓、成交、交割单和每日买入计划</div>
+        </div>
+        <div class="header-actions flex flex-wrap items-center gap-2">
+          <a href="/admin" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm inline-flex items-center">后台管理</a>
+          <input v-model="asOf" type="date" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm outline-none focus:border-red-500">
+          <button @click="loadAll" :disabled="loading" class="h-9 px-3 bg-red-600 text-white text-sm disabled:opacity-50">
+            {{ loading ? '刷新中' : '刷新' }}
+          </button>
+          <button @click="syncIntraday" :disabled="syncing" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm disabled:opacity-50">
+            {{ syncing ? '同步中' : '同步分时' }}
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="desktop-shell main-shell max-w-[1760px] mx-auto p-4 space-y-4">
+      <section class="mobile-page metric-grid grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3" :class="{ 'active-mobile': mobileView === 'overview' }">
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">交易日</div>
+          <div class="text-lg font-semibold mt-1">{{ plan.as_of || accountView.as_of || '-' }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">总资产</div>
+          <div class="text-lg font-semibold mt-1">{{ money(account.total_asset) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">可用资金</div>
+          <div class="text-lg font-semibold mt-1">{{ money(account.available_cash) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">持仓市值</div>
+          <div class="text-lg font-semibold mt-1">{{ money(account.market_value) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">浮动盈亏</div>
+          <div class="text-lg font-semibold mt-1" :class="numClass(account.unrealized_pnl)">{{ money(account.unrealized_pnl) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">已实现盈亏</div>
+          <div class="text-lg font-semibold mt-1" :class="numClass(account.realized_pnl)">{{ money(account.realized_pnl) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">总盈亏</div>
+          <div class="text-lg font-semibold mt-1" :class="numClass(account.total_pnl)">{{ money(account.total_pnl) }} / {{ pct(account.return_pct) }}</div>
+        </div>
+        <div class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">今日成交/持仓</div>
+          <div class="text-lg font-semibold mt-1">{{ todayDeals.length }} / {{ positions.length }}</div>
+        </div>
+      </section>
+
+      <section v-if="mobileView !== 'overview'" class="mobile-only terminal-panel p-3">
+        <div class="grid grid-cols-2 gap-3 text-sm">
+          <div>
+            <div class="text-xs text-neutral-500">总资产</div>
+            <div class="font-semibold">{{ money(account.total_asset) }}</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-500">总盈亏</div>
+            <div class="font-semibold" :class="numClass(account.total_pnl)">{{ money(account.total_pnl) }} / {{ pct(account.return_pct) }}</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-500">可用资金</div>
+            <div class="font-semibold">{{ money(account.available_cash) }}</div>
+          </div>
+          <div>
+            <div class="text-xs text-neutral-500">今日成交/持仓</div>
+            <div class="font-semibold">{{ todayDeals.length }} / {{ positions.length }}</div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="syncResult.status" class="bg-white border border-neutral-300 p-3 text-sm">
+        <span class="font-semibold">必盈同步 {{ syncResult.date }}：</span>
+        请求 {{ syncResult.requested || 0 }}，成功 {{ syncResult.fetched || 0 }}，失败 {{ syncResult.failed || 0 }}，写入 {{ syncResult.rows_written || 0 }} 根K线
+      </section>
+
+      <section v-if="dataDate && dataDate !== asOf" class="bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900">
+        当前交易日为 {{ asOf }}，本地新闻/AI事件最新到 {{ dataDate }}。今日推荐会沿用截至当前交易日可见的最新事件，直到同步到新的新闻和行情数据。
+      </section>
+
+      <section class="mobile-page terminal-panel" :class="{ 'active-mobile': mobileView === 'overview' }">
+        <div class="px-4 py-3 border-b border-neutral-300 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 class="font-semibold">系统运行</h2>
+            <div class="text-xs text-neutral-500">自动抓新闻、AI分析、行情同步和交易循环</div>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div>
+              <div class="text-xs text-neutral-500">调度器</div>
+              <div class="font-semibold" :class="scheduler.enabled ? 'text-emerald-700' : 'text-neutral-700'">{{ scheduler.status || '-' }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">交易时段</div>
+              <div class="font-semibold" :class="scheduler.market_open ? 'text-red-600' : 'text-neutral-700'">{{ scheduler.market_open ? '开盘' : '休市' }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">最新新闻</div>
+              <div class="font-semibold">{{ status.latest_news_time || '-' }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">下次新闻</div>
+              <div class="font-semibold">{{ shortTime(scheduler.next_news_fetch_at) }}</div>
+            </div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-neutral-100">
+          <div v-for="item in recentLogs" :key="`${item.ts}-${item.job}-${item.message}`" class="p-3 text-sm">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-semibold">{{ item.message || '-' }}</span>
+              <span class="text-xs text-neutral-500">{{ shortTime(item.ts) }}</span>
+            </div>
+            <div class="text-xs text-neutral-500 mt-1">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
+          </div>
+          <div v-if="!recentLogs.length" class="p-3 text-sm text-neutral-500">暂无运行日志</div>
+        </div>
+      </section>
+
+      <section class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'news' }">
+        <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 class="font-semibold">最新新闻</h2>
+            <div class="text-xs text-neutral-500">
+              请求日期 {{ newsFeed.requested_date || asOf || '-' }}，展示数据日期 {{ newsFeed.data_date || '-' }}，原始新闻 {{ latestNews.length }} 条，结构化事件 {{ structuredEvents.length }} 条
+            </div>
+          </div>
+          <div class="text-xs" :class="newsFeed.has_requested_date_data ? 'text-neutral-500' : 'text-amber-700'">
+            {{ newsFeed.has_requested_date_data ? '当前日期有新闻数据' : '当前日期暂无新闻，已显示最近可用数据' }}
+          </div>
+        </div>
+        <div class="grid grid-cols-1 2xl:grid-cols-[1.1fr_0.9fr]">
+          <div class="table-wrap overflow-auto max-h-80 border-b 2xl:border-b-0 2xl:border-r border-neutral-200">
+            <table class="w-full text-sm">
+              <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+                <tr>
+                  <th class="text-left px-3 py-2 w-40">时间</th>
+                  <th class="text-left px-3 py-2 w-24">来源</th>
+                  <th class="text-left px-3 py-2 min-w-[520px]">新闻内容</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in latestNews" :key="item.id" class="border-b border-neutral-100 hover:bg-neutral-50">
+                  <td class="px-3 py-2 text-xs text-neutral-500">{{ item.time }}</td>
+                  <td class="px-3 py-2">{{ item.source || '-' }}</td>
+                  <td class="px-3 py-2">{{ item.text }}</td>
+                </tr>
+                <tr v-if="!latestNews.length">
+                  <td colspan="3" class="px-3 py-10 text-center text-neutral-500">暂无新闻</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="divide-y divide-neutral-100 max-h-80 overflow-auto">
+            <div v-for="event in structuredEvents" :key="event.event_id" class="p-3 hover:bg-neutral-50">
+              <div class="flex items-center justify-between gap-2">
+                <div class="font-semibold">{{ event.name }} <span class="text-xs text-neutral-500">{{ event.code }}</span></div>
+                <div class="text-xs text-neutral-500">{{ event.event_type }}</div>
+              </div>
+              <div class="text-xs text-neutral-500 mt-1">{{ event.industry }} / 影响 {{ fixed(event.impact_score) }} / 情绪 {{ fixed(event.sentiment, 3) }}</div>
+              <div class="text-sm mt-2 line-clamp-2">{{ event.reason || event.text }}</div>
+            </div>
+            <div v-if="!structuredEvents.length" class="p-8 text-center text-neutral-500">暂无结构化事件</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="mobile-page trade-grid grid grid-cols-1 2xl:grid-cols-[1.1fr_1fr] gap-4" :class="{ 'active-mobile': mobileView === 'buy' || mobileView === 'positions' }">
+        <div class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'buy' }">
+          <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 class="font-semibold">今日买入计划</h2>
+              <div class="text-xs text-neutral-500">达到买入阈值的股票，按评分排序</div>
+            </div>
+            <div class="text-xs text-neutral-500">买入阈值 {{ fixed(rules.buy_threshold) }}，单票资金 {{ money(rules.paper_position_value) }}</div>
+          </div>
+          <div class="compact-list mobile-only">
+            <article v-for="item in buyList" :key="item.code" class="compact-card">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-semibold truncate">{{ item.name }}</div>
+                  <div class="text-xs text-neutral-500">{{ item.code }} · {{ item.industry || '-' }}</div>
+                </div>
+                <div class="text-right shrink-0">
+                  <div class="text-red-600 font-semibold">买 {{ fixed(item.buy_score) }}</div>
+                  <div class="text-xs text-neutral-500">卖 {{ fixed(item.sell_score) }}</div>
+                </div>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                <span class="px-2 py-1 bg-neutral-100 text-neutral-700">{{ item.event_type || '事件' }}</span>
+                <span class="px-2 py-1 bg-red-50 text-red-700">新闻 {{ item.event_count || 0 }}</span>
+              </div>
+              <p class="mt-2 text-sm text-neutral-700 line-clamp-2">{{ item.reason || '-' }}</p>
+              <div class="compact-meta mt-3">
+                <div>
+                  <div class="label">情绪</div>
+                  <div class="value">{{ fixed((item.components || {}).sentiment_score) }}</div>
+                </div>
+                <div>
+                  <div class="label">事件</div>
+                  <div class="value">{{ fixed((item.components || {}).event_score) }}</div>
+                </div>
+                <div>
+                  <div class="label">风控</div>
+                  <div class="value">{{ fixed((item.components || {}).risk_score) }}</div>
+                </div>
+              </div>
+            </article>
+            <div v-if="!buyList.length" class="px-4 py-10 text-center text-neutral-500">这一天没有达到买入阈值的股票</div>
+          </div>
+          <div class="table-wrap desktop-mobile-table overflow-auto max-h-[510px]">
+            <table class="w-full text-sm">
+              <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+                <tr>
+                  <th class="text-left px-3 py-2 w-28">证券</th>
+                  <th class="text-right px-3 py-2 w-20">买入分</th>
+                  <th class="text-right px-3 py-2 w-20">卖出分</th>
+                  <th class="text-left px-3 py-2 w-32">行业</th>
+                  <th class="text-left px-3 py-2 w-28">事件</th>
+                  <th class="text-left px-3 py-2 min-w-[320px]">买入逻辑</th>
+                  <th class="text-right px-3 py-2 w-24">新闻数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in buyList" :key="item.code" class="border-b border-neutral-100 hover:bg-red-50">
+                  <td class="px-3 py-3">
+                    <div class="font-semibold">{{ item.name }}</div>
+                    <div class="text-xs text-neutral-500">{{ item.code }}</div>
+                  </td>
+                  <td class="px-3 py-3 text-right font-semibold text-red-600">{{ fixed(item.buy_score) }}</td>
+                  <td class="px-3 py-3 text-right">{{ fixed(item.sell_score) }}</td>
+                  <td class="px-3 py-3">{{ item.industry || '-' }}</td>
+                  <td class="px-3 py-3">{{ item.event_type || '-' }}</td>
+                  <td class="px-3 py-3">
+                    <div class="line-clamp-2">{{ item.reason || '-' }}</div>
+                    <div class="text-xs text-neutral-500 mt-1">情绪 {{ fixed((item.components || {}).sentiment_score) }} / 事件 {{ fixed((item.components || {}).event_score) }} / 技术 {{ fixed((item.components || {}).technical_score) }} / 风控 {{ fixed((item.components || {}).risk_score) }}</div>
+                  </td>
+                  <td class="px-3 py-3 text-right">{{ item.event_count || 0 }}</td>
+                </tr>
+                <tr v-if="!buyList.length">
+                  <td colspan="7" class="px-3 py-10 text-center text-neutral-500">这一天没有达到买入阈值的股票</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'positions' }">
+          <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 class="font-semibold">持仓</h2>
+              <div class="text-xs text-neutral-500">估算盈亏含买入费用，优先使用分时最新价；A股T+1显示可用数量</div>
+            </div>
+            <div class="text-xs text-neutral-500">持仓市值 {{ money(account.market_value) }}</div>
+          </div>
+          <div class="compact-list mobile-only">
+            <article v-for="pos in positions" :key="pos.code" class="compact-card">
+              <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <div class="font-semibold truncate">{{ pos.name }}</div>
+                  <div class="text-xs text-neutral-500">{{ pos.code }} · {{ pos.entry_date }}</div>
+                </div>
+                <div class="text-right shrink-0">
+                  <div class="font-semibold" :class="numClass(pos.pnl_amount)">{{ money(pos.pnl_amount) }}</div>
+                  <div class="text-xs font-semibold" :class="numClass(pos.pnl_pct)">{{ pct(pos.pnl_pct) }}</div>
+                </div>
+              </div>
+              <div class="compact-meta mt-3">
+                <div>
+                  <div class="label">持仓/可用</div>
+                  <div class="value">{{ qty(pos.qty) }} / {{ qty(pos.available_qty) }}</div>
+                </div>
+                <div>
+                  <div class="label">成本/现价</div>
+                  <div class="value">{{ fixed(pos.cost_price, 3) }} / {{ fixed(pos.last_price, 3) }}</div>
+                </div>
+                <div>
+                  <div class="label">市值</div>
+                  <div class="value">{{ money(pos.market_value) }}</div>
+                </div>
+              </div>
+              <div class="mt-2 flex items-center justify-between gap-2 text-xs text-neutral-500">
+                <span>{{ pos.price_source === 'intraday' ? '分时估值' : '日K估值' }} {{ shortTime(pos.last_time || pos.last_date) }}</span>
+                <span v-if="pos.frozen_qty" class="text-orange-700">T+1冻结 {{ qty(pos.frozen_qty) }}</span>
+              </div>
+            </article>
+            <div v-if="!positions.length" class="px-4 py-10 text-center text-neutral-500">暂无持仓</div>
+          </div>
+          <div class="table-wrap desktop-mobile-table overflow-auto max-h-[510px]">
+            <table class="w-full text-sm">
+              <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+                <tr>
+                  <th class="text-left px-3 py-2">证券</th>
+                  <th class="text-right px-3 py-2">持仓</th>
+                  <th class="text-right px-3 py-2">可用</th>
+                  <th class="text-right px-3 py-2">成本</th>
+                  <th class="text-right px-3 py-2">现价</th>
+                  <th class="text-right px-3 py-2">市值</th>
+                  <th class="text-right px-3 py-2">盈亏</th>
+                  <th class="text-right px-3 py-2">盈亏%</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="pos in positions" :key="pos.code" class="border-b border-neutral-100 hover:bg-neutral-50">
+                  <td class="px-3 py-3">
+                    <div class="font-semibold">{{ pos.name }}</div>
+                    <div class="text-xs text-neutral-500">{{ pos.code }}</div>
+                  </td>
+                  <td class="px-3 py-3 text-right">{{ qty(pos.qty) }}</td>
+                  <td class="px-3 py-3 text-right">{{ qty(pos.available_qty) }}</td>
+                  <td class="px-3 py-3 text-right">{{ fixed(pos.cost_price, 3) }}</td>
+                  <td class="px-3 py-3 text-right">
+                    {{ fixed(pos.last_price, 3) }}
+                    <div class="text-xs text-neutral-500">{{ pos.price_source === 'intraday' ? '分时' : '日K' }} {{ shortTime(pos.last_time || pos.last_date) }}</div>
+                  </td>
+                  <td class="px-3 py-3 text-right">{{ money(pos.market_value) }}</td>
+                  <td class="px-3 py-3 text-right font-semibold" :class="numClass(pos.pnl_amount)">{{ money(pos.pnl_amount) }}</td>
+                  <td class="px-3 py-3 text-right font-semibold" :class="numClass(pos.pnl_pct)">{{ pct(pos.pnl_pct) }}</td>
+                </tr>
+                <tr v-if="!positions.length">
+                  <td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无持仓</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'deals' }">
+        <div class="px-4 py-3 border-b border-neutral-300 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div class="tab-strip flex flex-wrap gap-2">
+            <button v-for="tab in tabs" :key="tab.key" @click="activeTab = tab.key" class="h-8 px-3 border text-sm" :class="activeTab === tab.key ? 'bg-[#151922] text-white border-[#151922]' : 'bg-white border-neutral-300'">
+              {{ tab.label }}
+            </button>
+          </div>
+          <div class="text-xs text-neutral-500">
+            历史成交 {{ historyDeals.length }}，交割单 {{ deliveryRecords.length }}，历史计划 {{ historyDays.length }}
+          </div>
+        </div>
+
+        <div v-show="activeTab === 'deals'" class="compact-list mobile-only">
+          <article v-for="deal in historyDeals" :key="deal.deal_id" class="compact-card">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="font-semibold truncate">{{ deal.name }}</div>
+                <div class="text-xs text-neutral-500">{{ deal.code }} · {{ shortTime(deal.time || deal.date) }}</div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="font-semibold" :class="sideClass(deal.side)">{{ deal.direction || deal.side }}</div>
+                <div class="text-xs" :class="numClass(deal.realized_pnl)">{{ money(deal.realized_pnl) }}</div>
+              </div>
+            </div>
+            <div class="compact-meta mt-3">
+              <div>
+                <div class="label">数量</div>
+                <div class="value">{{ qty(deal.qty) }}</div>
+              </div>
+              <div>
+                <div class="label">价格</div>
+                <div class="value">{{ fixed(deal.price, 3) }}</div>
+              </div>
+              <div>
+                <div class="label">金额/费用</div>
+                <div class="value">{{ money(deal.amount) }} / {{ money(deal.total_fee) }}</div>
+              </div>
+            </div>
+            <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
+          </article>
+          <div v-if="!historyDeals.length" class="px-4 py-10 text-center text-neutral-500">暂无历史成交</div>
+        </div>
+        <div v-show="activeTab === 'deals'" class="table-wrap desktop-mobile-table overflow-auto max-h-[560px]">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+              <tr>
+                <th class="text-left px-3 py-2">成交时间</th>
+                <th class="text-left px-3 py-2">方向</th>
+                <th class="text-left px-3 py-2">证券</th>
+                <th class="text-right px-3 py-2">数量</th>
+                <th class="text-right px-3 py-2">价格</th>
+                <th class="text-right px-3 py-2">成交金额</th>
+                <th class="text-right px-3 py-2">费用</th>
+                <th class="text-right px-3 py-2">已实现</th>
+                <th class="text-left px-3 py-2 min-w-[300px]">原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="deal in historyDeals" :key="deal.deal_id" class="border-b border-neutral-100 hover:bg-neutral-50">
+                <td class="px-3 py-2">{{ deal.time || deal.date }}</td>
+                <td class="px-3 py-2 font-semibold" :class="sideClass(deal.side)">{{ deal.direction || deal.side }}</td>
+                <td class="px-3 py-2">{{ deal.name }} <span class="text-xs text-neutral-500">{{ deal.code }}</span></td>
+                <td class="px-3 py-2 text-right">{{ qty(deal.qty) }}</td>
+                <td class="px-3 py-2 text-right">{{ fixed(deal.price, 3) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(deal.amount) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(deal.total_fee) }}</td>
+                <td class="px-3 py-2 text-right" :class="numClass(deal.realized_pnl)">{{ money(deal.realized_pnl) }}</td>
+                <td class="px-3 py-2 line-clamp-2">{{ deal.reason || '-' }}</td>
+              </tr>
+              <tr v-if="!historyDeals.length">
+                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无历史成交</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-show="activeTab === 'delivery'" class="compact-list mobile-only">
+          <article v-for="record in deliveryRecords" :key="'delivery-mobile-' + record.deal_id" class="compact-card">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="font-semibold truncate">{{ record.name }}</div>
+                <div class="text-xs text-neutral-500">{{ record.code }} · {{ record.date }}</div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="font-semibold" :class="sideClass(record.side)">{{ record.direction }}</div>
+                <div class="text-xs" :class="numClass(record.net_amount)">清算 {{ money(record.net_amount) }}</div>
+              </div>
+            </div>
+            <div class="compact-meta mt-3">
+              <div>
+                <div class="label">数量/价格</div>
+                <div class="value">{{ qty(record.qty) }} / {{ fixed(record.price, 3) }}</div>
+              </div>
+              <div>
+                <div class="label">成交金额</div>
+                <div class="value">{{ money(record.amount) }}</div>
+              </div>
+              <div>
+                <div class="label">盈亏/费用</div>
+                <div class="value">{{ money(record.realized_pnl) }} / {{ money(record.total_fee) }}</div>
+              </div>
+            </div>
+          </article>
+          <div v-if="!deliveryRecords.length" class="px-4 py-10 text-center text-neutral-500">暂无交割记录</div>
+        </div>
+        <div v-show="activeTab === 'delivery'" class="table-wrap desktop-mobile-table overflow-auto max-h-[560px]">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+              <tr>
+                <th class="text-left px-3 py-2">交割日期</th>
+                <th class="text-left px-3 py-2">证券</th>
+                <th class="text-left px-3 py-2">买卖</th>
+                <th class="text-right px-3 py-2">成交数量</th>
+                <th class="text-right px-3 py-2">成交价格</th>
+                <th class="text-right px-3 py-2">成交金额</th>
+                <th class="text-right px-3 py-2">佣金</th>
+                <th class="text-right px-3 py-2">印花税</th>
+                <th class="text-right px-3 py-2">过户费</th>
+                <th class="text-right px-3 py-2">清算金额</th>
+                <th class="text-right px-3 py-2">已实现盈亏</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="record in deliveryRecords" :key="'delivery-' + record.deal_id" class="border-b border-neutral-100 hover:bg-neutral-50">
+                <td class="px-3 py-2">{{ record.date }}</td>
+                <td class="px-3 py-2">{{ record.name }} <span class="text-xs text-neutral-500">{{ record.code }}</span></td>
+                <td class="px-3 py-2 font-semibold" :class="sideClass(record.side)">{{ record.direction }}</td>
+                <td class="px-3 py-2 text-right">{{ qty(record.qty) }}</td>
+                <td class="px-3 py-2 text-right">{{ fixed(record.price, 3) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(record.amount) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(record.commission) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(record.stamp_duty) }}</td>
+                <td class="px-3 py-2 text-right">{{ money(record.transfer_fee) }}</td>
+                <td class="px-3 py-2 text-right" :class="numClass(record.net_amount)">{{ money(record.net_amount) }}</td>
+                <td class="px-3 py-2 text-right" :class="numClass(record.realized_pnl)">{{ money(record.realized_pnl) }}</td>
+              </tr>
+              <tr v-if="!deliveryRecords.length">
+                <td colspan="11" class="px-3 py-10 text-center text-neutral-500">暂无交割记录</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-show="activeTab === 'history'" class="divide-y divide-neutral-200">
+          <div v-for="day in historyDays" :key="day.date" class="p-4">
+            <div class="flex flex-col gap-1 md:flex-row md:items-center md:justify-between mb-3">
+              <div class="font-semibold">{{ day.date }}</div>
+              <div class="text-xs text-neutral-500">
+                信号 {{ day.signal_count }}，已卖 {{ day.sold_count }}，持仓 {{ day.holding_count }}，已卖平均收益
+                <span :class="numClass(day.avg_sold_pnl_pct)">{{ pct(day.avg_sold_pnl_pct) }}</span>
+              </div>
+            </div>
+            <div class="table-wrap overflow-auto">
+              <table class="w-full text-sm">
+                <thead class="bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
+                  <tr>
+                    <th class="text-left px-3 py-2">证券</th>
+                    <th class="text-right px-3 py-2">评分</th>
+                    <th class="text-left px-3 py-2">计划买入</th>
+                    <th class="text-left px-3 py-2">实际买入</th>
+                    <th class="text-left px-3 py-2">卖出</th>
+                    <th class="text-right px-3 py-2">收益</th>
+                    <th class="text-left px-3 py-2">状态</th>
+                    <th class="text-left px-3 py-2 min-w-[300px]">逻辑</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="sig in day.signals" :key="day.date + sig.code" class="border-b border-neutral-100 hover:bg-neutral-50">
+                    <td class="px-3 py-2">{{ sig.name }} <span class="text-xs text-neutral-500">{{ sig.code }}</span></td>
+                    <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(sig.buy_score) }}</td>
+                    <td class="px-3 py-2">{{ sig.execute_on || '-' }}</td>
+                    <td class="px-3 py-2">{{ (sig.outcome || {}).buy_date || '-' }} <span class="text-xs text-neutral-500">{{ fixed((sig.outcome || {}).buy_price) }}</span></td>
+                    <td class="px-3 py-2">{{ (sig.outcome || {}).sell_date || '-' }} <span class="text-xs text-neutral-500">{{ fixed((sig.outcome || {}).sell_price || (sig.outcome || {}).last_price) }}</span></td>
+                    <td class="px-3 py-2 text-right font-semibold" :class="numClass((sig.outcome || {}).pnl_pct)">{{ (sig.outcome || {}).status ? pct((sig.outcome || {}).pnl_pct) : '-' }}</td>
+                    <td class="px-3 py-2">
+                      <span class="px-2 py-1 text-xs" :class="statusClass((sig.outcome || {}).status)">
+                        {{ (sig.outcome || {}).status || '待执行' }}
+                      </span>
+                    </td>
+                    <td class="px-3 py-2">
+                      <div class="line-clamp-2">{{ sig.reason }}</div>
+                      <div v-if="(sig.outcome || {}).unfilled_reason" class="text-xs text-orange-700 mt-1">{{ sig.outcome.unfilled_reason }}</div>
+                      <div v-if="(sig.outcome || {}).sell_reason" class="text-xs text-neutral-500 mt-1">卖出：{{ sig.outcome.sell_reason }}</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div v-if="!historyDays.length" class="p-10 text-center text-neutral-500">暂无历史买入信号</div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="desktop-shell mobile-bottom-nav">
+      <button @click="setMobileView('overview')" :class="{ active: mobileView === 'overview' }">概览</button>
+      <button @click="setMobileView('buy')" :class="{ active: mobileView === 'buy' }">买入</button>
+      <button @click="setMobileView('positions')" :class="{ active: mobileView === 'positions' }">持仓</button>
+      <button @click="setMobileView('deals')" :class="{ active: mobileView === 'deals' }">成交</button>
+      <button @click="setMobileView('news')" :class="{ active: mobileView === 'news' }">新闻</button>
+    </nav>
+  </div>
+
+  <script>
+    const { createApp } = Vue;
+
+    createApp({
+      data() {
+        return {
+          asOf: '',
+          clockText: '',
+          clockTimer: null,
+          loading: false,
+          syncing: false,
+          activeTab: 'deals',
+          mobileView: 'overview',
+          plan: {},
+          accountView: {},
+          status: {},
+          jobStatus: {},
+          jobLogs: {},
+          recommendations: {},
+          newsFeed: {},
+          syncResult: {},
+          tabs: [
+            { key: 'deals', label: '历史成交' },
+            { key: 'delivery', label: '交割单' },
+            { key: 'history', label: '历史计划收益' },
+          ],
+        };
+      },
+      computed: {
+        account() { return this.accountView.account || {}; },
+        scheduler() { return this.jobStatus.scheduler || {}; },
+        recentLogs() { return (this.jobLogs.items || []).slice(0, 3); },
+        dataDate() { return this.status.data_date || this.status.latest_event_date || ''; },
+        latestNews() { return this.newsFeed.items || []; },
+        structuredEvents() { return this.newsFeed.events || []; },
+        positions() { return this.accountView.positions || []; },
+        todayDeals() { return this.accountView.today_deals || []; },
+        historyDeals() { return this.accountView.history_deals || []; },
+        deliveryRecords() { return this.accountView.delivery_records || []; },
+        frozenMarketValue() {
+          return this.positions.reduce((sum, pos) => sum + Number(pos.frozen_qty || 0) * Number(pos.last_price || 0), 0);
+        },
+        buySignalCount() {
+          const items = this.recommendations.items || this.plan.buy_list || [];
+          return items.filter(item => String(item.action || '买入').includes('买入') || Number(item.buy_score || 0) >= Number(this.rules.buy_threshold || 72)).length;
+        },
+        todaySellCount() {
+          return this.todayDeals.filter(deal => deal.side === 'SELL').length;
+        },
+        warningPositionCount() {
+          return this.positions.filter(pos => Number(pos.pnl_pct || 0) < -3 || Number(pos.frozen_qty || 0) > 0).length;
+        },
+        latestNewsCount() {
+          const byDate = (((this.status.jobs || {}).news_fetcher || {}).recent_dates || {})[this.asOf];
+          return Number(this.newsFeed.count || this.latestNews.length || byDate || this.status.news_count || this.status.latest_news_count || 0);
+        },
+        mobileEventList() {
+          const fallbackEvents = (this.recommendations.items || []).flatMap(item => item.events || []);
+          const events = (this.structuredEvents || []).length ? this.structuredEvents : fallbackEvents;
+          return events
+            .slice()
+            .sort((a, b) => Number(b.impact_score || 0) - Number(a.impact_score || 0))
+            .slice(0, 12);
+        },
+        buyList() {
+          const planned = this.plan.buy_list || [];
+          const items = planned.length ? planned : ((this.recommendations.items || []).filter(item => String(item.action || '').includes('买入')));
+          const mobileLimit = Math.max(3, Number(this.rules.top_n || 5));
+          return window.innerWidth <= 767 ? items.slice(0, mobileLimit) : items;
+        },
+        historyDays() { return this.plan.history_days || []; },
+        summary() { return this.plan.timeline_summary || {}; },
+        rules() { return this.plan.current_rules || this.recommendations.strategy_params || {}; },
+      },
+      mounted() {
+        this.updateClock();
+        this.clockTimer = window.setInterval(this.updateClock, 30000);
+        this.asOf = this.localToday();
+        const initialView = new URLSearchParams(window.location.search).get('view');
+        if (['overview', 'buy', 'positions', 'deals', 'news'].includes(initialView)) {
+          this.mobileView = initialView;
+        }
+        this.loadAll();
+      },
+      beforeUnmount() {
+        if (this.clockTimer) window.clearInterval(this.clockTimer);
+      },
+      methods: {
+        async api(url, options = {}) {
+          const res = await fetch(url, options);
+          if (!res.ok) throw new Error(await res.text());
+          return await res.json();
+        },
+        async loadAll() {
+          this.loading = true;
+          try {
+            await this.loadMarketData(true);
+            Promise.allSettled([
+              this.api('/api/status').then(data => { this.status = data; }),
+              this.api('/api/jobs/status').then(data => { this.jobStatus = data; }),
+              this.api('/api/jobs/logs?limit=12').then(data => { this.jobLogs = data; }),
+            ]);
+            if (window.innerWidth > 767 || ['overview', 'news'].includes(this.mobileView)) {
+              if (window.innerWidth <= 767 && this.mobileView === 'news') {
+                await this.loadNews(true);
+              } else {
+                this.loadNews(true);
+              }
+            }
+            if (window.innerWidth > 767 || ['overview', 'buy', 'deals', 'news'].includes(this.mobileView)) {
+              this.loadRecommendations(true);
+              window.setTimeout(() => this.loadPlan(true), 800);
+            }
+          } finally {
+            this.loading = false;
+          }
+        },
+        async loadMarketData(quiet = false) {
+          try {
+            const date = this.asOf || '';
+            const accountQuery = date ? `?as_of=${date}&limit=500` : '?limit=500';
+            const account = await this.api(`/api/quant/trading_account${accountQuery}`);
+            this.accountView = account;
+            if (!this.asOf && account.as_of) this.asOf = account.as_of;
+          } catch (err) {
+            if (!quiet) throw err;
+          }
+        },
+        async loadNews(quiet = false) {
+          try {
+            const date = this.asOf || '';
+            const limit = window.innerWidth <= 767 ? 30 : 80;
+            const newsQuery = date ? `?as_of=${date}&limit=${limit}` : `?limit=${limit}`;
+            this.newsFeed = await this.api(`/api/quant/news${newsQuery}`);
+          } catch (err) {
+            if (!quiet) throw err;
+          }
+        },
+        async loadPlan(quiet = false) {
+          try {
+            const date = this.asOf || '';
+            const planQuery = date ? `?as_of=${date}&limit_days=120` : '?limit_days=120';
+            const plan = await this.api(`/api/quant/daily_plan${planQuery}`);
+            this.plan = plan;
+            if (!this.asOf && plan.as_of) this.asOf = plan.as_of;
+          } catch (err) {
+            if (!quiet) throw err;
+          }
+        },
+        async loadRecommendations(quiet = false) {
+          try {
+            const q = new URLSearchParams({ lookback_days: '2', top_n: window.innerWidth <= 767 ? '12' : '30' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            this.recommendations = await this.api(`/api/quant/recommendations?${q.toString()}`);
+          } catch (err) {
+            if (!quiet) throw err;
+          }
+        },
+        async syncIntraday() {
+          this.syncing = true;
+          try {
+            const date = this.asOf || this.plan.as_of || '';
+            const q = date ? `?date=${date}&source=events&max_codes=200` : '?source=events&max_codes=200';
+            this.syncResult = await this.api(`/api/data/biying/sync_intraday${q}`, { method: 'POST' });
+            await this.loadAll();
+          } finally {
+            this.syncing = false;
+          }
+        },
+        setMobileView(view) {
+          this.mobileView = view;
+          if (view === 'overview' && !this.recommendations.items) this.loadRecommendations(true);
+          if (view === 'overview' && !this.newsFeed.items) this.loadNews(true);
+          if (view === 'buy' && !this.recommendations.items) this.loadRecommendations(true);
+          if (view === 'buy' && !this.plan.as_of) this.loadPlan(true);
+          if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
+          if (view === 'news' && !this.recommendations.items) this.loadRecommendations(true);
+          if (view === 'deals') this.activeTab = 'deals';
+        },
+        updateClock() {
+          this.clockText = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }).format(new Date());
+        },
+        localToday() {
+          const parts = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).formatToParts(new Date()).reduce((acc, part) => {
+            acc[part.type] = part.value;
+            return acc;
+          }, {});
+          return `${parts.year}-${parts.month}-${parts.day}`;
+        },
+        shortTime(value) {
+          const text = String(value || '');
+          if (!text) return '-';
+          return text.length >= 16 ? text.slice(5, 16).replace('T', ' ') : text;
+        },
+        fixed(value, digits = 2) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toFixed(digits) : '-';
+        },
+        pct(value) {
+          return `${this.fixed(value)}%`;
+        },
+        signedMoney(value) {
+          const n = Number(value || 0);
+          if (!Number.isFinite(n)) return '-';
+          const text = Math.abs(n).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          return `${n > 0 ? '+' : n < 0 ? '-' : ''}${text}`;
+        },
+        signedPct(value) {
+          const n = Number(value || 0);
+          if (!Number.isFinite(n)) return '-';
+          return `${n > 0 ? '+' : n < 0 ? '-' : ''}${Math.abs(n).toFixed(2)}%`;
+        },
+        money(value) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-';
+        },
+        qty(value) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '-';
+        },
+        numClass(value) {
+          const n = Number(value || 0);
+          if (n > 0) return 'text-red-600';
+          if (n < 0) return 'text-green-700';
+          return 'text-neutral-700';
+        },
+        sideClass(side) {
+          return side === 'BUY' ? 'text-red-600' : 'text-green-700';
+        },
+        statusClass(status) {
+          if (status === '已卖出') return 'bg-neutral-900 text-white';
+          if (status === '持仓中') return 'bg-red-100 text-red-700';
+          if (status === '未成交') return 'bg-orange-100 text-orange-700';
+          return 'bg-neutral-100 text-neutral-600';
+        },
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

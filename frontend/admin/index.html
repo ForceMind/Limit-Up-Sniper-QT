@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>涨停狙击手后台</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  <style>
+    [v-cloak] { display: none; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; max-width: 100%; overflow-x: hidden; }
+    body { letter-spacing: 0; font-family: Arial, "Microsoft YaHei", sans-serif; max-width: 100%; overflow-x: hidden; }
+    input, select, button { max-width: 100%; }
+    *, *::before, *::after { box-sizing: border-box; }
+    #app, .app-shell, .main-content, .panel, section { max-width: 100%; min-width: 0; }
+    .panel { border: 1px solid #d6d9de; background: #fff; border-radius: 6px; }
+    .metric { border: 1px solid #d6d9de; background: #fff; border-radius: 6px; padding: 12px; min-height: 78px; }
+    .table-wrap { scrollbar-width: thin; overflow-x: auto; max-width: 100%; min-width: 0; }
+    .table-wrap table { min-width: 760px; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .log-window { height: calc(100vh - 178px); min-height: 520px; scrollbar-width: thin; }
+    .tab-button { border-radius: 6px; }
+    .tab-button.active { background: #111827; color: #fff; }
+    @media (max-width: 1279px) {
+      .app-shell { display: block !important; }
+      .sidebar { position: sticky; top: 0; z-index: 40; border-right: 0; border-bottom: 1px solid #d6d9de; padding: 12px; }
+      .sidebar-brand { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+      .nav-menu { display: flex !important; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+      .nav-menu::-webkit-scrollbar { display: none; }
+      .nav-menu .tab-button { flex: 0 0 auto; height: 36px; white-space: nowrap; padding-left: 12px; padding-right: 12px; }
+      .sidebar-status { display: grid !important; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb; }
+      .sidebar-status > :not([hidden]) ~ :not([hidden]) { margin-top: 0 !important; }
+      .sidebar-status > div { border: 1px solid #e5e7eb; background: #f8fafc; border-radius: 6px; padding: 8px; }
+      .sidebar-status > a { grid-column: 1 / -1; }
+      .main-content { padding: 12px; }
+      .log-panel { border-left: 0; border-top: 1px solid #1f2937; }
+      .log-window { height: 420px; min-height: 420px; }
+    }
+    @media (max-width: 767px) {
+      .sidebar { padding: 10px 12px; }
+      .sidebar-brand { margin-bottom: 8px; }
+      .sidebar-title { font-size: 18px; line-height: 24px; }
+      .sidebar-subtitle { font-size: 11px; }
+      .sidebar-status { grid-template-columns: repeat(2, minmax(0, 1fr)); font-size: 11px; }
+      .sidebar-status > div:nth-child(3) { grid-column: 1 / -1; }
+      .main-content { padding: 10px; }
+      .mobile-header { padding: 12px; }
+      .mobile-title { font-size: 20px; line-height: 26px; }
+      .top-actions { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+      .top-actions input { grid-column: 1 / -1; width: 100%; }
+      .top-actions button, .top-actions label { width: 100%; justify-content: center; }
+      .metric { min-height: 72px; padding: 10px; }
+      .job-row { grid-template-columns: 1fr !important; padding: 12px; }
+      .job-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+      .log-panel { padding: 12px; }
+      .log-filters { grid-template-columns: 1fr; }
+      .log-window { height: 340px; min-height: 340px; }
+    }
+    @media (max-width: 420px) {
+      .metric { min-height: 68px; }
+      .metric .text-lg { font-size: 16px; line-height: 22px; }
+      .table-wrap table { min-width: 680px; }
+    }
+  </style>
+</head>
+<body class="bg-[#f4f6f8] text-neutral-900 min-h-screen">
+  <div id="app" v-cloak class="min-h-screen">
+    <div class="app-shell grid min-h-screen xl:grid-cols-[220px_minmax(0,1fr)_390px]">
+      <aside class="sidebar bg-white border-r border-neutral-200 p-4 xl:sticky xl:top-0 xl:h-screen">
+        <div class="sidebar-brand mb-5">
+          <div>
+            <div class="sidebar-title text-lg font-semibold">涨停狙击手</div>
+            <div class="sidebar-subtitle text-xs text-neutral-500 mt-1">动态量化后台</div>
+          </div>
+        </div>
+        <nav class="nav-menu grid gap-1">
+          <button
+            v-for="tab in tabs"
+            :key="tab.key"
+            @click="activeTab = tab.key"
+            class="tab-button h-10 px-3 text-left text-sm hover:bg-neutral-100"
+            :class="{ active: activeTab === tab.key }"
+          >{{ tab.label }}</button>
+        </nav>
+        <div class="sidebar-status mt-5 pt-4 border-t border-neutral-200 text-xs space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-neutral-500">调度器</span>
+            <span class="font-semibold" :class="scheduler.enabled ? 'text-emerald-700' : 'text-neutral-500'">{{ scheduler.status || '-' }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-neutral-500">交易时段</span>
+            <span class="font-semibold" :class="scheduler.market_open ? 'text-red-600' : 'text-neutral-500'">{{ scheduler.market_open ? '开盘' : '休市' }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-neutral-500">AI模型</span>
+            <span class="font-semibold truncate max-w-[110px]">{{ status.ai_model || '-' }}</span>
+          </div>
+          <a href="/" class="block h-9 leading-9 text-center border border-neutral-300 bg-white text-sm hover:bg-neutral-50">前台买入列表</a>
+        </div>
+      </aside>
+
+      <main class="main-content min-w-0 p-4 space-y-4">
+        <header class="mobile-header panel p-4">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <h1 class="mobile-title text-xl font-semibold">系统控制台</h1>
+              <div class="text-xs text-neutral-500 mt-1">
+                服务器时间 {{ status.current_time || '-' }} · 数据日期 {{ status.data_date || '-' }} · 最新新闻 {{ status.latest_news_time || '-' }}
+              </div>
+            </div>
+            <div class="top-actions flex flex-wrap items-center gap-2">
+              <input v-model="asOf" @change="refreshAll" type="date" class="h-9 px-3 border border-neutral-300 bg-white text-sm outline-none focus:border-neutral-900">
+              <button @click="refreshAll" :disabled="loading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ loading ? '刷新中' : '刷新' }}</button>
+              <label class="inline-flex h-9 items-center gap-2 px-3 border border-neutral-300 bg-white text-sm">
+                <input v-model="autoRefresh" type="checkbox" class="accent-neutral-900">
+                自动刷新
+              </label>
+            </div>
+          </div>
+          <div v-if="clientError" class="mt-3 text-sm text-red-700">{{ clientError }}</div>
+        </header>
+
+        <section v-if="activeTab === 'overview'" class="space-y-4">
+          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+            <div class="metric">
+              <div class="text-xs text-neutral-500">分析日期</div>
+              <div class="mt-2 text-lg font-semibold">{{ dashboard.as_of || asOf || '-' }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">新闻 / AI</div>
+              <div class="mt-2 text-lg font-semibold">{{ newsCount }} / {{ aiRecordCount }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">事件 / 股票</div>
+              <div class="mt-2 text-lg font-semibold">{{ eventCount }} / {{ stockCount }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">今日买入候选</div>
+              <div class="mt-2 text-lg font-semibold text-red-600">{{ buyList.length }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">全周期收益</div>
+              <div class="mt-2 text-lg font-semibold" :class="numClass(timeline.return_pct)">{{ pct(timeline.return_pct) }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">胜率 / 交易</div>
+              <div class="mt-2 text-lg font-semibold">{{ pct(timeline.win_rate) }} / {{ timeline.closed_trades || 0 }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">分时缓存</div>
+              <div class="mt-2 text-lg font-semibold">{{ minuteCacheCount }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">账户收益</div>
+              <div class="mt-2 text-lg font-semibold" :class="numClass(account.return_pct)">{{ pct(account.return_pct) }}</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
+              <div class="font-semibold">自动链路</div>
+              <div class="text-xs text-neutral-500">上次心跳 {{ shortTime(scheduler.last_tick_at) }}</div>
+            </div>
+            <div class="divide-y divide-neutral-100">
+              <div v-for="job in jobCards" :key="job.key" class="job-row p-4 grid gap-3 lg:grid-cols-[170px_1fr_180px] lg:items-center">
+                <div>
+                  <div class="font-semibold">{{ job.label }}</div>
+                  <div class="text-xs text-neutral-500 mt-1">{{ job.desc }}</div>
+                </div>
+                <div class="job-metrics grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-neutral-500">状态</div>
+                    <span class="inline-flex mt-1 px-2 py-1 text-xs rounded-md" :class="statusPillClass(jobState(job.key).status)">
+                      {{ jobState(job.key).status || 'pending' }}
+                    </span>
+                  </div>
+                  <div>
+                    <div class="text-xs text-neutral-500">开始</div>
+                    <div class="font-semibold mt-1">{{ shortTime(jobState(job.key).last_started_at) }}</div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-neutral-500">结束</div>
+                    <div class="font-semibold mt-1">{{ shortTime(jobState(job.key).last_finished_at) }}</div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-neutral-500">耗时</div>
+                    <div class="font-semibold mt-1">{{ fixed(jobState(job.key).duration_ms, 0) }} ms</div>
+                  </div>
+                </div>
+                <div class="text-sm text-neutral-700">{{ jobSummary(job.key) }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">下一轮调度</div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">新闻抓取</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_news_fetch_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">AI分析</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_ai_analysis_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">交易循环</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_trade_cycle_at) }}</div></div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">当前账户</div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">总资产</div><div class="font-semibold mt-1">{{ money(account.total_asset) }}</div></div>
+                <div><div class="text-xs text-neutral-500">可用现金</div><div class="font-semibold mt-1">{{ money(account.available_cash) }}</div></div>
+                <div><div class="text-xs text-neutral-500">市值</div><div class="font-semibold mt-1">{{ money(account.market_value) }}</div></div>
+                <div><div class="text-xs text-neutral-500">持仓</div><div class="font-semibold mt-1">{{ account.position_count || 0 }}</div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'signals'" class="space-y-4">
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
+              <div class="font-semibold">今日买入候选</div>
+              <div class="text-xs text-neutral-500">{{ dailyPlan.as_of || asOf || '-' }}</div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[520px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left">股票</th>
+                    <th class="px-3 py-2 text-left">动作</th>
+                    <th class="px-3 py-2 text-right">买入</th>
+                    <th class="px-3 py-2 text-right">卖出</th>
+                    <th class="px-3 py-2 text-left">行业 / 事件</th>
+                    <th class="px-3 py-2 text-left min-w-[320px]">模型解释</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="item in recommendations" :key="item.code" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 font-semibold">{{ item.name }} <span class="text-xs text-neutral-500">{{ item.code }}</span></td>
+                    <td class="px-3 py-2"><span class="px-2 py-1 rounded-md text-xs" :class="actionClass(item.action)">{{ item.action || '-' }}</span></td>
+                    <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(item.buy_score) }}</td>
+                    <td class="px-3 py-2 text-right text-green-700 font-semibold">{{ fixed(item.sell_score) }}</td>
+                    <td class="px-3 py-2">{{ item.industry || '-' }}<div class="text-xs text-neutral-500">{{ item.event_type || '-' }}</div></td>
+                    <td class="px-3 py-2">
+                      <div class="text-xs text-neutral-500">
+                        情绪 {{ fixed((item.components || {}).sentiment_score) }} · 事件 {{ fixed((item.components || {}).event_score) }} · 技术 {{ fixed((item.components || {}).technical_score) }} · 风控 {{ fixed((item.components || {}).risk_score) }}
+                      </div>
+                      <div class="mt-1 line-clamp-2">{{ item.reason || '-' }}</div>
+                    </td>
+                  </tr>
+                  <tr v-if="!recommendations.length"><td colspan="6" class="px-3 py-10 text-center text-neutral-500">暂无推荐</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">最新新闻</div>
+              <div class="divide-y divide-neutral-100 max-h-[520px] overflow-auto">
+                <div v-for="item in latestNews" :key="item.id" class="p-3 hover:bg-neutral-50">
+                  <div class="flex items-center justify-between gap-2 text-xs text-neutral-500">
+                    <span>{{ item.source || '-' }}</span>
+                    <span>{{ item.time || item.time_str || '-' }}</span>
+                  </div>
+                  <div class="text-sm mt-1 line-clamp-2">{{ item.text || '-' }}</div>
+                </div>
+                <div v-if="!latestNews.length" class="p-10 text-center text-neutral-500 text-sm">暂无新闻</div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">结构化事件</div>
+              <div class="divide-y divide-neutral-100 max-h-[520px] overflow-auto">
+                <div v-for="event in latestEvents" :key="event.event_id || `${event.date}-${event.code}`" class="p-3">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="font-semibold">{{ event.name }} <span class="text-xs text-neutral-500">{{ event.code }}</span></div>
+                    <div class="text-xs text-neutral-500">{{ event.date || '-' }}</div>
+                  </div>
+                  <div class="text-xs text-neutral-500 mt-1">{{ event.industry || '-' }} / {{ event.event_type || '-' }} / 影响 {{ fixed(event.impact_score) }}</div>
+                  <div class="text-sm mt-2 line-clamp-2">{{ event.reason || event.text || '-' }}</div>
+                </div>
+                <div v-if="!latestEvents.length" class="p-10 text-center text-neutral-500 text-sm">暂无事件</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'trading'" class="space-y-4">
+          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+            <div class="metric"><div class="text-xs text-neutral-500">总资产</div><div class="mt-2 text-lg font-semibold">{{ money(account.total_asset) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">现金</div><div class="mt-2 text-lg font-semibold">{{ money(account.cash) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">持仓市值</div><div class="mt-2 text-lg font-semibold">{{ money(account.market_value) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">浮动盈亏</div><div class="mt-2 text-lg font-semibold" :class="numClass(account.unrealized_pnl)">{{ money(account.unrealized_pnl) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">已实现盈亏</div><div class="mt-2 text-lg font-semibold" :class="numClass(account.realized_pnl)">{{ money(account.realized_pnl) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">总盈亏</div><div class="mt-2 text-lg font-semibold" :class="numClass(account.total_pnl)">{{ money(account.total_pnl) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">收益率</div><div class="mt-2 text-lg font-semibold" :class="numClass(account.return_pct)">{{ pct(account.return_pct) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">手续费</div><div class="mt-2 text-lg font-semibold">{{ money(account.total_fees) }}</div></div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="font-semibold">交易账户</div>
+              <div class="flex gap-1 text-sm">
+                <button v-for="view in tradeViews" :key="view.key" @click="tradeView = view.key" class="h-8 px-3 border border-neutral-300 bg-white hover:bg-neutral-50" :class="tradeView === view.key ? 'bg-neutral-900 text-white border-neutral-900' : ''">{{ view.label }}</button>
+              </div>
+            </div>
+
+            <div v-if="tradeView === 'positions'" class="table-wrap overflow-auto max-h-[540px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">持仓</th><th class="px-3 py-2 text-right">可用</th><th class="px-3 py-2 text-right">成本</th><th class="px-3 py-2 text-right">现价</th><th class="px-3 py-2 text-right">市值</th><th class="px-3 py-2 text-right">盈亏</th><th class="px-3 py-2 text-left">买入理由</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="pos in positions" :key="pos.code" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 font-semibold">{{ pos.name }} <span class="text-xs text-neutral-500">{{ pos.code }}</span></td>
+                    <td class="px-3 py-2 text-right">{{ pos.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ pos.available_qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(pos.cost_price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(pos.last_price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(pos.market_value) }}</td>
+                    <td class="px-3 py-2 text-right" :class="numClass(pos.pnl_pct)">{{ money(pos.pnl_amount) }}<div class="text-xs">{{ pct(pos.pnl_pct) }}</div></td>
+                    <td class="px-3 py-2 line-clamp-2">{{ pos.reason || '-' }}</td>
+                  </tr>
+                  <tr v-if="!positions.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无持仓</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="tradeView === 'deals'" class="table-wrap overflow-auto max-h-[540px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">时间</th><th class="px-3 py-2 text-left">方向</th><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">价格</th><th class="px-3 py-2 text-right">金额</th><th class="px-3 py-2 text-right">盈亏</th><th class="px-3 py-2 text-left">原因</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="deal in deals" :key="deal.deal_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 whitespace-nowrap">{{ deal.time || deal.date }}</td>
+                    <td class="px-3 py-2"><span :class="sideClass(deal.side)" class="font-semibold">{{ deal.direction || deal.side }}</span></td>
+                    <td class="px-3 py-2 font-semibold">{{ deal.name }} <span class="text-xs text-neutral-500">{{ deal.code }}</span></td>
+                    <td class="px-3 py-2 text-right">{{ deal.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(deal.price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(deal.amount) }}</td>
+                    <td class="px-3 py-2 text-right" :class="numClass(deal.realized_pnl)">{{ money(deal.realized_pnl) }}<div class="text-xs">{{ deal.pnl_pct === null ? '-' : pct(deal.pnl_pct) }}</div></td>
+                    <td class="px-3 py-2 line-clamp-2">{{ deal.reason || '-' }}</td>
+                  </tr>
+                  <tr v-if="!deals.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无成交</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="tradeView === 'delivery'" class="table-wrap overflow-auto max-h-[540px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">交割编号</th><th class="px-3 py-2 text-left">日期</th><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">净发生</th><th class="px-3 py-2 text-right">佣金</th><th class="px-3 py-2 text-right">印花税</th><th class="px-3 py-2 text-right">过户费</th><th class="px-3 py-2 text-right">实现盈亏</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in deliveries" :key="row.deal_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">{{ row.deal_id }}</td><td class="px-3 py-2">{{ row.date }}</td><td class="px-3 py-2">{{ row.name }} <span class="text-xs text-neutral-500">{{ row.code }}</span></td><td class="px-3 py-2 text-right">{{ money(row.net_amount) }}</td><td class="px-3 py-2 text-right">{{ money(row.commission) }}</td><td class="px-3 py-2 text-right">{{ money(row.stamp_duty) }}</td><td class="px-3 py-2 text-right">{{ money(row.transfer_fee) }}</td><td class="px-3 py-2 text-right" :class="numClass(row.realized_pnl)">{{ money(row.realized_pnl) }}</td>
+                  </tr>
+                  <tr v-if="!deliveries.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无交割单</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div v-if="tradeView === 'settlement'" class="table-wrap overflow-auto max-h-[540px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">日期</th><th class="px-3 py-2 text-right">买入</th><th class="px-3 py-2 text-right">卖出</th><th class="px-3 py-2 text-right">费用</th><th class="px-3 py-2 text-right">净发生</th><th class="px-3 py-2 text-right">实现盈亏</th><th class="px-3 py-2 text-right">笔数</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in settlements" :key="row.date" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">{{ row.date }}</td><td class="px-3 py-2 text-right">{{ money(row.buy_amount) }}</td><td class="px-3 py-2 text-right">{{ money(row.sell_amount) }}</td><td class="px-3 py-2 text-right">{{ money(row.total_fee) }}</td><td class="px-3 py-2 text-right">{{ money(row.net_amount) }}</td><td class="px-3 py-2 text-right" :class="numClass(row.realized_pnl)">{{ money(row.realized_pnl) }}</td><td class="px-3 py-2 text-right">{{ row.deal_count }}</td>
+                  </tr>
+                  <tr v-if="!settlements.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无结算</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'analysis'" class="space-y-4">
+          <div class="panel p-4 flex flex-wrap items-center gap-2">
+            <select v-model="tradeMode" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
+              <option value="intraday">分时复盘</option>
+              <option value="daily">日线复盘</option>
+            </select>
+            <input v-model="timelineForm.start_date" type="date" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
+            <input v-model="timelineForm.end_date" type="date" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
+            <button @click="loadTimeline(false)" :disabled="timelineLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ timelineLoading ? '加载中' : '加载复盘' }}</button>
+            <div class="text-sm text-neutral-500 ml-auto">模式 {{ activeTimeline.mode || (tradeMode === 'intraday' ? 'intraday_5m' : 'daily') }}</div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-7 gap-3">
+            <div class="metric"><div class="text-xs text-neutral-500">起止</div><div class="mt-2 font-semibold">{{ activeTimeline.start_date || '-' }} / {{ activeTimeline.end_date || '-' }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">收益</div><div class="mt-2 text-lg font-semibold" :class="numClass(activeTimeline.return_pct)">{{ pct(activeTimeline.return_pct) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">回撤</div><div class="mt-2 text-lg font-semibold text-green-700">{{ pct(activeTimeline.max_drawdown_pct) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">胜率</div><div class="mt-2 text-lg font-semibold">{{ pct(activeTimeline.win_rate) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">闭环交易</div><div class="mt-2 text-lg font-semibold">{{ activeTimeline.closed_trades || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">分时成交</div><div class="mt-2 text-lg font-semibold">{{ activeTimeline.intraday_trade_count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">回退成交</div><div class="mt-2 text-lg font-semibold">{{ activeTimeline.fallback_trade_count || 0 }}</div></div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">资金曲线</div>
+            <div ref="equityChart" class="h-[320px]"></div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[340px_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">每日信号</div>
+              <div class="divide-y divide-neutral-100 max-h-[620px] overflow-auto">
+                <button v-for="day in historyDays" :key="day.date" @click="selectedDayDate = day.date" class="w-full text-left p-3 hover:bg-neutral-50" :class="selectedDayDate === day.date ? 'bg-neutral-100' : ''">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-semibold">{{ day.date }}</span>
+                    <span class="text-xs text-neutral-500">{{ day.signal_count }} 信号</span>
+                  </div>
+                  <div class="mt-1 text-xs text-neutral-500">已卖 {{ day.sold_count || 0 }} · 持仓 {{ day.holding_count || 0 }} · 已卖均值 {{ pct(day.avg_sold_pnl_pct) }}</div>
+                </button>
+                <div v-if="!historyDays.length" class="p-8 text-center text-neutral-500 text-sm">暂无每日信号</div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
+                <div class="font-semibold">当日决策明细</div>
+                <div class="text-xs text-neutral-500">{{ selectedDayDate || '-' }}</div>
+              </div>
+              <div class="table-wrap overflow-auto max-h-[620px]">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                    <tr><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-left">执行日</th><th class="px-3 py-2 text-right">买分</th><th class="px-3 py-2 text-right">卖分</th><th class="px-3 py-2 text-left">结果</th><th class="px-3 py-2 text-right">收益</th><th class="px-3 py-2 text-left min-w-[280px]">原因</th></tr>
+                  </thead>
+                  <tbody class="divide-y divide-neutral-100">
+                    <tr v-for="row in selectedDaySignals" :key="`${row.signal_date}-${row.code}`" class="hover:bg-neutral-50">
+                      <td class="px-3 py-2 font-semibold">{{ row.name }} <span class="text-xs text-neutral-500">{{ row.code }}</span></td>
+                      <td class="px-3 py-2">{{ row.execute_on || '-' }}</td>
+                      <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(row.buy_score) }}</td>
+                      <td class="px-3 py-2 text-right text-green-700 font-semibold">{{ fixed(row.sell_score) }}</td>
+                      <td class="px-3 py-2">{{ (row.outcome || {}).status || '-' }}<div class="text-xs text-neutral-500">{{ (row.outcome || {}).unfilled_reason || '' }}</div></td>
+                      <td class="px-3 py-2 text-right" :class="numClass((row.outcome || {}).pnl_pct)">{{ pct((row.outcome || {}).pnl_pct) }}</td>
+                      <td class="px-3 py-2 line-clamp-2">{{ row.reason || '-' }}</td>
+                    </tr>
+                    <tr v-if="!selectedDaySignals.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无当日信号</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">全程成交流水</div>
+            <div class="table-wrap overflow-auto max-h-[520px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">时间</th><th class="px-3 py-2 text-left">方向</th><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">价格</th><th class="px-3 py-2 text-right">分数/收益</th><th class="px-3 py-2 text-left">模式</th><th class="px-3 py-2 text-left min-w-[260px]">原因</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="trade in timelineTrades" :key="`${trade.date}-${trade.time || ''}-${trade.side}-${trade.code}-${trade.price}`" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 whitespace-nowrap">{{ trade.time || trade.date }}</td>
+                    <td class="px-3 py-2"><span class="font-semibold" :class="sideClass(trade.side)">{{ trade.side }}</span></td>
+                    <td class="px-3 py-2 font-semibold">{{ trade.name }} <span class="text-xs text-neutral-500">{{ trade.code }}</span></td>
+                    <td class="px-3 py-2 text-right">{{ trade.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(trade.price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ trade.side === 'BUY' ? fixed(trade.score) : pct(trade.pnl_pct) }}</td>
+                    <td class="px-3 py-2">{{ trade.mode || '-' }}</td>
+                    <td class="px-3 py-2 line-clamp-2">{{ trade.reason || '-' }}</td>
+                  </tr>
+                  <tr v-if="!timelineTrades.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无成交流水</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'data'" class="space-y-4">
+          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+            <div class="metric"><div class="text-xs text-neutral-500">目标股票</div><div class="mt-2 text-lg font-semibold">{{ ((coverage.summary || {}).target_count) || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">日K覆盖</div><div class="mt-2 text-lg font-semibold">{{ ratioPct((coverage.daily_coverage || {}).ratio) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">分时覆盖</div><div class="mt-2 text-lg font-semibold">{{ ratioPct((coverage.minute_coverage || {}).ratio) }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">AI记录</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.records || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">Token</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.total_tokens || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">降级</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.fallback_records || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">错误</div><div class="mt-2 text-lg font-semibold text-red-600">{{ aiUsage.error_records || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">必赢缓存</div><div class="mt-2 text-lg font-semibold">{{ minuteCacheCount }}</div></div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">数据覆盖</div>
+              <div class="table-wrap overflow-auto max-h-[560px]">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500"><tr><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-left">来源</th><th class="px-3 py-2 text-right">评分</th><th class="px-3 py-2 text-right">日K</th><th class="px-3 py-2 text-right">分时</th><th class="px-3 py-2 text-right">分时根数</th></tr></thead>
+                  <tbody class="divide-y divide-neutral-100">
+                    <tr v-for="row in coverageTargets" :key="row.code" class="hover:bg-neutral-50">
+                      <td class="px-3 py-2 font-semibold">{{ row.name }} <span class="text-xs text-neutral-500">{{ row.code }}</span></td><td class="px-3 py-2">{{ row.source }}</td><td class="px-3 py-2 text-right">{{ fixed(row.score) }}</td><td class="px-3 py-2 text-right" :class="row.daily_kline ? 'text-emerald-700' : 'text-red-600'">{{ row.daily_kline ? '有' : '缺' }}</td><td class="px-3 py-2 text-right" :class="row.minute_kline ? 'text-emerald-700' : 'text-red-600'">{{ row.minute_kline ? '有' : '缺' }}</td><td class="px-3 py-2 text-right">{{ row.minute_rows || 0 }}</td>
+                    </tr>
+                    <tr v-if="!coverageTargets.length"><td colspan="6" class="px-3 py-10 text-center text-neutral-500">暂无覆盖数据</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">AI分析记录</div>
+              <div class="divide-y divide-neutral-100 max-h-[560px] overflow-auto">
+                <div v-for="item in aiRecordItems" :key="item.record_key || item.analyzed_at" class="p-3">
+                  <div class="flex items-center justify-between gap-2 text-xs text-neutral-500">
+                    <span>{{ item.analysis_source || '-' }} / {{ item.model || '-' }}</span>
+                    <span>{{ item.analyzed_at || '-' }}</span>
+                  </div>
+                  <div class="mt-1 text-sm font-semibold">{{ item.status || 'ok' }} · {{ item.event_type || item.industry || '-' }}</div>
+                  <div class="mt-1 text-sm line-clamp-2">{{ item.summary || ((item.news_items || [])[0] || {}).text || '-' }}</div>
+                </div>
+                <div v-if="!aiRecordItems.length" class="p-10 text-center text-neutral-500 text-sm">暂无AI记录</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">AI失败和降级</div>
+            <div class="divide-y divide-neutral-100 max-h-[360px] overflow-auto">
+              <div v-for="item in aiFailureItems" :key="item.record_key || item.analyzed_at" class="p-3">
+                <div class="flex items-center justify-between gap-2 text-xs text-neutral-500"><span>{{ item.analysis_source || '-' }} / {{ item.model || '-' }}</span><span>{{ item.analyzed_at || '-' }}</span></div>
+                <div class="mt-1 text-sm text-red-700">{{ item.error || 'fallback' }}</div>
+                <div class="mt-1 text-sm line-clamp-2">{{ ((item.news_items || [])[0] || {}).text || item.summary || '-' }}</div>
+              </div>
+              <div v-if="!aiFailureItems.length" class="p-10 text-center text-neutral-500 text-sm">暂无AI失败记录</div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'strategy'" class="space-y-4">
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="font-semibold">策略参数</div>
+              <div class="flex gap-2">
+                <button @click="saveStrategy" :disabled="strategySaving" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategySaving ? '保存中' : '保存参数' }}</button>
+                <button @click="resetStrategy" class="h-8 px-3 border border-neutral-300 bg-white text-sm">恢复默认</button>
+              </div>
+            </div>
+            <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-6 gap-3 text-sm">
+              <label v-for="field in strategyFields" :key="field.key">
+                <span class="block text-xs text-neutral-500 mb-1">{{ field.label }}</span>
+                <input v-model.number="strategyForm[field.key]" type="number" :step="field.step || 0.01" class="w-full h-9 px-2 border border-neutral-300 outline-none focus:border-neutral-900">
+              </label>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+                <div class="font-semibold">参数拟合</div>
+                <div class="flex gap-2">
+                  <button @click="fit(false)" :disabled="fitting" class="h-8 px-3 border border-neutral-300 bg-white text-sm disabled:opacity-50">只比较</button>
+                  <button @click="fit(true)" :disabled="fitting" class="h-8 px-3 bg-red-600 text-white text-sm disabled:opacity-50">{{ fitting ? '拟合中' : '拟合并应用' }}</button>
+                </div>
+              </div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">最佳方案</div><div class="font-semibold mt-1">{{ (fitResult.best || {}).name || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">目标值</div><div class="font-semibold mt-1">{{ fixed((fitResult.best || {}).objective) }}</div></div>
+                <div><div class="text-xs text-neutral-500">收益</div><div class="font-semibold mt-1" :class="numClass((fitResult.best || {}).return_pct)">{{ pct((fitResult.best || {}).return_pct) }}</div></div>
+                <div><div class="text-xs text-neutral-500">应用</div><div class="font-semibold mt-1">{{ fitResult.applied ? '已应用' : '未应用' }}</div></div>
+              </div>
+              <div class="table-wrap overflow-auto max-h-[360px]">
+                <table class="w-full text-sm">
+                  <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500"><tr><th class="px-3 py-2 text-left">方案</th><th class="px-3 py-2 text-right">目标</th><th class="px-3 py-2 text-right">收益</th><th class="px-3 py-2 text-right">回撤</th><th class="px-3 py-2 text-right">胜率</th><th class="px-3 py-2 text-right">交易</th></tr></thead>
+                  <tbody class="divide-y divide-neutral-100">
+                    <tr v-for="row in fitCandidates" :key="row.name" class="hover:bg-neutral-50"><td class="px-3 py-2">{{ row.name }}</td><td class="px-3 py-2 text-right">{{ fixed(row.objective) }}</td><td class="px-3 py-2 text-right" :class="numClass(row.return_pct)">{{ pct(row.return_pct) }}</td><td class="px-3 py-2 text-right">{{ pct(row.max_drawdown_pct) }}</td><td class="px-3 py-2 text-right">{{ pct(row.win_rate) }}</td><td class="px-3 py-2 text-right">{{ row.closed_trades || 0 }}</td></tr>
+                    <tr v-if="!fitCandidates.length"><td colspan="6" class="px-3 py-10 text-center text-neutral-500">暂无拟合结果</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+                <div class="font-semibold">遗传进化</div>
+                <button @click="evolveStrategy" :disabled="evolving" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolving ? '进化中' : '启动进化' }}</button>
+              </div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">状态</div><div class="font-semibold mt-1">{{ evolutionStatus.status || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">代数</div><div class="font-semibold mt-1">{{ evolutionStatus.generations || ((evolutionStatus.last_run || {}).generations) || 0 }}</div></div>
+                <div><div class="text-xs text-neutral-500">种群</div><div class="font-semibold mt-1">{{ evolutionStatus.population_size || ((evolutionStatus.last_run || {}).population_size) || 0 }}</div></div>
+                <div><div class="text-xs text-neutral-500">更新时间</div><div class="font-semibold mt-1">{{ shortTime(evolutionStatus.updated_at || ((evolutionStatus.last_run || {}).updated_at)) }}</div></div>
+              </div>
+              <div class="px-4 pb-4 text-sm">
+                <pre class="bg-neutral-100 p-3 rounded-md overflow-auto max-h-[300px]">{{ compactJson(evolutionStatus.best || evolutionStatus.last_run || {}) }}</pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section v-if="activeTab === 'ops'" class="space-y-4">
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
+            <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+              <button @click="fetchNews" :disabled="newsFetching" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ newsFetching ? '抓取中' : '立即抓新闻' }}</button>
+              <button @click="analyzeAI" :disabled="aiAnalyzing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ aiAnalyzing ? '分析中' : '立即AI分析' }}</button>
+              <button @click="syncIntraday" :disabled="syncing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncing ? '同步中' : '同步分时行情' }}</button>
+              <button @click="runTradeCycle" :disabled="runningTrade" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ runningTrade ? '交易中' : '运行交易循环' }}</button>
+              <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
+              <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
+              <button @click="restartService" :disabled="restarting" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
+            </div>
+            <pre v-if="adminResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(adminResult) }}</pre>
+          </div>
+
+          <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">行情同步参数</div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <label><span class="block text-xs text-neutral-500 mb-1">日期</span><input v-model="syncForm.date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+                <label><span class="block text-xs text-neutral-500 mb-1">来源</span><select v-model="syncForm.source" class="w-full h-9 px-2 border border-neutral-300 bg-white"><option value="auto">自动</option><option value="recommendations">推荐</option><option value="events">事件</option><option value="positions">持仓</option></select></label>
+                <label><span class="block text-xs text-neutral-500 mb-1">最大股票数</span><input v-model.number="syncForm.max_codes" type="number" min="1" max="500" class="w-full h-9 px-2 border border-neutral-300"></label>
+                <label class="flex items-end gap-2 h-[57px]"><input v-model="syncForm.force" type="checkbox" class="accent-neutral-900 mb-3"><span class="mb-2 text-sm">强制刷新</span></label>
+              </div>
+              <pre class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(syncResult) }}</pre>
+            </div>
+
+            <div class="panel">
+              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">通知和外部接口</div>
+              <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">邮件启用</div><div class="font-semibold mt-1">{{ notificationStatus.enabled ? '是' : '否' }}</div></div>
+                <div><div class="text-xs text-neutral-500">邮件配置</div><div class="font-semibold mt-1">{{ notificationStatus.configured ? '完整' : '不完整' }}</div></div>
+                <div><div class="text-xs text-neutral-500">收件人</div><div class="font-semibold mt-1 truncate">{{ notificationStatus.recipient || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">已通知</div><div class="font-semibold mt-1">{{ notificationStatus.notified_trades || 0 }}</div></div>
+                <div><div class="text-xs text-neutral-500">必赢状态</div><div class="font-semibold mt-1">{{ biyingStatus.status || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">缓存日期</div><div class="font-semibold mt-1">{{ Object.keys(biyingStatus.cache_dates || {}).length }}</div></div>
+                <div><div class="text-xs text-neutral-500">新闻总数</div><div class="font-semibold mt-1">{{ (jobStatus.news_fetcher || {}).history_count || 0 }}</div></div>
+                <div><div class="text-xs text-neutral-500">AI已分析</div><div class="font-semibold mt-1">{{ (jobStatus.ai_analyzer || {}).analyzed_news || 0 }}</div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="log-panel bg-[#101419] text-neutral-100 border-l border-neutral-800 p-4 xl:sticky xl:top-0 xl:h-screen">
+        <div class="flex items-center justify-between gap-2">
+          <div>
+            <div class="font-semibold">运行日志</div>
+            <div class="text-xs text-neutral-400 mt-1">{{ logs.length }} 条 · {{ logUpdatedAt || '-' }}</div>
+          </div>
+          <button @click="fetchLogs" class="h-8 px-3 border border-neutral-700 text-sm hover:bg-neutral-800">刷新</button>
+        </div>
+        <div class="log-filters mt-3 grid grid-cols-[1fr_1fr] gap-2 text-sm">
+          <select v-model="logJob" @change="fetchLogs" class="h-8 px-2 bg-[#161c22] border border-neutral-700 text-neutral-100">
+            <option value="">全部任务</option>
+            <option value="scheduler">调度器</option>
+            <option value="news_fetch">新闻</option>
+            <option value="ai_analysis">AI</option>
+            <option value="market_sync">行情</option>
+            <option value="trade_cycle">交易</option>
+            <option value="admin_backup">备份</option>
+            <option value="admin_restart">重启</option>
+          </select>
+          <select v-model="logLevel" @change="fetchLogs" class="h-8 px-2 bg-[#161c22] border border-neutral-700 text-neutral-100">
+            <option value="">全部级别</option>
+            <option value="info">info</option>
+            <option value="warning">warning</option>
+            <option value="error">error</option>
+          </select>
+        </div>
+        <label class="mt-3 flex items-center gap-2 text-xs text-neutral-400">
+          <input v-model="showPayloads" type="checkbox" class="accent-red-600">
+          展开计算载荷
+        </label>
+        <div class="log-window mt-3 overflow-auto space-y-2 pr-1">
+          <div v-for="item in logs" :key="`${item.ts}-${item.job}-${item.message}`" class="border border-neutral-800 bg-[#161c22] rounded-md p-3">
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <span :class="logLevelClass(item.level)" class="font-semibold">{{ item.level || 'info' }}</span>
+              <span class="text-neutral-500">{{ shortTime(item.ts) }}</span>
+            </div>
+            <div class="mt-1 text-sm">{{ item.message }}</div>
+            <div class="mt-1 text-xs text-neutral-400">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
+            <pre v-if="showPayloads" class="mt-2 text-xs text-neutral-300 bg-[#0b0f14] p-2 rounded-md overflow-auto max-h-44">{{ compactJson(item.payload || {}) }}</pre>
+          </div>
+          <div v-if="!logs.length" class="text-center text-neutral-500 text-sm py-12">暂无运行日志</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, nextTick } = Vue;
+
+    createApp({
+      data() {
+        return {
+          tabs: [
+            { key: 'overview', label: '运行总览' },
+            { key: 'signals', label: '信号与新闻' },
+            { key: 'trading', label: '持仓成交' },
+            { key: 'analysis', label: '全程复盘' },
+            { key: 'data', label: '数据与AI' },
+            { key: 'strategy', label: '策略进化' },
+            { key: 'ops', label: '运维' },
+          ],
+          jobCards: [
+            { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
+            { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
+            { key: 'market_sync', label: '分时行情', desc: '交易时段同步必赢数据' },
+            { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
+          ],
+          tradeViews: [
+            { key: 'positions', label: '持仓' },
+            { key: 'deals', label: '历史成交' },
+            { key: 'delivery', label: '交割单' },
+            { key: 'settlement', label: '资金流水' },
+          ],
+          activeTab: 'overview',
+          tradeView: 'positions',
+          asOf: '',
+          autoRefresh: true,
+          loading: false,
+          timelineLoading: false,
+          newsFetching: false,
+          aiAnalyzing: false,
+          syncing: false,
+          runningTrade: false,
+          testingEmail: false,
+          backuping: false,
+          restarting: false,
+          strategySaving: false,
+          fitting: false,
+          evolving: false,
+          clientError: '',
+          status: {},
+          jobStatus: {},
+          dashboard: {},
+          dailyPlan: {},
+          tradingAccount: {},
+          newsFeed: {},
+          biyingStatus: {},
+          coverage: {},
+          aiUsage: {},
+          aiFailures: {},
+          aiRecords: {},
+          notificationStatus: {},
+          evolutionStatus: {},
+          fitResult: {},
+          syncResult: {},
+          adminResult: {},
+          activeTimeline: {},
+          selectedDayDate: '',
+          tradeMode: 'intraday',
+          equityChart: null,
+          logs: [],
+          logJob: '',
+          logLevel: '',
+          logUpdatedAt: '',
+          showPayloads: false,
+          syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
+          timelineForm: { start_date: '', end_date: '' },
+          strategyForm: {},
+          refreshTimer: null,
+          logTimer: null,
+          strategyFields: [
+            { key: 'buy_threshold', label: '买入阈值', step: 1 },
+            { key: 'watch_threshold', label: '观察阈值', step: 1 },
+            { key: 'avoid_sell_threshold', label: '回避卖出阈值', step: 1 },
+            { key: 'avoid_buy_ceiling', label: '回避买入上限', step: 1 },
+            { key: 'sell_score_threshold', label: '卖出评分阈值', step: 1 },
+            { key: 'stop_loss_pct', label: '止损%', step: 0.5 },
+            { key: 'take_profit_pct', label: '止盈%', step: 0.5 },
+            { key: 'max_hold_days', label: '回测持仓天数', step: 1 },
+            { key: 'max_positions', label: '最大持仓数', step: 1 },
+            { key: 'top_n', label: '每日候选数', step: 1 },
+            { key: 'paper_max_hold_days', label: '模拟持仓天数', step: 1 },
+            { key: 'paper_position_value', label: '单票资金', step: 10000 },
+            { key: 'sentiment_weight', label: '情绪权重', step: 0.01 },
+            { key: 'event_weight', label: '事件权重', step: 0.01 },
+            { key: 'technical_weight', label: '技术权重', step: 0.01 },
+            { key: 'risk_weight', label: '风控权重', step: 0.01 },
+            { key: 'sentiment_coef', label: '情绪系数', step: 1 },
+            { key: 'ai_score_coef', label: 'AI分系数', step: 0.5 },
+            { key: 'event_impact_weight', label: '事件影响占比', step: 0.01 },
+            { key: 'history_score_weight', label: '历史统计占比', step: 0.01 },
+            { key: 'history_return_coef', label: '历史收益系数', step: 10 },
+            { key: 'history_win_coef', label: '历史胜率系数', step: 1 },
+            { key: 'sell_negative_sentiment_coef', label: '负面卖出系数', step: 1 },
+            { key: 'sell_technical_risk_coef', label: '技术风险卖出', step: 0.05 },
+            { key: 'negative_sentiment_risk_penalty', label: '负面风控扣分', step: 1 },
+            { key: 'risk_event_penalty', label: '风险事件扣分', step: 1 },
+          ],
+        };
+      },
+      computed: {
+        scheduler() { return this.jobStatus.scheduler || {}; },
+        data() { return this.dashboard.data || {}; },
+        newsCount() { return this.data.news_count || ((this.jobStatus.news_fetcher || {}).history_count) || 0; },
+        aiRecordCount() { return this.data.ai_record_count || ((this.jobStatus.ai_analyzer || {}).records) || 0; },
+        eventCount() { return this.data.event_count || 0; },
+        stockCount() { return this.data.stock_count || 0; },
+        account() { return this.tradingAccount.account || {}; },
+        timeline() {
+          const current = this.dashboard.timeline || {};
+          return Object.keys(current).length ? current : (this.activeTimeline || {});
+        },
+        recommendations() { return (this.dashboard.recommendations || {}).items || []; },
+        buyList() {
+          const planned = this.dailyPlan.buy_list || [];
+          return planned.length ? planned : this.recommendations.filter(item => String(item.action || '').includes('买入'));
+        },
+        latestEvents() { return (this.dashboard.recommendations || {}).latest_events || []; },
+        latestNews() { return this.newsFeed.items || []; },
+        positions() { return this.tradingAccount.positions || []; },
+        deals() { return this.tradingAccount.history_deals || []; },
+        deliveries() { return this.tradingAccount.delivery_records || []; },
+        settlements() { return this.tradingAccount.daily_settlements || []; },
+        historyDays() { return this.dailyPlan.history_days || []; },
+        selectedDaySignals() {
+          const day = this.historyDays.find(item => item.date === this.selectedDayDate) || this.historyDays[0] || {};
+          return day.signals || [];
+        },
+        timelineTrades() { return (this.activeTimeline.trades || []).slice().reverse().slice(0, 500); },
+        coverageTargets() { return this.coverage.targets || []; },
+        aiFailureItems() { return this.aiFailures.items || []; },
+        aiRecordItems() { return this.aiRecords.items || []; },
+        fitCandidates() { return this.fitResult.candidates || []; },
+        minuteCacheCount() {
+          const dates = this.biyingStatus.cache_dates || {};
+          return Object.values(dates).reduce((sum, value) => sum + Number(value || 0), 0);
+        },
+      },
+      watch: {
+        activeTab(value) {
+          if (value === 'analysis') {
+            if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
+            if (!this.activeTimeline.start_date) this.loadTimeline(false);
+          }
+        },
+      },
+      async mounted() {
+        this.asOf = this.localChinaToday();
+        this.syncForm.date = this.asOf;
+        this.timelineForm.end_date = this.asOf;
+        this.fetchLogs();
+        this.refreshAll();
+        window.setTimeout(() => {
+          this.loadDailyPlan(true);
+          this.loadTimeline(true);
+        }, 1500);
+        this.refreshTimer = window.setInterval(() => {
+          if (this.autoRefresh && !this.loading) this.refreshAll(true);
+        }, 60000);
+        this.logTimer = window.setInterval(() => this.fetchLogs(), 8000);
+        window.addEventListener('resize', this.resizeChart);
+      },
+      beforeUnmount() {
+        if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+        if (this.logTimer) window.clearInterval(this.logTimer);
+        window.removeEventListener('resize', this.resizeChart);
+      },
+      methods: {
+        async api(url, options = {}) {
+          const res = await fetch(url, options);
+          if (!res.ok) throw new Error(await res.text());
+          return await res.json();
+        },
+        async refreshAll(quiet = false) {
+          if (!quiet) this.loading = true;
+          this.clientError = '';
+          try {
+            const [status, jobs, biying, aiUsage, notificationStatus, evolutionStatus] = await Promise.all([
+              this.api('/api/status'),
+              this.api('/api/jobs/status'),
+              this.api('/api/data/biying/status'),
+              this.api('/api/ai/usage'),
+              this.api('/api/notifications/status'),
+              this.api('/api/quant/evolution/status'),
+            ]);
+            this.status = status;
+            this.jobStatus = jobs;
+            this.biyingStatus = biying;
+            this.aiUsage = aiUsage;
+            this.notificationStatus = notificationStatus;
+            this.evolutionStatus = evolutionStatus;
+            this.fetchLogs();
+            this.loadDetailData(true);
+            return;
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.loading = false;
+          }
+        },
+        async loadDetailData(quiet = true) {
+          try {
+            const dashboardQuery = new URLSearchParams({ light: 'true' });
+            if (this.asOf) dashboardQuery.set('as_of', this.asOf);
+            const accountQuery = this.asOf ? `?as_of=${this.asOf}&limit=1000` : '?limit=1000';
+            const newsQuery = this.asOf ? `?as_of=${this.asOf}&limit=120` : '?limit=120';
+            const coverageQuery = this.asOf ? `?as_of=${this.asOf}&top_n=100` : '?top_n=100';
+            const [dashboard, account, news, coverage, aiFailures, aiRecords] = await Promise.all([
+              this.api(`/api/quant/dashboard?${dashboardQuery.toString()}`),
+              this.api(`/api/quant/trading_account${accountQuery}`),
+              this.api(`/api/quant/news${newsQuery}`),
+              this.api(`/api/data/coverage${coverageQuery}`),
+              this.api('/api/ai/failures?limit=40'),
+              this.api('/api/ai/records?limit=80'),
+            ]);
+            this.dashboard = dashboard;
+            this.tradingAccount = account;
+            this.newsFeed = news;
+            this.coverage = coverage;
+            this.aiFailures = aiFailures;
+            this.aiRecords = aiRecords;
+            this.syncForm.date = this.asOf || dashboard.as_of || this.syncForm.date;
+            this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
+            this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
+            if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
+            if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
+            if (!quiet) {
+              this.loadDailyPlan(true);
+              if (!this.activeTimeline.start_date) this.loadTimeline(true);
+            }
+            await nextTick();
+            this.renderEquityChart();
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          }
+        },
+        async fetchLogs() {
+          try {
+            const q = new URLSearchParams({ limit: '220' });
+            if (this.logJob) q.set('job', this.logJob);
+            if (this.logLevel) q.set('level', this.logLevel);
+            const result = await this.api(`/api/jobs/logs?${q.toString()}`);
+            this.logs = result.items || [];
+            this.logUpdatedAt = this.nowChinaShort();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          }
+        },
+        async loadDailyPlan(quiet = false) {
+          try {
+            const q = new URLSearchParams({ limit_days: '180' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            const plan = await this.api(`/api/quant/daily_plan?${q.toString()}`);
+            this.dailyPlan = plan;
+            if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          }
+        },
+        async fetchNews() {
+          this.newsFetching = true;
+          try {
+            await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20', { method: 'POST' });
+            await this.refreshAll();
+            await this.fetchLogs();
+          } finally {
+            this.newsFetching = false;
+          }
+        },
+        async analyzeAI() {
+          this.aiAnalyzing = true;
+          try {
+            const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4' });
+            await this.api(`/api/jobs/ai/analyze?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+            await this.fetchLogs();
+          } finally {
+            this.aiAnalyzing = false;
+          }
+        },
+        async syncIntraday() {
+          this.syncing = true;
+          try {
+            const q = new URLSearchParams({
+              date: this.syncForm.date || this.asOf || '',
+              source: this.syncForm.source || 'auto',
+              max_codes: String(this.syncForm.max_codes || 80),
+              force: String(Boolean(this.syncForm.force)),
+              include_latest: 'true',
+            });
+            const result = await this.api(`/api/jobs/market/sync?${q.toString()}`, { method: 'POST' });
+            this.syncResult = (result.job || {}).last_result || result;
+            await this.refreshAll();
+            await this.fetchLogs();
+          } finally {
+            this.syncing = false;
+          }
+        },
+        async runTradeCycle() {
+          this.runningTrade = true;
+          try {
+            const q = this.asOf ? `?date=${this.asOf}&notify=true` : '?notify=true';
+            await this.api(`/api/jobs/trading/run${q}`, { method: 'POST' });
+            await this.refreshAll();
+            await this.fetchLogs();
+          } finally {
+            this.runningTrade = false;
+          }
+        },
+        async testEmail() {
+          this.testingEmail = true;
+          try {
+            await this.api('/api/notifications/test', { method: 'POST' });
+            await this.refreshAll();
+          } finally {
+            this.testingEmail = false;
+          }
+        },
+        async backupData() {
+          this.backuping = true;
+          try {
+            this.adminResult = await this.api('/api/admin/backup', { method: 'POST' });
+            await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.backuping = false;
+          }
+        },
+        async restartService() {
+          this.restarting = true;
+          try {
+            this.adminResult = await this.api('/api/admin/restart', { method: 'POST' });
+            await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.restarting = false;
+          }
+        },
+        async saveStrategy() {
+          this.strategySaving = true;
+          try {
+            const result = await this.api('/api/quant/strategy_params', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.strategyForm),
+            });
+            this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
+            await this.refreshAll();
+          } finally {
+            this.strategySaving = false;
+          }
+        },
+        async resetStrategy() {
+          const result = await this.api('/api/quant/strategy_params/reset', { method: 'POST' });
+          this.strategyForm = { ...(result.strategy_params || {}) };
+          await this.refreshAll();
+        },
+        async fit(applyBest) {
+          this.fitting = true;
+          try {
+            const q = new URLSearchParams({ apply_best: String(Boolean(applyBest)) });
+            if (this.asOf) q.set('as_of', this.asOf);
+            this.fitResult = await this.api(`/api/quant/fit_strategy?${q.toString()}`, { method: 'POST' });
+            if (applyBest) await this.refreshAll();
+          } finally {
+            this.fitting = false;
+          }
+        },
+        async evolveStrategy() {
+          this.evolving = true;
+          try {
+            const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false' });
+            if (this.asOf) q.set('end_date', this.asOf);
+            this.evolutionStatus = await this.api(`/api/quant/evolve_strategy?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+          } finally {
+            this.evolving = false;
+          }
+        },
+        async loadTimeline(quiet = false) {
+          this.timelineLoading = !quiet;
+          try {
+            const q = new URLSearchParams();
+            if (this.timelineForm.start_date) q.set('start_date', this.timelineForm.start_date);
+            if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
+            const endpoint = this.tradeMode === 'intraday' ? '/api/quant/intraday_timeline' : '/api/quant/timeline';
+            this.activeTimeline = await this.api(`${endpoint}?${q.toString()}`);
+            await nextTick();
+            this.renderEquityChart();
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          } finally {
+            this.timelineLoading = false;
+          }
+        },
+        renderEquityChart() {
+          const el = this.$refs.equityChart;
+          if (!el || !window.echarts) return;
+          if (!this.equityChart) this.equityChart = echarts.init(el);
+          const curve = this.activeTimeline.equity_curve || [];
+          this.equityChart.setOption({
+            animation: false,
+            grid: { left: 58, right: 24, top: 28, bottom: 36 },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: curve.map(item => item.date), axisLabel: { hideOverlap: true } },
+            yAxis: { type: 'value', name: '收益%', splitLine: { lineStyle: { color: '#e5e7eb' } } },
+            series: [{
+              name: '累计收益',
+              type: 'line',
+              smooth: true,
+              symbol: 'none',
+              lineStyle: { color: '#dc2626', width: 2 },
+              areaStyle: { color: 'rgba(220,38,38,0.08)' },
+              data: curve.map(item => Number(item.return_pct || 0)),
+            }],
+          });
+        },
+        resizeChart() {
+          if (this.equityChart) this.equityChart.resize();
+        },
+        localChinaToday() {
+          const parts = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+          }).formatToParts(new Date()).reduce((acc, part) => {
+            acc[part.type] = part.value;
+            return acc;
+          }, {});
+          return `${parts.year}-${parts.month}-${parts.day}`;
+        },
+        nowChinaShort() {
+          return new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          }).format(new Date()).replace(/\//g, '-');
+        },
+        jobState(key) {
+          return ((this.jobStatus.jobs || {})[key]) || {};
+        },
+        jobSummary(key) {
+          const result = this.jobState(key).last_result || {};
+          if (key === 'news_fetch') return `抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
+          if (key === 'ai_analysis') return `选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
+          if (key === 'market_sync') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，写入 ${result.rows_written || 0}`;
+          if (key === 'trade_cycle') return `交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
+          return '-';
+        },
+        statusPillClass(status) {
+          const text = String(status || '').toLowerCase();
+          if (text === 'running') return 'bg-sky-100 text-sky-800';
+          if (text === 'ok') return 'bg-emerald-100 text-emerald-800';
+          if (text === 'failed') return 'bg-red-100 text-red-800';
+          return 'bg-neutral-100 text-neutral-700';
+        },
+        actionClass(action) {
+          const text = String(action || '');
+          if (text.includes('买入')) return 'bg-red-100 text-red-700';
+          if (text.includes('观察')) return 'bg-amber-100 text-amber-800';
+          if (text.includes('卖出') || text.includes('回避')) return 'bg-green-100 text-green-800';
+          return 'bg-neutral-100 text-neutral-700';
+        },
+        sideClass(side) {
+          return String(side || '').toUpperCase() === 'BUY' ? 'text-red-600' : 'text-green-700';
+        },
+        logLevelClass(level) {
+          const text = String(level || '').toLowerCase();
+          if (text === 'error') return 'text-red-400';
+          if (text === 'warning') return 'text-amber-300';
+          return 'text-emerald-300';
+        },
+        fixed(value, digits = 2) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toFixed(digits) : '-';
+        },
+        pct(value) {
+          return `${this.fixed(value)}%`;
+        },
+        ratioPct(value) {
+          return `${this.fixed(Number(value || 0) * 100)}%`;
+        },
+        money(value) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '-';
+        },
+        shortTime(value) {
+          const text = String(value || '');
+          if (!text) return '-';
+          return text.length >= 16 ? text.slice(5, 16).replace('T', ' ') : text;
+        },
+        numClass(value) {
+          const n = Number(value || 0);
+          if (n > 0) return 'text-red-600';
+          if (n < 0) return 'text-green-700';
+          return 'text-neutral-700';
+        },
+        compactJson(value) {
+          try {
+            return JSON.stringify(value || {}, null, 2);
+          } catch (err) {
+            return String(value || '');
+          }
+        },
+      },
+    }).mount('#app');
+  </script>
+</body>
+</html>

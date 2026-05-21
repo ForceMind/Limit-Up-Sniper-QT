@@ -1,0 +1,26 @@
+{
+  "email_config": {
+    "enabled": false,
+    "smtp_server": "",
+    "smtp_port": 465,
+    "smtp_user": "",
+    "smtp_password": "",
+    "recipient_email": "",
+    "smtp_use_ssl": true
+  },
+  "api_keys": {
+    "deepseek": ""
+  },
+  "ai_cost_config": {
+    "default": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash"
+    }
+  },
+  "data_provider_config": {
+    "biying_enabled": false,
+    "biying_license_key": "",
+    "biying_endpoint": "https://api.biyingapi.com",
+    "biying_minute_limit": 3000
+  }
+}

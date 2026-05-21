@@ -1,0 +1,17 @@
+[Unit]
+Description=QT Quant Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qt
+EnvironmentFile=-/opt/qt/.env
+ExecStart=/usr/bin/env bash /opt/qt/scripts/run_quant_server.sh
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
