@@ -71,7 +71,7 @@ EOF
   fi
 fi
 
-chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/qt.sh" || true
+chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh || true
 QT_BIN="/usr/local/bin/qt"
 if [[ "$(id -u)" -eq 0 ]]; then
   ln -sf "$ROOT_DIR/scripts/qt.sh" "$QT_BIN"

@@ -13,7 +13,7 @@ if [[ -z "$BACKUP_FILE" || ! -f "$BACKUP_FILE" ]]; then
   exit 1
 fi
 
-CURRENT_BACKUP="$("$SCRIPT_DIR/backup_data.sh")"
+CURRENT_BACKUP="$(bash "$SCRIPT_DIR/backup_data.sh")"
 echo "当前数据已先备份到：$CURRENT_BACKUP"
 
 rm -rf "$ROOT_DIR/backend/data.restore_tmp"

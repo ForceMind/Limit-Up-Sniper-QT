@@ -40,13 +40,13 @@ api_url() {
 cmd="${1:-help}"
 case "$cmd" in
   install)
-    "$SCRIPT_DIR/install_server.sh"
+    bash "$SCRIPT_DIR/install_server.sh"
     ;;
   update)
-    "$SCRIPT_DIR/update_server.sh"
+    bash "$SCRIPT_DIR/update_server.sh"
     ;;
   restart|start)
-    "$SCRIPT_DIR/restart_server.sh"
+    bash "$SCRIPT_DIR/restart_server.sh"
     ;;
   stop)
     if systemd_unit_exists; then
@@ -99,14 +99,14 @@ case "$cmd" in
     fi
     ;;
   backup)
-    "$SCRIPT_DIR/backup_data.sh"
+    bash "$SCRIPT_DIR/backup_data.sh"
     ;;
   restore)
     if [[ $# -lt 2 ]]; then
       echo "错误：qt restore 需要传入备份 tar.gz 文件路径" >&2
       exit 2
     fi
-    "$SCRIPT_DIR/restore_data.sh" "$2"
+    bash "$SCRIPT_DIR/restore_data.sh" "$2"
     ;;
   scan)
     if [[ -x "$(venv_python)" ]]; then

@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 require_project_root
 ensure_data_dir
 
-BACKUP_FILE="$("$SCRIPT_DIR/backup_data.sh")"
+BACKUP_FILE="$(bash "$SCRIPT_DIR/backup_data.sh")"
 echo "数据备份已创建：$BACKUP_FILE"
 
 if [[ -d "$ROOT_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
@@ -24,6 +24,6 @@ fi
 "$(venv_pip)" install --upgrade pip
 "$(venv_pip)" install -r "$ROOT_DIR/backend/requirements.txt"
 
-"$SCRIPT_DIR/restart_server.sh"
+bash "$SCRIPT_DIR/restart_server.sh"
 
 echo "更新完成"
