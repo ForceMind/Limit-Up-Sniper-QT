@@ -1138,23 +1138,17 @@
         async loadAll() {
           this.loading = true;
           try {
-            await this.loadMarketData(true);
-            await Promise.allSettled([
-              this.api('/api/status').then(data => { this.status = data; }),
-              this.api('/api/jobs/status').then(data => { this.jobStatus = data; }),
-              this.api('/api/jobs/logs?limit=12').then(data => { this.jobLogs = data; }),
-            ]);
-            if (window.innerWidth > 767 || ['overview', 'news'].includes(this.mobileView)) {
-              if (window.innerWidth <= 767 && this.mobileView === 'news') {
-                await this.loadNews(true);
-              } else {
-                await this.loadNews(true);
-              }
-            }
-            if (window.innerWidth > 767 || ['overview', 'buy', 'deals', 'news'].includes(this.mobileView)) {
-              await this.loadRecommendations(true);
-              await this.loadPlan(true);
-            }
+            const q = new URLSearchParams({ mobile: String(window.innerWidth <= 767) });
+            if (this.asOf) q.set('as_of', this.asOf);
+            const snapshot = await this.api(`/api/front/snapshot?${q.toString()}`);
+            this.status = snapshot.status_payload || {};
+            this.jobStatus = snapshot.jobs || {};
+            this.jobLogs = snapshot.logs || {};
+            this.accountView = snapshot.trading_account || {};
+            this.newsFeed = snapshot.news || {};
+            this.recommendations = snapshot.recommendations || {};
+            this.plan = snapshot.daily_plan || {};
+            if (!this.asOf) this.asOf = this.accountView.as_of || this.plan.as_of || this.asOf;
           } finally {
             this.loading = false;
           }

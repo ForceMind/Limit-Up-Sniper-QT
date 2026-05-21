@@ -951,6 +951,11 @@
           strategyForm: {},
           refreshTimer: null,
           logTimer: null,
+          liveSocket: null,
+          liveConnected: false,
+          liveReconnectTimer: null,
+          liveReconnectDelay: 1000,
+          detailRefreshTimer: null,
           strategyFields: [
             { key: 'buy_threshold', label: '买入阈值', step: 1 },
             { key: 'watch_threshold', label: '观察阈值', step: 1 },
@@ -1079,17 +1084,21 @@
           await this.loadRuntimeConfig(true);
           await this.fetchLogs();
           await this.refreshAll();
+          this.startLive();
           window.setTimeout(() => {
             this.loadDailyPlan(true);
             this.loadTimeline(true);
           }, 1500);
           if (!this.refreshTimer) {
             this.refreshTimer = window.setInterval(() => {
-              if (this.autoRefresh && !this.loading) this.refreshAll(true);
-            }, 60000);
-          }
-          if (!this.logTimer) {
-            this.logTimer = window.setInterval(() => this.fetchLogs(), 8000);
+              if (!this.autoRefresh || this.loading) return;
+              if (this.liveConnected) {
+                this.loadDetailData(true);
+              } else {
+                this.refreshAll(true);
+                this.fetchLogs();
+              }
+            }, 120000);
           }
         },
         async setupAuth() {
@@ -1139,8 +1148,88 @@
         stopTimers() {
           if (this.refreshTimer) window.clearInterval(this.refreshTimer);
           if (this.logTimer) window.clearInterval(this.logTimer);
+          if (this.liveReconnectTimer) window.clearTimeout(this.liveReconnectTimer);
+          if (this.detailRefreshTimer) window.clearTimeout(this.detailRefreshTimer);
+          if (this.liveSocket) this.liveSocket.close();
           this.refreshTimer = null;
           this.logTimer = null;
+          this.liveReconnectTimer = null;
+          this.detailRefreshTimer = null;
+          this.liveSocket = null;
+          this.liveConnected = false;
+        },
+        startLive() {
+          if (!this.auth.token || this.liveSocket) return;
+          const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+          const url = `${scheme}://${window.location.host}/ws/admin/live`;
+          const socket = new WebSocket(url);
+          this.liveSocket = socket;
+          socket.onopen = () => {
+            this.liveConnected = true;
+            this.liveReconnectDelay = 1000;
+            socket.send(JSON.stringify({ type: 'auth', token: this.auth.token }));
+          };
+          socket.onmessage = event => {
+            try {
+              this.applyLiveMessage(JSON.parse(event.data || '{}'));
+            } catch (err) {
+              this.clientError = String(err.message || err);
+            }
+          };
+          socket.onclose = () => {
+            if (this.liveSocket === socket) this.liveSocket = null;
+            this.liveConnected = false;
+            if (this.auth.token && !this.liveReconnectTimer) {
+              const delay = this.liveReconnectDelay;
+              this.liveReconnectDelay = Math.min(this.liveReconnectDelay * 1.6, 15000);
+              this.liveReconnectTimer = window.setTimeout(() => {
+                this.liveReconnectTimer = null;
+                this.startLive();
+              }, delay);
+            }
+          };
+          socket.onerror = () => {
+            this.liveConnected = false;
+          };
+        },
+        applyLiveMessage(message) {
+          if (!message || message.type !== 'live_delta') return;
+          if (message.status_payload) this.status = message.status_payload;
+          if (message.jobs) this.jobStatus = message.jobs;
+          if (message.biying) this.biyingStatus = message.biying;
+          if (Array.isArray(message.logs_delta) && message.logs_delta.length) {
+            this.mergeLogDelta(message.logs_delta);
+            this.logUpdatedAt = this.nowChinaShort();
+            if (message.logs_delta.some(item => ['finish', 'error'].includes(String(item.stage || '')))) {
+              this.scheduleDetailRefresh();
+            }
+          }
+        },
+        mergeLogDelta(items) {
+          const seen = new Set(this.logs.map(item => this.logKey(item)));
+          for (const item of items) {
+            if (!this.logMatchesFilter(item)) continue;
+            const key = this.logKey(item);
+            if (seen.has(key)) continue;
+            this.logs.unshift(item);
+            seen.add(key);
+          }
+          this.logs = this.logs.slice(0, 220);
+        },
+        logKey(item) {
+          return ['ts', 'job', 'stage', 'level', 'message'].map(key => String((item || {})[key] || '')).join('|');
+        },
+        logMatchesFilter(item) {
+          if (this.logJob && String((item || {}).job || '') !== this.logJob) return false;
+          if (this.logLevel && String((item || {}).level || '').toLowerCase() !== this.logLevel) return false;
+          return true;
+        },
+        scheduleDetailRefresh() {
+          if (this.detailRefreshTimer) return;
+          this.detailRefreshTimer = window.setTimeout(async () => {
+            this.detailRefreshTimer = null;
+            if (this.auth.token) await this.loadDetailData(true);
+          }, 1200);
         },
         logout() {
           this.auth.token = '';
@@ -1152,22 +1241,7 @@
           if (!quiet) this.loading = true;
           this.clientError = '';
           try {
-            const [status, jobs, biying, aiUsage, notificationStatus, evolutionStatus] = await Promise.all([
-              this.api('/api/status'),
-              this.api('/api/jobs/status'),
-              this.api('/api/data/biying/status'),
-              this.api('/api/ai/usage'),
-              this.api('/api/notifications/status'),
-              this.api('/api/quant/evolution/status'),
-            ]);
-            this.status = status;
-            this.jobStatus = jobs;
-            this.biyingStatus = biying;
-            this.aiUsage = aiUsage;
-            this.notificationStatus = notificationStatus;
-            this.evolutionStatus = evolutionStatus;
-            this.fetchLogs();
-            this.loadDetailData(true);
+            await this.loadAdminSnapshot(quiet);
             return;
           } catch (err) {
             this.clientError = String(err.message || err);
@@ -1175,38 +1249,41 @@
             this.loading = false;
           }
         },
+        applyAdminSnapshot(snapshot) {
+          this.status = snapshot.status_payload || this.status;
+          this.jobStatus = snapshot.jobs || this.jobStatus;
+          this.biyingStatus = snapshot.biying || this.biyingStatus;
+          this.aiUsage = snapshot.ai_usage || this.aiUsage;
+          this.notificationStatus = snapshot.notification_status || this.notificationStatus;
+          this.evolutionStatus = snapshot.evolution_status || this.evolutionStatus;
+          this.dashboard = snapshot.dashboard || this.dashboard;
+          this.tradingAccount = snapshot.trading_account || this.tradingAccount;
+          this.newsFeed = snapshot.news || this.newsFeed;
+          this.coverage = snapshot.coverage || this.coverage;
+          this.aiFailures = snapshot.ai_failures || this.aiFailures;
+          this.aiRecords = snapshot.ai_records || this.aiRecords;
+          const dashboard = this.dashboard || {};
+          this.syncForm.date = this.asOf || dashboard.as_of || this.syncForm.date;
+          this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
+          this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
+          if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
+          if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
+        },
+        async loadAdminSnapshot(quiet = true) {
+          const q = new URLSearchParams();
+          if (this.asOf) q.set('as_of', this.asOf);
+          const snapshot = await this.api(`/api/admin/snapshot?${q.toString()}`);
+          this.applyAdminSnapshot(snapshot);
+          if (!quiet) {
+            this.loadDailyPlan(true);
+            if (!this.activeTimeline.start_date) this.loadTimeline(true);
+          }
+          await nextTick();
+          this.renderEquityChart();
+        },
         async loadDetailData(quiet = true) {
           try {
-            const dashboardQuery = new URLSearchParams({ light: 'true' });
-            if (this.asOf) dashboardQuery.set('as_of', this.asOf);
-            const accountQuery = this.asOf ? `?as_of=${this.asOf}&limit=1000` : '?limit=1000';
-            const newsQuery = this.asOf ? `?as_of=${this.asOf}&limit=120` : '?limit=120';
-            const coverageQuery = this.asOf ? `?as_of=${this.asOf}&top_n=100` : '?top_n=100';
-            const [dashboard, account, news, coverage, aiFailures, aiRecords] = await Promise.all([
-              this.api(`/api/quant/dashboard?${dashboardQuery.toString()}`),
-              this.api(`/api/quant/trading_account${accountQuery}`),
-              this.api(`/api/quant/news${newsQuery}`),
-              this.api(`/api/data/coverage${coverageQuery}`),
-              this.api('/api/ai/failures?limit=40'),
-              this.api('/api/ai/records?limit=80'),
-            ]);
-            this.dashboard = dashboard;
-            this.tradingAccount = account;
-            this.newsFeed = news;
-            this.coverage = coverage;
-            this.aiFailures = aiFailures;
-            this.aiRecords = aiRecords;
-            this.syncForm.date = this.asOf || dashboard.as_of || this.syncForm.date;
-            this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
-            this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
-            if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
-            if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
-            if (!quiet) {
-              this.loadDailyPlan(true);
-              if (!this.activeTimeline.start_date) this.loadTimeline(true);
-            }
-            await nextTick();
-            this.renderEquityChart();
+            await this.loadAdminSnapshot(quiet);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
           }
@@ -1248,7 +1325,7 @@
             });
             this.adminResult = await this.api(`/api/admin/system/startup?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } catch (err) {
             this.clientError = String(err.message || err);
           } finally {
@@ -1260,7 +1337,7 @@
           try {
             await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20', { method: 'POST' });
             await this.refreshAll();
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.newsFetching = false;
           }
@@ -1271,7 +1348,7 @@
             const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4' });
             await this.api(`/api/jobs/ai/analyze?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.aiAnalyzing = false;
           }
@@ -1289,7 +1366,7 @@
             const result = await this.api(`/api/jobs/market/sync?${q.toString()}`, { method: 'POST' });
             this.syncResult = (result.job || {}).last_result || result;
             await this.refreshAll();
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.syncing = false;
           }
@@ -1300,7 +1377,7 @@
             const q = this.asOf ? `?date=${this.asOf}&notify=true` : '?notify=true';
             await this.api(`/api/jobs/trading/run${q}`, { method: 'POST' });
             await this.refreshAll();
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.runningTrade = false;
           }
@@ -1318,7 +1395,7 @@
           this.backuping = true;
           try {
             this.adminResult = await this.api('/api/admin/backup', { method: 'POST' });
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } catch (err) {
             this.clientError = String(err.message || err);
           } finally {
@@ -1329,7 +1406,7 @@
           this.restarting = true;
           try {
             this.adminResult = await this.api('/api/admin/restart', { method: 'POST' });
-            await this.fetchLogs();
+            if (!this.liveConnected) await this.fetchLogs();
           } catch (err) {
             this.clientError = String(err.message || err);
           } finally {

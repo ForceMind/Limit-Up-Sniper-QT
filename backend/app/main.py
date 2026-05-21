@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -32,6 +34,7 @@ from app.quant.security import (
     runtime_config_status,
     setup_auth,
     update_runtime_config,
+    verify_token,
 )
 
 
@@ -79,6 +82,20 @@ def _restart_service_after_response() -> None:
         )
     except Exception:
         return
+
+
+def _json_fingerprint(payload: Any) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return str(payload)
+
+
+def _log_key(item: Dict[str, Any]) -> str:
+    return "|".join(
+        str(item.get(key) or "")
+        for key in ("ts", "job", "stage", "level", "message")
+    )
 
 app = FastAPI(title="A-Share Quant Agent System", version="0.1.0")
 app.add_middleware(
@@ -168,6 +185,101 @@ def status():
         "ai_model": DEFAULT_AI_MODEL,
         "jobs": job_manager.status(),
     }
+
+
+@app.get("/api/front/snapshot")
+def frontend_snapshot(
+    as_of: Optional[str] = Query(default=None),
+    mobile: bool = Query(default=False),
+):
+    news_limit = 30 if mobile else 80
+    top_n = 12 if mobile else 30
+    return {
+        "status": "ok",
+        "status_payload": status(),
+        "jobs": job_manager.status(),
+        "logs": job_manager.logs(limit=12),
+        "trading_account": quant_engine.trading_account(as_of=as_of, limit=500),
+        "news": quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True),
+        "recommendations": quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n),
+        "daily_plan": quant_engine.daily_plan(as_of=as_of, limit_days=120),
+    }
+
+
+@app.get("/api/admin/snapshot")
+def admin_snapshot(as_of: Optional[str] = Query(default=None)):
+    return {
+        "status": "ok",
+        "status_payload": status(),
+        "jobs": job_manager.status(),
+        "biying": biying_minute_sync.status(),
+        "ai_usage": ai_usage_summary(),
+        "notification_status": trade_notifier.status(),
+        "evolution_status": strategy_evolution.status(),
+        "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
+        "trading_account": quant_engine.trading_account(as_of=as_of, limit=1000),
+        "news": quant_engine.news_feed(as_of=as_of, limit=120, fallback_latest=True),
+        "coverage": data_coverage(as_of=as_of, top_n=100),
+        "ai_failures": ai_failures(limit=40),
+        "ai_records": ai_records_feed(limit=80),
+    }
+
+
+@app.websocket("/ws/admin/live")
+async def admin_live(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        auth_message = await asyncio.wait_for(websocket.receive_json(), timeout=5)
+        verify_token(str(auth_message.get("token") or ""), "admin")
+    except Exception:
+        await websocket.close(code=1008)
+        return
+
+    sent_logs: set[str] = set()
+    status_fp = ""
+    jobs_fp = ""
+    biying_fp = ""
+    try:
+        while True:
+            status_payload = status()
+            jobs_payload = job_manager.status()
+            biying_payload = biying_minute_sync.status()
+            logs_payload = job_manager.logs(limit=120)
+            logs_delta = []
+            for item in reversed(logs_payload.get("items", [])):
+                if not isinstance(item, dict):
+                    continue
+                key = _log_key(item)
+                if key in sent_logs:
+                    continue
+                sent_logs.add(key)
+                logs_delta.append(item)
+            if len(sent_logs) > 1000:
+                sent_logs = set(list(sent_logs)[-500:])
+
+            message: Dict[str, Any] = {
+                "type": "live_delta",
+                "server_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            }
+            next_status_fp = _json_fingerprint(status_payload)
+            next_jobs_fp = _json_fingerprint(jobs_payload)
+            next_biying_fp = _json_fingerprint(biying_payload)
+            if next_status_fp != status_fp:
+                message["status_payload"] = status_payload
+                status_fp = next_status_fp
+            if next_jobs_fp != jobs_fp:
+                message["jobs"] = jobs_payload
+                jobs_fp = next_jobs_fp
+            if next_biying_fp != biying_fp:
+                message["biying"] = biying_payload
+                biying_fp = next_biying_fp
+            if logs_delta:
+                message["logs_delta"] = logs_delta
+            if len(message) > 2:
+                await websocket.send_json(message)
+            await asyncio.sleep(3)
+    except WebSocketDisconnect:
+        return
 
 
 @app.get("/api/quant/dashboard")
