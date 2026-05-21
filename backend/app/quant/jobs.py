@@ -20,6 +20,17 @@ from app.quant.notifier import trade_notifier
 JOB_STATE_FILE = DATA_DIR / "quant_job_state.json"
 JOB_LOG_FILE = DATA_DIR / "quant_runtime_logs.jsonl"
 SENSITIVE_KEY_PARTS = ("key", "token", "password", "secret", "license", "authorization", "cookie")
+JOB_LABELS = {
+    "scheduler": "调度器",
+    "news_fetch": "新闻抓取",
+    "ai_analysis": "AI 分析",
+    "market_sync": "行情同步",
+    "trade_cycle": "交易循环",
+    "system_startup": "系统启动",
+    "admin_backup": "数据备份",
+    "admin_restart": "服务重启",
+    "admin_config": "配置保存",
+}
 
 
 def _now_cn() -> datetime:
@@ -35,6 +46,10 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(float(os.getenv(name, "") or default)))
     except Exception:
         return default
+
+
+def _job_label(name: str) -> str:
+    return JOB_LABELS.get(str(name or ""), str(name or "任务"))
 
 
 def _sanitize_for_log(value: Any, depth: int = 0) -> Any:
@@ -154,7 +169,7 @@ class QuantJobManager:
                 }
             )
             self._save_state(state)
-        self._append_log("info", f"{name} started", job=name, stage="start", payload=payload)
+        self._append_log("info", f"{_job_label(name)}已开始", job=name, stage="start", payload=payload)
 
     def _record_job_finish(self, name: str, started: float, result: Dict[str, Any], error: str = "") -> Dict[str, Any]:
         with self._state_lock:
@@ -191,7 +206,7 @@ class QuantJobManager:
             }
             self._append_log(
                 "error" if error else "info",
-                f"{name} {'failed' if error else 'finished'}",
+                f"{_job_label(name)}{'失败' if error else '完成'}",
                 job=name,
                 stage="finish" if not error else "error",
                 payload=result_payload,
@@ -202,8 +217,9 @@ class QuantJobManager:
         payload = payload or {}
         with self._lock:
             if self._running.get(name):
-                self._append_log("warning", f"{name} skipped because it is already running", job=name, stage="skip", payload=payload)
-                return {"status": "running", "message": f"{name} is already running"}
+                message = f"{_job_label(name)}正在运行，已跳过重复请求"
+                self._append_log("warning", message, job=name, stage="skip", payload=payload)
+                return {"status": "running", "message": message}
             self._running[name] = True
         started = time.time()
         self._record_job_start(name, payload)
@@ -384,7 +400,7 @@ class QuantJobManager:
                 else:
                     self._append_log(
                         "info",
-                        "market_sync skipped outside A-share trading hours",
+                        "非 A 股交易时段，跳过行情同步",
                         job="market_sync",
                         stage="skip",
                         payload={"now": now_cn.isoformat(timespec="seconds"), "trading_day": self._is_trading_day(now_cn), "market_open": False},
@@ -398,7 +414,7 @@ class QuantJobManager:
                 else:
                     self._append_log(
                         "info",
-                        "trade_cycle skipped outside A-share trading hours",
+                        "非 A 股交易时段，跳过交易循环",
                         job="trade_cycle",
                         stage="skip",
                         payload={"now": now_cn.isoformat(timespec="seconds"), "trading_day": self._is_trading_day(now_cn), "market_open": False},
@@ -425,7 +441,7 @@ class QuantJobManager:
                 self._save_state(state)
                 self._append_log(
                     "info",
-                    "scheduler tick updated",
+                    "调度器心跳已更新",
                     job="scheduler",
                     stage="tick",
                     payload=state["scheduler"],
@@ -443,7 +459,7 @@ class QuantJobManager:
         state = self._load_state()
         state["scheduler"] = {"enabled": True, "status": "starting", "started_at": _iso_now()}
         self._save_state(state)
-        self._append_log("info", "scheduler started", job="scheduler", stage="start", payload=state["scheduler"])
+        self._append_log("info", "调度器已启动", job="scheduler", stage="start", payload=state["scheduler"])
         return {"status": "ok", "scheduler": "started"}
 
     def mark_scheduler_disabled(self, reason: str = "disabled") -> Dict[str, Any]:
@@ -455,7 +471,7 @@ class QuantJobManager:
             "updated_at": _iso_now(),
         }
         self._save_state(state)
-        self._append_log("info", "scheduler disabled", job="scheduler", stage="disabled", payload=state["scheduler"])
+        self._append_log("info", "调度器已禁用", job="scheduler", stage="disabled", payload=state["scheduler"])
         return {"status": "ok", "scheduler": "disabled"}
 
     async def stop(self) -> Dict[str, Any]:
@@ -469,7 +485,7 @@ class QuantJobManager:
         state = self._load_state()
         state["scheduler"] = {"enabled": False, "status": "stopped", "stopped_at": _iso_now()}
         self._save_state(state)
-        self._append_log("info", "scheduler stopped", job="scheduler", stage="stop", payload=state["scheduler"])
+        self._append_log("info", "调度器已停止", job="scheduler", stage="stop", payload=state["scheduler"])
         return {"status": "ok", "scheduler": "stopped"}
 
 

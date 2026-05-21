@@ -147,7 +147,7 @@ def api_config_runtime():
 @app.post("/api/config/runtime")
 def api_update_config_runtime(payload: Dict[str, Any] = Body(default_factory=dict)):
     result = update_runtime_config(payload)
-    job_manager._append_log("warning", "runtime config updated", job="admin_config", stage="saved")
+    job_manager._append_log("warning", "后台运行配置已保存", job="admin_config", stage="saved")
     return result
 
 
@@ -353,10 +353,68 @@ def jobs_daily_run(
     return job_manager.run_trade_cycle(date=date, notify=notify)
 
 
+@app.post("/api/admin/system/startup")
+def admin_system_startup(
+    date: Optional[str] = Query(default=None),
+    news_hours: int = Query(default=24, ge=1, le=168),
+    news_pages: int = Query(default=8, ge=1, le=30),
+    ai_items: int = Query(default=20, ge=1, le=80),
+    market_codes: int = Query(default=200, ge=1, le=1000),
+    notify: bool = Query(default=True),
+):
+    target_date = str(date or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
+    payload = {
+        "date": target_date,
+        "news_hours": news_hours,
+        "news_pages": news_pages,
+        "ai_items": ai_items,
+        "market_codes": market_codes,
+        "notify": notify,
+    }
+    job_manager._append_log("info", "系统启动流程开始", job="system_startup", stage="start", payload=payload)
+    steps = []
+
+    news_result = job_manager.run_news_fetch(hours=news_hours, pages=news_pages, page_size=20)
+    if news_result.get("status") == "ok":
+        quant_engine.events(force=True)
+    steps.append({"name": "新闻抓取", "job": "news_fetch", "result": news_result})
+
+    ai_result = job_manager.run_ai_analysis(as_of=target_date, max_items=ai_items, batch_size=4)
+    steps.append({"name": "AI 分析", "job": "ai_analysis", "result": ai_result})
+
+    market_result = job_manager.run_market_sync(
+        date=target_date,
+        source="auto",
+        max_codes=market_codes,
+        force=False,
+        include_latest=True,
+    )
+    steps.append({"name": "行情同步", "job": "market_sync", "result": market_result})
+
+    trade_result = job_manager.run_trade_cycle(date=target_date, notify=notify)
+    steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
+
+    failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running"}]
+    result = {
+        "status": "partial" if failed else "ok",
+        "message": "系统启动流程完成" if not failed else "系统启动流程完成，但有步骤未成功，请查看运行日志",
+        "date": target_date,
+        "steps": steps,
+    }
+    job_manager._append_log(
+        "warning" if failed else "info",
+        result["message"],
+        job="system_startup",
+        stage="finish",
+        payload=result,
+    )
+    return result
+
+
 @app.post("/api/admin/backup")
 def admin_backup():
     result = _create_data_backup()
-    job_manager._append_log("info", "admin backup requested", job="admin_backup", stage="finish", payload=result)
+    job_manager._append_log("info", "后台已请求数据备份", job="admin_backup", stage="finish", payload=result)
     return result
 
 
@@ -367,7 +425,7 @@ def admin_restart(background_tasks: BackgroundTasks):
             "status": "disabled",
             "message": "Set QUANT_ALLOW_API_RESTART=1 on the server to enable API-triggered restart.",
         }
-        job_manager._append_log("warning", "admin restart blocked", job="admin_restart", stage="blocked", payload=result)
+        job_manager._append_log("warning", "后台重启被拦截：服务器未启用 API 重启", job="admin_restart", stage="blocked", payload=result)
         return result
     script = PROJECT_ROOT / "scripts" / "restart_server.sh"
     if not script.exists() or not shutil.which("bash"):
@@ -375,11 +433,11 @@ def admin_restart(background_tasks: BackgroundTasks):
             "status": "unavailable",
             "message": "restart script or bash runtime is not available on this host.",
         }
-        job_manager._append_log("error", "admin restart unavailable", job="admin_restart", stage="unavailable", payload=result)
+        job_manager._append_log("error", "后台重启不可用：缺少重启脚本或 bash", job="admin_restart", stage="unavailable", payload=result)
         return result
     background_tasks.add_task(_restart_service_after_response)
     result = {"status": "ok", "message": "restart scheduled"}
-    job_manager._append_log("warning", "admin restart scheduled", job="admin_restart", stage="scheduled", payload=result)
+    job_manager._append_log("warning", "后台已安排服务重启", job="admin_restart", stage="scheduled", payload=result)
     return result
 
 

@@ -429,15 +429,24 @@
         </section>
 
         <section v-if="activeTab === 'analysis'" class="space-y-4">
-          <div class="panel p-4 flex flex-wrap items-center gap-2">
-            <select v-model="tradeMode" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
-              <option value="intraday">分时复盘</option>
-              <option value="daily">日线复盘</option>
-            </select>
-            <input v-model="timelineForm.start_date" type="date" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
-            <input v-model="timelineForm.end_date" type="date" class="h-9 px-3 border border-neutral-300 bg-white text-sm">
+          <div class="panel p-4 grid gap-3 lg:grid-cols-[130px_170px_170px_auto_1fr] lg:items-end">
+            <label class="block text-sm">
+              <span class="block text-xs text-neutral-500 mb-1">复盘类型</span>
+              <select v-model="tradeMode" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+                <option value="intraday">分时复盘</option>
+                <option value="daily">日线复盘</option>
+              </select>
+            </label>
+            <label class="block text-sm">
+              <span class="block text-xs text-neutral-500 mb-1">开始日期</span>
+              <input v-model="timelineForm.start_date" type="date" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+            </label>
+            <label class="block text-sm">
+              <span class="block text-xs text-neutral-500 mb-1">结束日期</span>
+              <input v-model="timelineForm.end_date" type="date" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+            </label>
             <button @click="loadTimeline(false)" :disabled="timelineLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ timelineLoading ? '加载中' : '加载复盘' }}</button>
-            <div class="text-sm text-neutral-500 ml-auto">模式 {{ activeTimeline.mode || (tradeMode === 'intraday' ? 'intraday_5m' : 'daily') }}</div>
+            <div class="text-sm text-neutral-500 lg:text-right">当前模式 {{ activeTimeline.mode || (tradeMode === 'intraday' ? 'intraday_5m' : 'daily') }}</div>
           </div>
 
           <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-7 gap-3">
@@ -756,6 +765,7 @@
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
             <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
+              <button @click="startSystem" :disabled="systemStarting" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ systemStarting ? '启动中' : '系统启动' }}</button>
               <button @click="fetchNews" :disabled="newsFetching" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ newsFetching ? '抓取中' : '立即抓新闻' }}</button>
               <button @click="analyzeAI" :disabled="aiAnalyzing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ aiAnalyzing ? '分析中' : '立即AI分析' }}</button>
               <button @click="syncIntraday" :disabled="syncing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncing ? '同步中' : '同步分时行情' }}</button>
@@ -812,6 +822,8 @@
             <option value="ai_analysis">AI</option>
             <option value="market_sync">行情</option>
             <option value="trade_cycle">交易</option>
+            <option value="system_startup">系统启动</option>
+            <option value="admin_config">配置</option>
             <option value="admin_backup">备份</option>
             <option value="admin_restart">重启</option>
           </select>
@@ -832,8 +844,8 @@
               <span :class="logLevelClass(item.level)" class="font-semibold">{{ item.level || 'info' }}</span>
               <span class="text-neutral-500">{{ shortTime(item.ts) }}</span>
             </div>
-            <div class="mt-1 text-sm">{{ item.message }}</div>
-            <div class="mt-1 text-xs text-neutral-400">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
+            <div class="mt-1 text-sm">{{ logMessage(item) }}</div>
+            <div class="mt-1 text-xs text-neutral-400">{{ logJobLabel(item.job) }} · {{ logStageLabel(item.stage) }}</div>
             <pre v-if="showPayloads" class="mt-2 text-xs text-neutral-300 bg-[#0b0f14] p-2 rounded-md overflow-auto max-h-44">{{ compactJson(item.payload || {}) }}</pre>
           </div>
           <div v-if="!logs.length" class="text-center text-neutral-500 text-sm py-12">暂无运行日志</div>
@@ -892,6 +904,7 @@
           autoRefresh: true,
           loading: false,
           timelineLoading: false,
+          systemStarting: false,
           newsFetching: false,
           aiAnalyzing: false,
           syncing: false,
@@ -1221,6 +1234,27 @@
             if (!quiet) this.clientError = String(err.message || err);
           }
         },
+        async startSystem() {
+          this.systemStarting = true;
+          this.clientError = '';
+          try {
+            const q = new URLSearchParams({
+              date: this.asOf || '',
+              news_hours: '24',
+              news_pages: '8',
+              ai_items: '20',
+              market_codes: '200',
+              notify: 'true',
+            });
+            this.adminResult = await this.api(`/api/admin/system/startup?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+            await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.systemStarting = false;
+          }
+        },
         async fetchNews() {
           this.newsFetching = true;
           try {
@@ -1471,6 +1505,61 @@
           if (text === 'error') return 'text-red-400';
           if (text === 'warning') return 'text-amber-300';
           return 'text-emerald-300';
+        },
+        logMessage(item) {
+          const raw = String((item || {}).message || '');
+          const exact = {
+            'market_sync skipped outside A-share trading hours': '非 A 股交易时段，跳过行情同步',
+            'trade_cycle skipped outside A-share trading hours': '非 A 股交易时段，跳过交易循环',
+            'scheduler tick updated': '调度器心跳已更新',
+            'scheduler started': '调度器已启动',
+            'scheduler disabled': '调度器已禁用',
+            'scheduler stopped': '调度器已停止',
+            'runtime config updated': '后台运行配置已保存',
+            'admin backup requested': '后台已请求数据备份',
+            'admin restart blocked': '后台重启被拦截：服务器未启用 API 重启',
+            'admin restart unavailable': '后台重启不可用：缺少重启脚本或 bash',
+            'admin restart scheduled': '后台已安排服务重启',
+          };
+          if (exact[raw]) return exact[raw];
+          const started = raw.match(/^([a-z_]+) started$/);
+          if (started) return `${this.logJobLabel(started[1])}已开始`;
+          const finished = raw.match(/^([a-z_]+) finished$/);
+          if (finished) return `${this.logJobLabel(finished[1])}完成`;
+          const failed = raw.match(/^([a-z_]+) failed$/);
+          if (failed) return `${this.logJobLabel(failed[1])}失败`;
+          if (raw.includes('skipped because it is already running')) return `${this.logJobLabel((item || {}).job)}正在运行，已跳过重复请求`;
+          return raw || '-';
+        },
+        logJobLabel(job) {
+          const labels = {
+            scheduler: '调度器',
+            news_fetch: '新闻抓取',
+            ai_analysis: 'AI 分析',
+            market_sync: '行情同步',
+            trade_cycle: '交易循环',
+            system_startup: '系统启动',
+            admin_config: '配置保存',
+            admin_backup: '数据备份',
+            admin_restart: '服务重启',
+          };
+          return labels[String(job || '')] || '系统';
+        },
+        logStageLabel(stage) {
+          const labels = {
+            start: '开始',
+            finish: '完成',
+            error: '失败',
+            skip: '跳过',
+            tick: '心跳',
+            disabled: '禁用',
+            stop: '停止',
+            saved: '已保存',
+            blocked: '已拦截',
+            unavailable: '不可用',
+            scheduled: '已安排',
+          };
+          return labels[String(stage || '')] || '-';
         },
         fixed(value, digits = 2) {
           const n = Number(value || 0);
