@@ -123,7 +123,9 @@ backend/data/qt.err.log
 `install_server.sh` 会尽量把 `scripts/qt.sh` 安装为 `/usr/local/bin/qt`。安装成功后，可以直接使用：
 
 ```bash
+qt
 qt status
+qt auth
 qt doctor
 qt restart
 qt update
@@ -131,6 +133,8 @@ qt backup
 qt logs
 qt scan
 ```
+
+直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、停止、日志、备份、恢复、安全扫描和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
 
 如果服务器没有 sudo/root 权限，可以手动创建软链接：
 

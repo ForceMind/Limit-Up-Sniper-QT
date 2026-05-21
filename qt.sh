@@ -13,6 +13,7 @@ usage() {
   bash qt.sh                  日常一键更新，等同于 bash qt.sh update
   bash qt.sh status           查看服务、Git 版本和 API 状态
   bash qt.sh doctor           检查部署环境和脚本权限
+  qt                           服务器快捷命令，打开交互式运维面板
 
 常用命令：
   install | deploy | init     第一次部署
@@ -23,6 +24,7 @@ usage() {
   logs   | log                查看实时日志
   backup | bak                备份 backend/data
   restore <tar.gz>            从备份恢复 backend/data
+  auth                        账号密码管理
   scan   | security           GitHub 上传前安全扫描
   doctor | check              部署环境检查
 

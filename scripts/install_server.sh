@@ -86,4 +86,4 @@ fi
 
 echo "安装完成"
 echo "项目根目录命令：bash qt.sh restart"
-echo "服务器快捷命令：qt restart"
+echo "服务器快捷命令：qt 打开运维面板；qt update 直接一键更新"

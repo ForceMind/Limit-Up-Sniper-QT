@@ -15,28 +15,27 @@ usage() {
   cat <<EOF
 涨停狙击手服务器命令
 
-推荐用法：
-  bash qt.sh install              第一次部署：安装依赖并注册 systemd 服务
-  bash qt.sh                      日常一键更新：备份数据、拉取代码、更新依赖、重启服务
-  bash qt.sh status               查看服务状态、Git 版本、API 健康检查
-  bash qt.sh doctor               检查部署环境和关键文件
+交互面板：
+  qt                         打开服务器运维面板
+  qt panel                   打开服务器运维面板
 
-完整命令：
-  install | deploy | init         第一次部署
-  update  | upgrade | up          一键更新
-  restart | start | reload        重启服务
-  stop                            停止服务
-  status | ps                     查看状态
-  logs   | log                    查看实时日志
-  backup | bak                    备份 backend/data
-  restore <tar.gz>                从备份恢复 backend/data
-  scan   | security               GitHub 上传前安全扫描
-  doctor | check                  部署环境检查
-  help                            显示帮助
+直接命令：
+  qt install                 首次部署：安装依赖并注册 systemd 服务
+  qt update                  一键更新：备份数据、拉取代码、更新依赖、重启服务
+  qt restart                 重启服务
+  qt stop                    停止服务
+  qt status                  查看服务状态、Git 版本、认证状态
+  qt logs                    查看实时日志
+  qt backup                  备份 backend/data
+  qt restore <tar.gz>        从备份恢复 backend/data
+  qt auth                    账号密码管理
+  qt scan                    GitHub 上传前安全扫描
+  qt doctor                  部署环境检查
+  qt help                    显示帮助
 
 说明：
-  根目录 qt.sh 是给人记的入口。
-  scripts/ 目录保留具体实现，避免根目录堆满安装、更新、备份、恢复脚本。
+  服务器安装后 /usr/local/bin/qt 会指向 scripts/qt.sh，所以直接输入 qt 会进入面板。
+  根目录 bash qt.sh 仍然保留为一键更新入口。
 EOF
 }
 
@@ -59,7 +58,7 @@ systemd_unit_exists() {
 }
 
 api_url() {
-  echo "http://127.0.0.1:${PORT}/api/status"
+  echo "http://127.0.0.1:${PORT}/api/auth/status"
 }
 
 run_security_scan() {
@@ -70,6 +69,18 @@ run_security_scan() {
   else
     error "找不到 Python，无法执行安全扫描。请安装 python3，或在 .env 中设置 PYTHON_BIN"
     return 1
+  fi
+}
+
+run_auth_tool() {
+  local auth_tool="$ROOT_DIR/scripts/manage_auth.py"
+  [[ -f "$auth_tool" ]] || die "找不到账号管理工具：$auth_tool"
+  if [[ -x "$(venv_python)" ]]; then
+    "$(venv_python)" "$auth_tool" "$@"
+  elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    "$PYTHON_BIN" "$auth_tool" "$@"
+  else
+    die "找不到 Python，无法管理账号密码"
   fi
 }
 
@@ -116,6 +127,9 @@ cmd_status() {
   else
     echo ".env：未创建，可从 .env.example 复制"
   fi
+
+  section "账号状态"
+  run_auth_tool status || true
 
   section "服务状态"
   if systemd_unit_exists; then
@@ -165,7 +179,7 @@ cmd_doctor() {
   command -v systemctl >/dev/null 2>&1 && success "systemd 可用" || warn "未检测到 systemd，将使用 nohup 方式运行"
 
   section "脚本权限"
-  chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh 2>/dev/null || warn "无法修改脚本执行权限；后续会用 bash 显式执行"
+  chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh 2>/dev/null || warn "无法修改脚本执行权限，后续会用 bash 显式执行"
   for file in "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh; do
     [[ -f "$file" ]] || continue
     [[ -x "$file" ]] && success "${file#$ROOT_DIR/} 可执行" || warn "${file#$ROOT_DIR/} 不可执行，但可通过 bash 运行"
@@ -224,10 +238,143 @@ cmd_logs() {
   fi
 }
 
-cmd="${1:-help}"
+cmd_auth() {
+  while true; do
+    clear || true
+    cat <<EOF
+涨停狙击手 - 账号密码管理
+
+认证文件：$ROOT_DIR/backend/data/auth.json
+
+1) 查看账号状态
+2) 初始化/重建前后台账号
+3) 修改后台管理员账号或密码
+4) 修改前台交易终端账号或密码
+5) 删除账号配置，回到网页首次初始化
+0) 返回主面板
+
+EOF
+    read -r -p "请选择操作：" choice
+    choice="${choice//$'\r'/}"
+    case "$choice" in
+      1)
+        run_auth_tool status
+        panel_pause
+        ;;
+      2)
+        run_auth_tool init
+        panel_pause
+        ;;
+      3)
+        run_auth_tool set --scope admin
+        panel_pause
+        ;;
+      4)
+        run_auth_tool set --scope frontend
+        panel_pause
+        ;;
+      5)
+        run_auth_tool delete
+        panel_pause
+        ;;
+      0|q|Q)
+        return
+        ;;
+      *)
+        warn "无效选择：$choice"
+        panel_pause
+        ;;
+    esac
+  done
+}
+
+panel_pause() {
+  echo
+  read -r -p "按 Enter 返回..." _
+}
+
+panel_run() {
+  local label="$1"
+  shift
+  clear || true
+  section "$label"
+  set +e
+  "$@"
+  local code=$?
+  set -e
+  if [[ "$code" -eq 0 ]]; then
+    success "$label 完成"
+  else
+    warn "$label 退出码：$code"
+  fi
+  panel_pause
+}
+
+cmd_panel() {
+  require_project_root
+  while true; do
+    clear || true
+    cat <<EOF
+涨停狙击手 - 服务器运维面板
+
+项目：$ROOT_DIR
+服务：$SERVICE_NAME
+端口：$PORT
+版本：$(git_ref)
+
+1) 一键更新部署
+2) 重启服务
+3) 停止服务
+4) 查看服务状态
+5) 查看实时日志
+6) 备份数据
+7) 恢复数据
+8) 账号密码管理
+9) GitHub 上传前安全扫描
+10) 部署环境检查
+0) 退出
+
+EOF
+    read -r -p "请选择操作：" choice
+    choice="${choice//$'\r'/}"
+    case "$choice" in
+      1) panel_run "一键更新部署" bash "$SCRIPT_DIR/qt.sh" update ;;
+      2) panel_run "重启服务" bash "$SCRIPT_DIR/qt.sh" restart ;;
+      3) panel_run "停止服务" bash "$SCRIPT_DIR/qt.sh" stop ;;
+      4) panel_run "查看服务状态" bash "$SCRIPT_DIR/qt.sh" status ;;
+      5)
+        clear || true
+        bash "$SCRIPT_DIR/qt.sh" logs
+        panel_pause
+        ;;
+      6) panel_run "备份数据" bash "$SCRIPT_DIR/qt.sh" backup ;;
+      7)
+        read -r -p "请输入备份 tar.gz 路径：" backup_file
+        backup_file="${backup_file//$'\r'/}"
+        [[ -n "$backup_file" ]] && panel_run "恢复数据" bash "$SCRIPT_DIR/qt.sh" restore "$backup_file"
+        ;;
+      8) cmd_auth ;;
+      9) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
+      10) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      0|q|Q)
+        echo "已退出运维面板"
+        exit 0
+        ;;
+      *)
+        warn "无效选择：$choice"
+        panel_pause
+        ;;
+    esac
+  done
+}
+
+cmd="${1:-panel}"
 case "$cmd" in
+  panel|menu)
+    cmd_panel
+    ;;
   install|deploy|init)
-    run_script "第一次部署" "$(script_path install_server.sh)"
+    run_script "首次部署" "$(script_path install_server.sh)"
     ;;
   update|upgrade|up)
     run_script "一键更新" "$(script_path update_server.sh)"
@@ -250,6 +397,9 @@ case "$cmd" in
   restore)
     [[ $# -ge 2 ]] || die "restore 需要传入备份 tar.gz 文件路径"
     run_script "恢复数据" "$(script_path restore_data.sh)" "$2"
+    ;;
+  auth|user|users|password|passwd)
+    cmd_auth
     ;;
   scan|security)
     section "GitHub 上传前安全扫描"
