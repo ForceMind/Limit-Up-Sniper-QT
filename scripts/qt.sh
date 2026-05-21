@@ -13,19 +13,19 @@ source "$SCRIPT_DIR/common.sh"
 
 usage() {
   cat <<EOF
-qt command for this project
+涨停狙击手服务器命令
 
-Usage:
-  qt install              install dependencies and systemd service
-  qt update               backup data, pull code, install dependencies, restart
-  qt restart | start      restart service
-  qt stop                 stop systemd service or nohup process
-  qt status               show service/process and API status
-  qt logs                 follow service logs
-  qt backup               backup backend/data
-  qt restore <tar.gz>     restore backend/data from backup
-  qt scan                 run GitHub safety scan
-  qt help                 show this help
+用法：
+  qt install              第一次部署：安装依赖并注册 systemd 服务
+  qt update               一键更新：备份数据、拉取代码、更新依赖、重启服务
+  qt restart | start      重启服务
+  qt stop                 停止 systemd 服务或 nohup 后台进程
+  qt status               查看服务进程和 API 状态
+  qt logs                 查看实时服务日志
+  qt backup               备份 backend/data
+  qt restore <tar.gz>     从备份恢复 backend/data
+  qt scan                 执行 GitHub 上传前安全扫描
+  qt help                 显示帮助
 EOF
 }
 
@@ -61,12 +61,12 @@ case "$cmd" in
         pid="$(cat "$pid_file" || true)"
         if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
           kill "$pid"
-          echo "stopped ${SERVICE_NAME} pid=$pid"
+          echo "已停止 ${SERVICE_NAME}，pid=$pid"
         else
-          echo "${SERVICE_NAME} process is not running"
+          echo "${SERVICE_NAME} 进程未运行"
         fi
       else
-        echo "pid file not found: $pid_file"
+        echo "未找到 pid 文件：$pid_file"
       fi
     fi
     ;;
@@ -78,12 +78,12 @@ case "$cmd" in
       if [[ -f "$pid_file" ]]; then
         pid="$(cat "$pid_file" || true)"
         if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
-          echo "${SERVICE_NAME} running pid=$pid"
+          echo "${SERVICE_NAME} 正在运行，pid=$pid"
         else
-          echo "${SERVICE_NAME} pid file exists but process is not running"
+          echo "${SERVICE_NAME} pid 文件存在，但进程未运行"
         fi
       else
-        echo "${SERVICE_NAME} pid file not found"
+        echo "未找到 ${SERVICE_NAME} pid 文件"
       fi
     fi
     if command -v curl >/dev/null 2>&1; then
@@ -103,7 +103,7 @@ case "$cmd" in
     ;;
   restore)
     if [[ $# -lt 2 ]]; then
-      echo "error: qt restore requires a backup tar.gz path" >&2
+      echo "错误：qt restore 需要传入备份 tar.gz 文件路径" >&2
       exit 2
     fi
     "$SCRIPT_DIR/restore_data.sh" "$2"
@@ -119,7 +119,7 @@ case "$cmd" in
     usage
     ;;
   *)
-    echo "unknown command: $cmd" >&2
+    echo "未知命令：$cmd" >&2
     usage >&2
     exit 2
     ;;

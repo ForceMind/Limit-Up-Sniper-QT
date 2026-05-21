@@ -49,7 +49,8 @@ backend/data                     样例数据和本地运行数据目录
 backend/tests                    回归测试
 frontend                         前台交易终端页面
 frontend/admin                   后台管理页面
-scripts                          安装、更新、备份、扫描等脚本
+qt.sh                            根目录统一命令入口
+scripts                          安装、更新、备份、扫描等底层脚本
 deploy                           systemd 和 Nginx 示例配置
 docs                             需求、逻辑、部署、安全和交接文档
 ```
@@ -154,21 +155,41 @@ git ls-files backend/data
 
 ## 服务器部署
 
+根目录只需要记一个入口：`qt.sh`。
+
+首次部署：
+
 ```bash
 cp .env.example .env
-bash scripts/install_server.sh
+# 编辑 .env，填入 DeepSeek、必赢、SMTP 等真实配置
+bash qt.sh install
 ```
+
+日常更新：
+
+```bash
+bash qt.sh
+```
+
+`bash qt.sh` 等同于 `bash qt.sh update`，会先备份 `backend/data`，再 `git pull --ff-only`、安装依赖并重启服务。
 
 常用运维命令：
 
 ```bash
-bash scripts/update_server.sh
-bash scripts/restart_server.sh
-bash scripts/backup_data.sh
-bash scripts/restore_data.sh <backup-file>
+bash qt.sh status
+bash qt.sh restart
+bash qt.sh logs
+bash qt.sh backup
+bash qt.sh restore <backup-file>
+bash qt.sh scan
 ```
 
-安装后服务器会尽量创建 `qt` 快捷命令：
+为什么底层脚本仍放在 `scripts/`，而不是全部放根目录：
+
+- 根目录只保留项目入口、配置模板和文档，避免一堆运维脚本混在代码入口旁边。
+- `scripts/` 里的 `install_server.sh`、`update_server.sh`、`backup_data.sh`、`restore_data.sh` 是实现细节，方便维护和复用。
+- 根目录 `qt.sh` 是给人使用的统一入口，它会转发到 `scripts/qt.sh`。
+- 首次安装后，服务器会尽量创建系统快捷命令 `/usr/local/bin/qt`，以后也可以直接用：
 
 ```bash
 qt status

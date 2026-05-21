@@ -9,12 +9,12 @@ require_project_root
 ensure_data_dir
 
 BACKUP_FILE="$("$SCRIPT_DIR/backup_data.sh")"
-echo "backup created: $BACKUP_FILE"
+echo "数据备份已创建：$BACKUP_FILE"
 
 if [[ -d "$ROOT_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
   git -C "$ROOT_DIR" pull --ff-only
 else
-  echo "git repository not found; skipping git pull"
+  echo "未找到 Git 仓库，跳过 git pull"
 fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -26,4 +26,4 @@ fi
 
 "$SCRIPT_DIR/restart_server.sh"
 
-echo "update complete"
+echo "更新完成"

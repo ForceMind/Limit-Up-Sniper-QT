@@ -7,6 +7,7 @@
 - `backend/app`：后端服务、量化引擎、任务调度、AI分析、交易模拟接口
 - `backend/tests`：当前量化引擎回归测试
 - `frontend`：前台交易终端和后台管理页面
+- `qt.sh`：根目录统一部署和更新入口
 - `scripts`：安全扫描、部署/辅助脚本
 - `deploy`：systemd 与 nginx 示例配置
 - `docs`：需求、开发计划、量化逻辑、部署、安全与 Codex 交接文档
@@ -49,6 +50,18 @@ Copy-Item .env.example .env
 ```
 
 然后在 `.env` 中填写 DeepSeek、必赢数据、邮件 SMTP 等真实配置。不要提交 `.env`。
+
+首次部署：
+
+```bash
+bash qt.sh install
+```
+
+后续更新：
+
+```bash
+bash qt.sh
+```
 
 ## 历史数据迁移
 

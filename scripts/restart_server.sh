@@ -39,4 +39,4 @@ fi
 cd "$ROOT_DIR/backend"
 nohup "$(venv_python)" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOG_FILE" 2> "$ERR_FILE" &
 echo $! > "$PID_FILE"
-echo "started ${SERVICE_NAME} pid=$(cat "$PID_FILE") url=http://127.0.0.1:${PORT}"
+echo "已启动 ${SERVICE_NAME}，pid=$(cat "$PID_FILE")，访问地址：http://127.0.0.1:${PORT}"

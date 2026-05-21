@@ -25,7 +25,7 @@ PORT="${QUANT_PORT:-8000}"
 
 require_project_root() {
   if [[ ! -d "$ROOT_DIR/backend/app" || ! -d "$ROOT_DIR/frontend" ]]; then
-    echo "error: run this script from the project checkout or keep scripts/ under project root" >&2
+    echo "错误：请在项目目录中运行，或确保 scripts/ 仍位于项目根目录下" >&2
     exit 1
   fi
 }

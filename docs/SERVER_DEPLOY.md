@@ -17,6 +17,7 @@ backend/app              后端 API 与量化引擎
 backend/data             历史新闻、AI分析记录、K线缓存、运行状态
 frontend                 前台交易终端
 frontend/admin           后台管理
+qt.sh                    根目录统一命令入口
 scripts                  安装、更新、备份、重启脚本
 deploy/systemd           systemd 模板
 deploy/nginx             Nginx 反代模板
@@ -70,7 +71,7 @@ QUANT_SERVICE_NAME=qt
 
 ```bash
 cd /opt/qt
-bash scripts/install_server.sh
+bash qt.sh install
 ```
 
 脚本会执行：
@@ -90,15 +91,15 @@ bash scripts/restart_server.sh
 
 ```bash
 cd /opt/qt
-bash scripts/update_server.sh
+bash qt.sh
 ```
 
-脚本会先备份 `backend/data`，再执行 `git pull --ff-only`、更新依赖并重启服务。
+`bash qt.sh` 等同于 `bash qt.sh update`，会先备份 `backend/data`，再执行 `git pull --ff-only`、更新依赖并重启服务。
 
 ## 重启服务
 
 ```bash
-bash scripts/restart_server.sh
+bash qt.sh restart
 ```
 
 如果 systemd 服务存在，脚本会走 `systemctl restart`；否则会使用 `nohup` 后台启动，并写入：
@@ -110,6 +111,14 @@ backend/data/qt.err.log
 ```
 
 ## 服务器 qt 命令
+
+根目录只需要记一个入口：`qt.sh`。
+
+底层的安装、更新、备份、恢复、重启脚本仍放在 `scripts/`，原因是：
+
+- 根目录应该只保留项目入口、配置模板和文档，避免运维脚本散落在最外层。
+- `scripts/` 是脚本实现目录，方便维护、复用和权限管理。
+- `qt.sh` 是人用入口，负责把命令转发给 `scripts/qt.sh`。
 
 `install_server.sh` 会尽量把 `scripts/qt.sh` 安装为 `/usr/local/bin/qt`。安装成功后，可以直接使用：
 
@@ -133,13 +142,13 @@ sudo ln -sf /opt/qt/scripts/qt.sh /usr/local/bin/qt
 备份：
 
 ```bash
-bash scripts/backup_data.sh
+bash qt.sh backup
 ```
 
 恢复：
 
 ```bash
-bash scripts/restore_data.sh /path/to/backend_data_YYYYmmdd_HHMMSS.tar.gz
+bash qt.sh restore /path/to/backend_data_YYYYmmdd_HHMMSS.tar.gz
 ```
 
 恢复脚本会先自动备份当前 `backend/data`，再替换为指定备份。
