@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${QT_LOCALE_REEXEC:-0}" != "1" && "${LC_ALL:-}" != "C" ]]; then
+  export QT_LOCALE_REEXEC=1
+  export LC_ALL=C
+  export LANG=C
+  export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
+  exec bash "$0" "$@"
+fi
+export LC_ALL=C
+export LANG=C
+export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -40,5 +50,5 @@ fi
 cd "$ROOT_DIR/backend"
 nohup "$(venv_python)" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOG_FILE" 2> "$ERR_FILE" &
 echo $! > "$PID_FILE"
-echo "已启动 ${SERVICE_NAME}，pid=$(cat "$PID_FILE")，访问地址：http://127.0.0.1:${PORT}"
+echo "$(zh '\xe5\xb7\xb2\xe5\x90\xaf\xe5\x8a\xa8')"" ${SERVICE_NAME}""$(zh '\xef\xbc\x8c')""pid=$(cat "$PID_FILE")""$(zh '\xef\xbc\x8c\xe8\xae\xbf\xe9\x97\xae\xe5\x9c\xb0\xe5\x9d\x80\xef\xbc\x9a')""http://127.0.0.1:${PORT}"
 verify_running_backend

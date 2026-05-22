@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${QT_LOCALE_REEXEC:-0}" != "1" && "${LC_ALL:-}" != "C" ]]; then
+  export QT_LOCALE_REEXEC=1
+  export LC_ALL=C
+  export LANG=C
+  export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
+  exec bash "$0" "$@"
+fi
+export LC_ALL=C
+export LANG=C
+export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
 
 SOURCE="${BASH_SOURCE[0]}"
 while [[ -L "$SOURCE" ]]; do
@@ -51,9 +61,9 @@ run_script() {
   local title="$1"
   local script="$2"
   shift 2
-  [[ -f "$script" ]] || die "找不到脚本：$script"
+  [[ -f "$script" ]] || die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe8\x84\x9a\xe6\x9c\xac\xef\xbc\x9a')""$script"
   section "$title"
-  info "执行：bash ${script#$ROOT_DIR/} $*"
+  info "$(zh '\xe6\x89\xa7\xe8\xa1\x8c\xef\xbc\x9a')""bash ${script#$ROOT_DIR/} $*"
   bash "$script" "$@"
 }
 
@@ -71,20 +81,20 @@ run_security_scan() {
   elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     "$PYTHON_BIN" "$ROOT_DIR/scripts/security_scan.py"
   else
-    error "找不到 Python，无法执行安全扫描。请安装 python3，或在 .env 中设置 PYTHON_BIN"
+    error "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe6\x89\xa7\xe8\xa1\x8c\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f\xe3\x80\x82\xe8\xaf\xb7\xe5\xae\x89\xe8\xa3\x85')"" python3""$(zh '\xef\xbc\x8c\xe6\x88\x96\xe5\x9c\xa8')"" .env ""$(zh '\xe4\xb8\xad\xe8\xae\xbe\xe7\xbd\xae')"" PYTHON_BIN"
     return 1
   fi
 }
 
 run_auth_tool() {
   local auth_tool="$ROOT_DIR/scripts/manage_auth.py"
-  [[ -f "$auth_tool" ]] || die "找不到账号管理工具：$auth_tool"
+  [[ -f "$auth_tool" ]] || die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe8\xb4\xa6\xe5\x8f\xb7\xe7\xae\xa1\xe7\x90\x86\xe5\xb7\xa5\xe5\x85\xb7\xef\xbc\x9a')""$auth_tool"
   if [[ -x "$(venv_python)" ]]; then
     "$(venv_python)" "$auth_tool" "$@"
   elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     "$PYTHON_BIN" "$auth_tool" "$@"
   else
-    die "找不到 Python，无法管理账号密码"
+    die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe7\xae\xa1\xe7\x90\x86\xe8\xb4\xa6\xe5\x8f\xb7\xe5\xaf\x86\xe7\xa0\x81')"
   fi
 }
 
@@ -92,14 +102,14 @@ run_python_tool() {
   local title="$1"
   local tool="$2"
   shift 2
-  [[ -f "$tool" ]] || die "找不到工具：$tool"
+  [[ -f "$tool" ]] || die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe5\xb7\xa5\xe5\x85\xb7\xef\xbc\x9a')""$tool"
   section "$title"
   if [[ -x "$(venv_python)" ]]; then
     PYTHONPATH="$ROOT_DIR/backend" "$(venv_python)" "$tool" "$@"
   elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$tool" "$@"
   else
-    die "找不到 Python，无法执行$title"
+    die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe6\x89\xa7\xe8\xa1\x8c')""$title"
   fi
 }
 
@@ -111,10 +121,10 @@ git_ref() {
     if [[ -n "$branch$commit" ]]; then
       echo "${branch:-unknown}@${commit:-unknown}"
     else
-      echo "未识别"
+      echo "$(zh '\xe6\x9c\xaa\xe8\xaf\x86\xe5\x88\xab')"
     fi
   else
-    echo "未启用 Git"
+    echo "$(zh '\xe6\x9c\xaa\xe5\x90\xaf\xe7\x94\xa8')"" Git"
   fi
 }
 
@@ -124,116 +134,116 @@ process_status() {
     local pid
     pid="$(cat "$pid_file" || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
-      echo "nohup 进程运行中，pid=$pid"
+      echo "nohup ""$(zh '\xe8\xbf\x9b\xe7\xa8\x8b\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad\xef\xbc\x8c')""pid=$pid"
     else
-      echo "pid 文件存在，但进程未运行"
+      echo "pid ""$(zh '\xe6\x96\x87\xe4\xbb\xb6\xe5\xad\x98\xe5\x9c\xa8\xef\xbc\x8c\xe4\xbd\x86\xe8\xbf\x9b\xe7\xa8\x8b\xe6\x9c\xaa\xe8\xbf\x90\xe8\xa1\x8c')"
     fi
   else
-    echo "未找到 nohup pid 文件"
+    echo "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0')"" nohup pid ""$(zh '\xe6\x96\x87\xe4\xbb\xb6')"
   fi
 }
 
 cmd_status() {
   require_project_root
-  section "项目状态"
-  echo "项目目录：$ROOT_DIR"
-  echo "服务名称：$SERVICE_NAME"
-  echo "监听地址：$HOST:$PORT"
-  echo "应用版本：$(local_app_version)"
-  echo "数据目录：$ROOT_DIR/backend/data"
-  echo "Git 版本：$(git_ref)"
+  section "$(zh '\xe9\xa1\xb9\xe7\x9b\xae\xe7\x8a\xb6\xe6\x80\x81')"
+  echo "$(zh '\xe9\xa1\xb9\xe7\x9b\xae\xe7\x9b\xae\xe5\xbd\x95\xef\xbc\x9a')""$ROOT_DIR"
+  echo "$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe5\x90\x8d\xe7\xa7\xb0\xef\xbc\x9a')""$SERVICE_NAME"
+  echo "$(zh '\xe7\x9b\x91\xe5\x90\xac\xe5\x9c\xb0\xe5\x9d\x80\xef\xbc\x9a')""$HOST:$PORT"
+  echo "$(zh '\xe5\xba\x94\xe7\x94\xa8\xe7\x89\x88\xe6\x9c\xac\xef\xbc\x9a')""$(local_app_version)"
+  echo "$(zh '\xe6\x95\xb0\xe6\x8d\xae\xe7\x9b\xae\xe5\xbd\x95\xef\xbc\x9a')""$ROOT_DIR/backend/data"
+  echo "Git ""$(zh '\xe7\x89\x88\xe6\x9c\xac\xef\xbc\x9a')""$(git_ref)"
   if [[ -f "$ROOT_DIR/.env" ]]; then
-    echo ".env：已存在"
+    echo ".env""$(zh '\xef\xbc\x9a\xe5\xb7\xb2\xe5\xad\x98\xe5\x9c\xa8')"
   else
-    echo ".env：未创建，可从 .env.example 复制"
+    echo ".env""$(zh '\xef\xbc\x9a\xe6\x9c\xaa\xe5\x88\x9b\xe5\xbb\xba\xef\xbc\x8c\xe5\x8f\xaf\xe4\xbb\x8e')"" .env.example ""$(zh '\xe5\xa4\x8d\xe5\x88\xb6')"
   fi
 
-  section "账号状态"
+  section "$(zh '\xe8\xb4\xa6\xe5\x8f\xb7\xe7\x8a\xb6\xe6\x80\x81')"
   run_auth_tool status || true
 
-  section "服务状态"
+  section "$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe7\x8a\xb6\xe6\x80\x81')"
   if systemd_unit_exists; then
-    info "检测到 systemd 服务：${SERVICE_NAME}.service"
+    info "$(zh '\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0')"" systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xef\xbc\x9a')""${SERVICE_NAME}.service"
     systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1 \
-      && success "systemd 服务运行中" \
-      || warn "systemd 服务未运行"
+      && success "systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad')" \
+      || warn "systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe6\x9c\xaa\xe8\xbf\x90\xe8\xa1\x8c')"
     systemctl show "$SERVICE_NAME" -p MainPID -p ExecStart -p WorkingDirectory --no-pager || true
     systemctl status "$SERVICE_NAME" --no-pager -l || true
   else
-    warn "未检测到 systemd 服务，检查 nohup 进程"
+    warn "$(zh '\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0')"" systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xef\xbc\x8c\xe6\xa3\x80\xe6\x9f\xa5')"" nohup ""$(zh '\xe8\xbf\x9b\xe7\xa8\x8b')"
     process_status
   fi
 
-  section "API 健康检查"
+  section "API ""$(zh '\xe5\x81\xa5\xe5\xba\xb7\xe6\xa3\x80\xe6\x9f\xa5')"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsS --max-time 5 "$(api_url)"; then
       echo
-      success "API 可访问：$(api_url)"
+      success "API ""$(zh '\xe5\x8f\xaf\xe8\xae\xbf\xe9\x97\xae\xef\xbc\x9a')""$(api_url)"
       verify_running_backend || true
     else
       echo
-      warn "API 暂不可访问：$(api_url)"
+      warn "API ""$(zh '\xe6\x9a\x82\xe4\xb8\x8d\xe5\x8f\xaf\xe8\xae\xbf\xe9\x97\xae\xef\xbc\x9a')""$(api_url)"
     fi
   else
-    warn "未安装 curl，跳过 API 检查"
+    warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" curl""$(zh '\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" API ""$(zh '\xe6\xa3\x80\xe6\x9f\xa5')"
   fi
 }
 
 cmd_version() {
   require_project_root
-  echo "本地应用版本：$(local_app_version)"
-  echo "Git 版本：$(git_ref)"
+  echo "$(zh '\xe6\x9c\xac\xe5\x9c\xb0\xe5\xba\x94\xe7\x94\xa8\xe7\x89\x88\xe6\x9c\xac\xef\xbc\x9a')""$(local_app_version)"
+  echo "Git ""$(zh '\xe7\x89\x88\xe6\x9c\xac\xef\xbc\x9a')""$(git_ref)"
   verify_running_backend
 }
 
 cmd_doctor() {
   local failed=0
-  section "部署环境检查"
+  section "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')"
 
-  [[ -d "$ROOT_DIR/backend/app" ]] && success "后端目录存在" || { error "缺少 backend/app"; failed=1; }
-  [[ -d "$ROOT_DIR/frontend" ]] && success "前端目录存在" || { error "缺少 frontend"; failed=1; }
-  [[ -f "$ROOT_DIR/backend/requirements.txt" ]] && success "依赖文件存在" || { error "缺少 backend/requirements.txt"; failed=1; }
-  [[ -f "$ROOT_DIR/.env" ]] && success ".env 已创建" || warn ".env 未创建，首次部署会从 .env.example 复制"
-  [[ -f "$ROOT_DIR/.env.example" ]] && success ".env.example 存在" || warn "缺少 .env.example"
+  [[ -d "$ROOT_DIR/backend/app" ]] && success "$(zh '\xe5\x90\x8e\xe7\xab\xaf\xe7\x9b\xae\xe5\xbd\x95\xe5\xad\x98\xe5\x9c\xa8')" || { error "$(zh '\xe7\xbc\xba\xe5\xb0\x91')"" backend/app"; failed=1; }
+  [[ -d "$ROOT_DIR/frontend" ]] && success "$(zh '\xe5\x89\x8d\xe7\xab\xaf\xe7\x9b\xae\xe5\xbd\x95\xe5\xad\x98\xe5\x9c\xa8')" || { error "$(zh '\xe7\xbc\xba\xe5\xb0\x91')"" frontend"; failed=1; }
+  [[ -f "$ROOT_DIR/backend/requirements.txt" ]] && success "$(zh '\xe4\xbe\x9d\xe8\xb5\x96\xe6\x96\x87\xe4\xbb\xb6\xe5\xad\x98\xe5\x9c\xa8')" || { error "$(zh '\xe7\xbc\xba\xe5\xb0\x91')"" backend/requirements.txt"; failed=1; }
+  [[ -f "$ROOT_DIR/.env" ]] && success ".env ""$(zh '\xe5\xb7\xb2\xe5\x88\x9b\xe5\xbb\xba')" || warn ".env ""$(zh '\xe6\x9c\xaa\xe5\x88\x9b\xe5\xbb\xba\xef\xbc\x8c\xe9\xa6\x96\xe6\xac\xa1\xe9\x83\xa8\xe7\xbd\xb2\xe4\xbc\x9a\xe4\xbb\x8e')"" .env.example ""$(zh '\xe5\xa4\x8d\xe5\x88\xb6')"
+  [[ -f "$ROOT_DIR/.env.example" ]] && success ".env.example ""$(zh '\xe5\xad\x98\xe5\x9c\xa8')" || warn "$(zh '\xe7\xbc\xba\xe5\xb0\x91')"" .env.example"
 
   if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-    success "Python 可用：$($PYTHON_BIN --version 2>&1)"
+    success "Python ""$(zh '\xe5\x8f\xaf\xe7\x94\xa8\xef\xbc\x9a')""$($PYTHON_BIN --version 2>&1)"
   else
-    error "找不到 Python：$PYTHON_BIN"
+    error "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x9a')""$PYTHON_BIN"
     failed=1
   fi
 
-  command -v git >/dev/null 2>&1 && success "Git 可用：$(git --version)" || warn "未安装 Git，update 会跳过 git pull"
-  command -v curl >/dev/null 2>&1 && success "curl 可用" || warn "未安装 curl，status 无法检查 API"
-  command -v systemctl >/dev/null 2>&1 && success "systemd 可用" || warn "未检测到 systemd，将使用 nohup 方式运行"
+  command -v git >/dev/null 2>&1 && success "Git ""$(zh '\xe5\x8f\xaf\xe7\x94\xa8\xef\xbc\x9a')""$(git --version)" || warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" Git""$(zh '\xef\xbc\x8c')""update ""$(zh '\xe4\xbc\x9a\xe8\xb7\xb3\xe8\xbf\x87')"" git pull"
+  command -v curl >/dev/null 2>&1 && success "curl ""$(zh '\xe5\x8f\xaf\xe7\x94\xa8')" || warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" curl""$(zh '\xef\xbc\x8c')""status ""$(zh '\xe6\x97\xa0\xe6\xb3\x95\xe6\xa3\x80\xe6\x9f\xa5')"" API"
+  command -v systemctl >/dev/null 2>&1 && success "systemd ""$(zh '\xe5\x8f\xaf\xe7\x94\xa8')" || warn "$(zh '\xe6\x9c\xaa\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0')"" systemd""$(zh '\xef\xbc\x8c\xe5\xb0\x86\xe4\xbd\xbf\xe7\x94\xa8')"" nohup ""$(zh '\xe6\x96\xb9\xe5\xbc\x8f\xe8\xbf\x90\xe8\xa1\x8c')"
 
-  section "脚本权限"
-  chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh 2>/dev/null || warn "无法修改脚本执行权限，后续会用 bash 显式执行"
+  section "$(zh '\xe8\x84\x9a\xe6\x9c\xac\xe6\x9d\x83\xe9\x99\x90')"
+  chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh 2>/dev/null || warn "$(zh '\xe6\x97\xa0\xe6\xb3\x95\xe4\xbf\xae\xe6\x94\xb9\xe8\x84\x9a\xe6\x9c\xac\xe6\x89\xa7\xe8\xa1\x8c\xe6\x9d\x83\xe9\x99\x90\xef\xbc\x8c\xe5\x90\x8e\xe7\xbb\xad\xe4\xbc\x9a\xe7\x94\xa8')"" bash ""$(zh '\xe6\x98\xbe\xe5\xbc\x8f\xe6\x89\xa7\xe8\xa1\x8c')"
   for file in "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh; do
     [[ -f "$file" ]] || continue
-    [[ -x "$file" ]] && success "${file#$ROOT_DIR/} 可执行" || warn "${file#$ROOT_DIR/} 不可执行，但可通过 bash 运行"
+    [[ -x "$file" ]] && success "${file#$ROOT_DIR/} ""$(zh '\xe5\x8f\xaf\xe6\x89\xa7\xe8\xa1\x8c')" || warn "${file#$ROOT_DIR/} ""$(zh '\xe4\xb8\x8d\xe5\x8f\xaf\xe6\x89\xa7\xe8\xa1\x8c\xef\xbc\x8c\xe4\xbd\x86\xe5\x8f\xaf\xe9\x80\x9a\xe8\xbf\x87')"" bash ""$(zh '\xe8\xbf\x90\xe8\xa1\x8c')"
   done
 
-  section "安全扫描"
+  section "$(zh '\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')"
   run_security_scan || failed=1
 
   if [[ "$failed" -eq 0 ]]; then
-    success "环境检查完成，未发现阻断项"
+    success "$(zh '\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x8c\xe6\x9c\xaa\xe5\x8f\x91\xe7\x8e\xb0\xe9\x98\xbb\xe6\x96\xad\xe9\xa1\xb9')"
   else
-    die "环境检查发现阻断项，请先处理上面的错误"
+    die "$(zh '\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5\xe5\x8f\x91\xe7\x8e\xb0\xe9\x98\xbb\xe6\x96\xad\xe9\xa1\xb9\xef\xbc\x8c\xe8\xaf\xb7\xe5\x85\x88\xe5\xa4\x84\xe7\x90\x86\xe4\xb8\x8a\xe9\x9d\xa2\xe7\x9a\x84\xe9\x94\x99\xe8\xaf\xaf')"
   fi
 }
 
 cmd_stop() {
   require_project_root
-  section "停止服务"
+  section "$(zh '\xe5\x81\x9c\xe6\xad\xa2\xe6\x9c\x8d\xe5\x8a\xa1')"
   if systemd_unit_exists; then
     if [[ "$(id -u)" -eq 0 ]]; then
       systemctl stop "$SERVICE_NAME"
     else
       sudo systemctl stop "$SERVICE_NAME"
     fi
-    success "已停止 systemd 服务：$SERVICE_NAME"
+    success "$(zh '\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2')"" systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xef\xbc\x9a')""$SERVICE_NAME"
     return
   fi
 
@@ -243,26 +253,26 @@ cmd_stop() {
     pid="$(cat "$pid_file" || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid"
-      success "已停止 ${SERVICE_NAME}，pid=$pid"
+      success "$(zh '\xe5\xb7\xb2\xe5\x81\x9c\xe6\xad\xa2')"" ${SERVICE_NAME}""$(zh '\xef\xbc\x8c')""pid=$pid"
     else
-      warn "${SERVICE_NAME} 进程未运行"
+      warn "${SERVICE_NAME} ""$(zh '\xe8\xbf\x9b\xe7\xa8\x8b\xe6\x9c\xaa\xe8\xbf\x90\xe8\xa1\x8c')"
     fi
   else
-    warn "未找到 pid 文件：$pid_file"
+    warn "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0')"" pid ""$(zh '\xe6\x96\x87\xe4\xbb\xb6\xef\xbc\x9a')""$pid_file"
   fi
 }
 
 cmd_logs() {
   require_project_root
-  section "实时日志"
+  section "$(zh '\xe5\xae\x9e\xe6\x97\xb6\xe6\x97\xa5\xe5\xbf\x97')"
   if systemd_unit_exists; then
-    info "按 Ctrl+C 退出日志"
+    info "$(zh '\xe6\x8c\x89')"" Ctrl+C ""$(zh '\xe9\x80\x80\xe5\x87\xba\xe6\x97\xa5\xe5\xbf\x97')"
     journalctl -u "$SERVICE_NAME" -f
   else
     local out_log="$ROOT_DIR/backend/data/${SERVICE_NAME}.out.log"
     local err_log="$ROOT_DIR/backend/data/${SERVICE_NAME}.err.log"
-    [[ -f "$out_log" || -f "$err_log" ]] || die "未找到日志文件，请先启动服务"
-    info "按 Ctrl+C 退出日志"
+    [[ -f "$out_log" || -f "$err_log" ]] || die "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0\xe6\x97\xa5\xe5\xbf\x97\xe6\x96\x87\xe4\xbb\xb6\xef\xbc\x8c\xe8\xaf\xb7\xe5\x85\x88\xe5\x90\xaf\xe5\x8a\xa8\xe6\x9c\x8d\xe5\x8a\xa1')"
+    info "$(zh '\xe6\x8c\x89')"" Ctrl+C ""$(zh '\xe9\x80\x80\xe5\x87\xba\xe6\x97\xa5\xe5\xbf\x97')"
     tail -f "$out_log" "$err_log"
   fi
 }
@@ -283,7 +293,7 @@ cmd_auth() {
 0) 返回主面板
 
 EOF
-    read -r -p "请选择操作：" choice
+    read -r -p "$(zh '\xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe6\x93\x8d\xe4\xbd\x9c\xef\xbc\x9a')" choice
     choice="${choice//$'\r'/}"
     case "$choice" in
       1)
@@ -310,7 +320,7 @@ EOF
         return
         ;;
       *)
-        warn "无效选择：$choice"
+        warn "$(zh '\xe6\x97\xa0\xe6\x95\x88\xe9\x80\x89\xe6\x8b\xa9\xef\xbc\x9a')""$choice"
         panel_pause
         ;;
     esac
@@ -319,7 +329,7 @@ EOF
 
 panel_pause() {
   echo
-  read -r -p "按 Enter 返回..." _
+  read -r -p "$(zh '\xe6\x8c\x89')"" Enter ""$(zh '\xe8\xbf\x94\xe5\x9b\x9e')""..." _
 }
 
 panel_run() {
@@ -332,9 +342,9 @@ panel_run() {
   local code=$?
   set -e
   if [[ "$code" -eq 0 ]]; then
-    success "$label 完成"
+    success "$label ""$(zh '\xe5\xae\x8c\xe6\x88\x90')"
   else
-    warn "$label 退出码：$code"
+    warn "$label ""$(zh '\xe9\x80\x80\xe5\x87\xba\xe7\xa0\x81\xef\xbc\x9a')""$code"
   fi
   panel_pause
 }
@@ -368,37 +378,37 @@ cmd_panel() {
 0) 退出
 
 EOF
-    read -r -p "请选择操作：" choice
+    read -r -p "$(zh '\xe8\xaf\xb7\xe9\x80\x89\xe6\x8b\xa9\xe6\x93\x8d\xe4\xbd\x9c\xef\xbc\x9a')" choice
     choice="${choice//$'\r'/}"
     case "$choice" in
-      1) panel_run "一键更新部署" bash "$SCRIPT_DIR/qt.sh" update ;;
-      2) panel_run "重启服务" bash "$SCRIPT_DIR/qt.sh" restart ;;
-      3) panel_run "停止服务" bash "$SCRIPT_DIR/qt.sh" stop ;;
-      4) panel_run "查看服务状态" bash "$SCRIPT_DIR/qt.sh" status ;;
+      1) panel_run "$(zh '\xe4\xb8\x80\xe9\x94\xae\xe6\x9b\xb4\xe6\x96\xb0\xe9\x83\xa8\xe7\xbd\xb2')" bash "$SCRIPT_DIR/qt.sh" update ;;
+      2) panel_run "$(zh '\xe9\x87\x8d\xe5\x90\xaf\xe6\x9c\x8d\xe5\x8a\xa1')" bash "$SCRIPT_DIR/qt.sh" restart ;;
+      3) panel_run "$(zh '\xe5\x81\x9c\xe6\xad\xa2\xe6\x9c\x8d\xe5\x8a\xa1')" bash "$SCRIPT_DIR/qt.sh" stop ;;
+      4) panel_run "$(zh '\xe6\x9f\xa5\xe7\x9c\x8b\xe6\x9c\x8d\xe5\x8a\xa1\xe7\x8a\xb6\xe6\x80\x81')" bash "$SCRIPT_DIR/qt.sh" status ;;
       5)
         clear || true
         bash "$SCRIPT_DIR/qt.sh" logs
         panel_pause
         ;;
-      6) panel_run "备份数据" bash "$SCRIPT_DIR/qt.sh" backup ;;
+      6) panel_run "$(zh '\xe5\xa4\x87\xe4\xbb\xbd\xe6\x95\xb0\xe6\x8d\xae')" bash "$SCRIPT_DIR/qt.sh" backup ;;
       7)
-        read -r -p "请输入备份 tar.gz 路径：" backup_file
+        read -r -p "$(zh '\xe8\xaf\xb7\xe8\xbe\x93\xe5\x85\xa5\xe5\xa4\x87\xe4\xbb\xbd')"" tar.gz ""$(zh '\xe8\xb7\xaf\xe5\xbe\x84\xef\xbc\x9a')" backup_file
         backup_file="${backup_file//$'\r'/}"
-        [[ -n "$backup_file" ]] && panel_run "恢复数据" bash "$SCRIPT_DIR/qt.sh" restore "$backup_file"
+        [[ -n "$backup_file" ]] && panel_run "$(zh '\xe6\x81\xa2\xe5\xa4\x8d\xe6\x95\xb0\xe6\x8d\xae')" bash "$SCRIPT_DIR/qt.sh" restore "$backup_file"
         ;;
       8) cmd_auth ;;
-      9) panel_run "清理样例持仓" bash "$SCRIPT_DIR/qt.sh" clear-sample ;;
-      10) panel_run "补齐缺失日K" bash "$SCRIPT_DIR/qt.sh" fill-kline ;;
-      11) panel_run "拉取龙虎榜席位" bash "$SCRIPT_DIR/qt.sh" sync-lhb ;;
-      12) panel_run "版本和模块验证" bash "$SCRIPT_DIR/qt.sh" version ;;
-      13) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
-      14) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      9) panel_run "$(zh '\xe6\xb8\x85\xe7\x90\x86\xe6\xa0\xb7\xe4\xbe\x8b\xe6\x8c\x81\xe4\xbb\x93')" bash "$SCRIPT_DIR/qt.sh" clear-sample ;;
+      10) panel_run "$(zh '\xe8\xa1\xa5\xe9\xbd\x90\xe7\xbc\xba\xe5\xa4\xb1\xe6\x97\xa5')""K" bash "$SCRIPT_DIR/qt.sh" fill-kline ;;
+      11) panel_run "$(zh '\xe6\x8b\x89\xe5\x8f\x96\xe9\xbe\x99\xe8\x99\x8e\xe6\xa6\x9c\xe5\xb8\xad\xe4\xbd\x8d')" bash "$SCRIPT_DIR/qt.sh" sync-lhb ;;
+      12) panel_run "$(zh '\xe7\x89\x88\xe6\x9c\xac\xe5\x92\x8c\xe6\xa8\xa1\xe5\x9d\x97\xe9\xaa\x8c\xe8\xaf\x81')" bash "$SCRIPT_DIR/qt.sh" version ;;
+      13) panel_run "$(zh '\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')" bash "$SCRIPT_DIR/qt.sh" scan ;;
+      14) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       0|q|Q)
-        echo "已退出运维面板"
+        echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
         ;;
       *)
-        warn "无效选择：$choice"
+        warn "$(zh '\xe6\x97\xa0\xe6\x95\x88\xe9\x80\x89\xe6\x8b\xa9\xef\xbc\x9a')""$choice"
         panel_pause
         ;;
     esac
@@ -408,25 +418,25 @@ EOF
 cmd_clear_sample_state() {
   require_project_root
   local tool="$ROOT_DIR/scripts/clear_sample_state.py"
-  [[ -f "$tool" ]] || die "找不到样例持仓清理工具：$tool"
-  section "清理样例持仓"
+  [[ -f "$tool" ]] || die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe6\xa0\xb7\xe4\xbe\x8b\xe6\x8c\x81\xe4\xbb\x93\xe6\xb8\x85\xe7\x90\x86\xe5\xb7\xa5\xe5\x85\xb7\xef\xbc\x9a')""$tool"
+  section "$(zh '\xe6\xb8\x85\xe7\x90\x86\xe6\xa0\xb7\xe4\xbe\x8b\xe6\x8c\x81\xe4\xbb\x93')"
   if [[ -x "$(venv_python)" ]]; then
     PYTHONPATH="$ROOT_DIR/backend" "$(venv_python)" "$tool"
   elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$tool"
   else
-    die "找不到 Python，无法清理样例持仓"
+    die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe6\xb8\x85\xe7\x90\x86\xe6\xa0\xb7\xe4\xbe\x8b\xe6\x8c\x81\xe4\xbb\x93')"
   fi
 }
 
 cmd_fill_kline() {
   require_project_root
-  run_python_tool "补齐缺失日K" "$ROOT_DIR/scripts/fill_kline.py" "$@"
+  run_python_tool "$(zh '\xe8\xa1\xa5\xe9\xbd\x90\xe7\xbc\xba\xe5\xa4\xb1\xe6\x97\xa5')""K" "$ROOT_DIR/scripts/fill_kline.py" "$@"
 }
 
 cmd_sync_lhb() {
   require_project_root
-  run_python_tool "拉取龙虎榜席位" "$ROOT_DIR/scripts/sync_lhb.py" "$@"
+  run_python_tool "$(zh '\xe6\x8b\x89\xe5\x8f\x96\xe9\xbe\x99\xe8\x99\x8e\xe6\xa6\x9c\xe5\xb8\xad\xe4\xbd\x8d')" "$ROOT_DIR/scripts/sync_lhb.py" "$@"
 }
 
 cmd="${1:-panel}"
@@ -435,13 +445,13 @@ case "$cmd" in
     cmd_panel
     ;;
   install|deploy|init)
-    run_script "首次部署" "$(script_path install_server.sh)"
+    run_script "$(zh '\xe9\xa6\x96\xe6\xac\xa1\xe9\x83\xa8\xe7\xbd\xb2')" "$(script_path install_server.sh)"
     ;;
   update|upgrade|up)
-    run_script "一键更新" "$(script_path update_server.sh)"
+    run_script "$(zh '\xe4\xb8\x80\xe9\x94\xae\xe6\x9b\xb4\xe6\x96\xb0')" "$(script_path update_server.sh)"
     ;;
   restart|start|reload)
-    run_script "重启服务" "$(script_path restart_server.sh)"
+    run_script "$(zh '\xe9\x87\x8d\xe5\x90\xaf\xe6\x9c\x8d\xe5\x8a\xa1')" "$(script_path restart_server.sh)"
     ;;
   stop)
     cmd_stop
@@ -456,11 +466,11 @@ case "$cmd" in
     cmd_logs
     ;;
   backup|bak)
-    run_script "备份数据" "$(script_path backup_data.sh)"
+    run_script "$(zh '\xe5\xa4\x87\xe4\xbb\xbd\xe6\x95\xb0\xe6\x8d\xae')" "$(script_path backup_data.sh)"
     ;;
   restore)
-    [[ $# -ge 2 ]] || die "restore 需要传入备份 tar.gz 文件路径"
-    run_script "恢复数据" "$(script_path restore_data.sh)" "$2"
+    [[ $# -ge 2 ]] || die "restore ""$(zh '\xe9\x9c\x80\xe8\xa6\x81\xe4\xbc\xa0\xe5\x85\xa5\xe5\xa4\x87\xe4\xbb\xbd')"" tar.gz ""$(zh '\xe6\x96\x87\xe4\xbb\xb6\xe8\xb7\xaf\xe5\xbe\x84')"
+    run_script "$(zh '\xe6\x81\xa2\xe5\xa4\x8d\xe6\x95\xb0\xe6\x8d\xae')" "$(script_path restore_data.sh)" "$2"
     ;;
   auth|user|users|password|passwd)
     cmd_auth
@@ -475,7 +485,7 @@ case "$cmd" in
     cmd_sync_lhb "${@:2}"
     ;;
   scan|security)
-    section "GitHub 上传前安全扫描"
+    section "GitHub ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe5\x89\x8d\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')"
     run_security_scan
     ;;
   doctor|check)
@@ -485,7 +495,7 @@ case "$cmd" in
     usage
     ;;
   *)
-    error "未知命令：$cmd"
+    error "$(zh '\xe6\x9c\xaa\xe7\x9f\xa5\xe5\x91\xbd\xe4\xbb\xa4\xef\xbc\x9a')""$cmd"
     usage >&2
     exit 2
     ;;

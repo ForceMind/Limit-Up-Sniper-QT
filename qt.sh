@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${QT_LOCALE_REEXEC:-0}" != "1" && "${LC_ALL:-}" != "C" ]]; then
+  export QT_LOCALE_REEXEC=1
+  export LC_ALL=C
+  export LANG=C
+  export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
+  exec bash "$0" "$@"
+fi
+export LC_ALL=C
+export LANG=C
+export PYTHONIOENCODING="${PYTHONIOENCODING:-UTF-8}"
+
+zh() {
+  printf '%b' "$1"
+}
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_CMD="$ROOT_DIR/scripts/qt.sh"
@@ -39,7 +53,7 @@ EOF
 }
 
 if [[ ! -f "$PROJECT_CMD" ]]; then
-  echo "错误：找不到命令实现文件：$PROJECT_CMD" >&2
+  echo "$(zh '\xe9\x94\x99\xe8\xaf\xaf\xef\xbc\x9a\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0\xe5\x91\xbd\xe4\xbb\xa4\xe5\xae\x9e\xe7\x8e\xb0\xe6\x96\x87\xe4\xbb\xb6\xef\xbc\x9a')""$PROJECT_CMD" >&2
   exit 1
 fi
 
