@@ -26,49 +26,15 @@ fi
 
 mkdir -p "$ROOT_DIR/backend/data" "$BACKUP_ROOT"
 
-if command -v systemctl >/dev/null 2>&1; then
-  SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-  TMP_SERVICE="$(mktemp)"
-  cat > "$TMP_SERVICE" <<EOF
-[Unit]
-Description=QT Quant Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${ROOT_DIR}
-EnvironmentFile=-${ROOT_DIR}/.env
-ExecStart=/usr/bin/env bash ${ROOT_DIR}/scripts/run_quant_server.sh
-Restart=always
-RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=30
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+if refresh_systemd_service; then
   if [[ "$(id -u)" -eq 0 ]]; then
-    cp "$TMP_SERVICE" "$SERVICE_FILE"
-    systemctl daemon-reload
-    systemctl enable --now "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME"
     systemctl status "$SERVICE_NAME" --no-pager -l || true
-    echo "systemd 服务已安装：$SERVICE_FILE"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo cp "$TMP_SERVICE" "$SERVICE_FILE"
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now "$SERVICE_NAME"
-    sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
-    echo "systemd 服务已安装：$SERVICE_FILE"
   else
-    echo "检测到 systemd，但当前没有 sudo/root 权限；服务模板保留在：$TMP_SERVICE"
-    echo "请手动安装到：$SERVICE_FILE"
-    TMP_SERVICE=""
+    sudo systemctl restart "$SERVICE_NAME"
+    sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
   fi
-  if [[ -n "${TMP_SERVICE:-}" ]]; then
-    rm -f "$TMP_SERVICE"
-  fi
+  verify_running_backend
 fi
 
 chmod +x "$ROOT_DIR/qt.sh" "$ROOT_DIR/scripts/"*.sh || true

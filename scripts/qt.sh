@@ -138,6 +138,7 @@ cmd_status() {
     systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1 \
       && success "systemd 服务运行中" \
       || warn "systemd 服务未运行"
+    systemctl show "$SERVICE_NAME" -p MainPID -p ExecStart -p WorkingDirectory --no-pager || true
     systemctl status "$SERVICE_NAME" --no-pager -l || true
   else
     warn "未检测到 systemd 服务，检查 nohup 进程"
@@ -149,6 +150,7 @@ cmd_status() {
     if curl -fsS --max-time 5 "$(api_url)"; then
       echo
       success "API 可访问：$(api_url)"
+      check_backend_feature_routes || true
     else
       echo
       warn "API 暂不可访问：$(api_url)"

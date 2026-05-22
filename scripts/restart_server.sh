@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/common.sh"
 require_project_root
 ensure_data_dir
 
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
+if refresh_systemd_service; then
   if [[ "$(id -u)" -eq 0 ]]; then
     systemctl restart "$SERVICE_NAME"
     systemctl status "$SERVICE_NAME" --no-pager -l || true
@@ -16,6 +16,7 @@ if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q "
     sudo systemctl restart "$SERVICE_NAME"
     sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
   fi
+  verify_running_backend
   exit 0
 fi
 
@@ -40,3 +41,4 @@ cd "$ROOT_DIR/backend"
 nohup "$(venv_python)" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOG_FILE" 2> "$ERR_FILE" &
 echo $! > "$PID_FILE"
 echo "已启动 ${SERVICE_NAME}，pid=$(cat "$PID_FILE")，访问地址：http://127.0.0.1:${PORT}"
+verify_running_backend
