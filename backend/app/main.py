@@ -466,6 +466,46 @@ def status():
     }
 
 
+def _light_status_payload(as_of: Optional[str] = None, jobs_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
+    try:
+        latest_news_time = news_fetcher.latest_history_time()
+    except Exception:
+        latest_news_time = ""
+    data_date = str(as_of or "").strip() or (latest_news_time[:10] if latest_news_time else "")
+    jobs = jobs_payload if isinstance(jobs_payload, dict) else {}
+    return {
+        "status": "ok",
+        "system": "quant",
+        "app": "涨停狙击手",
+        "version": APP_VERSION,
+        "backend_version": APP_VERSION,
+        "frontend_version": APP_VERSION,
+        "data_dir": str(DATA_DIR),
+        "current_date": now_cn.strftime("%Y-%m-%d"),
+        "current_time": now_cn.isoformat(timespec="seconds"),
+        "latest_event_date": data_date,
+        "latest_news_time": latest_news_time,
+        "data_date": data_date,
+        "ai_model": DEFAULT_AI_MODEL,
+        "jobs": jobs,
+    }
+
+
+def _safe_news_feed(**kwargs: Any) -> Dict[str, Any]:
+    try:
+        return quant_engine.news_feed(**kwargs)
+    except Exception as exc:
+        job_manager._append_log("error", f"新闻快照读取失败：{exc}", job="frontend_snapshot", stage="news")
+        return {
+            "status": "error",
+            "items": [],
+            "events": [],
+            "count": 0,
+            "error": "news feed unavailable",
+        }
+
+
 def _market_sentiment(news_payload: Dict[str, Any]) -> Dict[str, Any]:
     events = news_payload.get("events") if isinstance(news_payload.get("events"), list) else []
     scores = [float(item.get("sentiment") or 0) for item in events if isinstance(item, dict)]
@@ -691,13 +731,15 @@ def _model_backtest_payload(
 def frontend_public_snapshot(
     as_of: Optional[str] = Query(default=None),
     mobile: bool = Query(default=False),
+    light: bool = Query(default=True),
 ):
-    news_limit = 30 if mobile else 80
-    news_payload = quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    news_limit = 12 if mobile or light else 80
+    jobs_payload = job_manager.status()
+    news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     return {
         "status": "ok",
-        "status_payload": status(),
-        "jobs": {"scheduler": job_manager.status().get("scheduler", {})},
+        "status_payload": _light_status_payload(as_of=as_of, jobs_payload={"scheduler": jobs_payload.get("scheduler", {})}),
+        "jobs": {"scheduler": jobs_payload.get("scheduler", {})},
         "news": news_payload,
         "market_sentiment": _market_sentiment(news_payload),
     }
@@ -708,33 +750,99 @@ def frontend_snapshot(
     request: Request,
     as_of: Optional[str] = Query(default=None),
     mobile: bool = Query(default=False),
+    light: bool = Query(default=True),
 ):
-    news_limit = 30 if mobile else 80
+    news_limit = 12 if mobile or light else 80
     top_n = 12 if mobile else 30
-    news_payload = quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    jobs_payload = job_manager.status()
+    news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     context = _frontend_profile_context(request)
-    with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        trading_account = quant_engine.trading_account(as_of=as_of, limit=500)
-        recommendations = quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n)
-        daily_plan = quant_engine.daily_plan(as_of=as_of, limit_days=120)
-    return {
+    trading_account: Dict[str, Any] = {}
+    recommendations: Dict[str, Any] = {}
+    daily_plan: Dict[str, Any] = {}
+    if not light:
+        with quant_engine.temporary_strategy_params(context["strategy_params"]):
+            trading_account = quant_engine.trading_account(as_of=as_of, limit=500)
+            recommendations = quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n)
+            daily_plan = quant_engine.daily_plan(as_of=as_of, limit_days=120)
+        trading_account = _frontend_trading_account(trading_account, context)
+    payload = {
         "status": "ok",
-        "status_payload": status(),
-        "jobs": job_manager.status(),
+        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=jobs_payload),
+        "jobs": jobs_payload,
         "logs": job_manager.logs(limit=12),
         "frontend_profile": context["profile"],
         "followed_model": context["followed_model"],
-        "trading_account": _frontend_trading_account(trading_account, context),
         "news": news_payload,
-        "recommendations": recommendations,
-        "daily_plan": daily_plan,
         "strategy_models": context["models_payload"],
         "market_sentiment": _market_sentiment(news_payload),
     }
+    if trading_account:
+        payload["trading_account"] = trading_account
+    if recommendations:
+        payload["recommendations"] = recommendations
+    if daily_plan:
+        payload["daily_plan"] = daily_plan
+    return payload
+
+
+@app.get("/api/front/trading_account")
+def frontend_trading_account(
+    request: Request,
+    as_of: Optional[str] = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    context = _frontend_profile_context(request)
+    with quant_engine.temporary_strategy_params(context["strategy_params"]):
+        account = quant_engine.trading_account(as_of=as_of, limit=limit)
+    return _frontend_trading_account(account, context)
+
+
+@app.get("/api/front/recommendations")
+def frontend_recommendations(
+    request: Request,
+    as_of: Optional[str] = Query(default=None),
+    lookback_days: int = Query(default=2, ge=1, le=20),
+    top_n: int = Query(default=30, ge=1, le=100),
+):
+    context = _frontend_profile_context(request)
+    with quant_engine.temporary_strategy_params(context["strategy_params"]):
+        return quant_engine.recommendations(as_of=as_of, lookback_days=lookback_days, top_n=top_n)
+
+
+@app.get("/api/front/daily_plan")
+def frontend_daily_plan(
+    request: Request,
+    as_of: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    limit_days: int = Query(default=120, ge=1, le=500),
+):
+    context = _frontend_profile_context(request)
+    with quant_engine.temporary_strategy_params(context["strategy_params"]):
+        return quant_engine.daily_plan(as_of=as_of, start_date=start_date, limit_days=limit_days)
 
 
 @app.get("/api/admin/snapshot")
-def admin_snapshot(as_of: Optional[str] = Query(default=None)):
+def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Query(default=True)):
+    if light:
+        jobs_payload = job_manager.status()
+        dashboard = {
+            "status": "ok",
+            "as_of": as_of,
+            "strategy_params": quant_engine.strategy_params(),
+            "timeline": {},
+        }
+        return {
+            "status": "ok",
+            "status_payload": _light_status_payload(as_of=as_of, jobs_payload=jobs_payload),
+            "jobs": jobs_payload,
+            "biying": biying_minute_sync.status(),
+            "lhb": lhb_status(),
+            "notification_status": trade_notifier.status(),
+            "evolution_status": strategy_evolution.status(),
+            "strategy_models": strategy_evolution.models(),
+            "dashboard": dashboard,
+        }
     return {
         "status": "ok",
         "status_payload": status(),
@@ -772,8 +880,8 @@ async def admin_live(websocket: WebSocket):
     biying_fp = ""
     try:
         while True:
-            status_payload = status()
             jobs_payload = job_manager.status()
+            status_payload = _light_status_payload(jobs_payload=jobs_payload)
             biying_payload = biying_minute_sync.status()
             logs_payload = job_manager.logs(limit=120)
             logs_delta = []

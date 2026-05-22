@@ -1309,34 +1309,53 @@
         if (this.clockTimer) window.clearInterval(this.clockTimer);
       },
       methods: {
+        fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+          const controller = new AbortController();
+          const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+          return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timer));
+        },
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
           const res = await fetch(url, { ...options, headers });
           if (!res.ok) {
+            const text = await res.text();
             if (res.status === 401 || res.status === 403) {
               this.auth.token = '';
               localStorage.removeItem('qt_front_token');
             }
-            throw new Error(await res.text());
+            let message = text || `HTTP ${res.status}`;
+            if (res.status === 524) {
+              message = 'Cloudflare 等待源站超时：服务器可能正在执行耗时任务。页面会先展示轻量数据，请稍后重试当前模块。';
+            } else if (res.status === 504) {
+              message = 'Nginx 等待后端超时：服务器可能正在执行耗时任务。请稍后重试。';
+            } else if (res.status === 413) {
+              message = '请求数据过大：请到后台使用分批上传或调整 Nginx 上传限制。';
+            }
+            const error = new Error(message);
+            error.status = res.status;
+            error.body = text;
+            throw error;
           }
           return await res.json();
         },
         async initAuth() {
           try {
-            const res = await fetch('/api/auth/status');
+            const res = await this.fetchWithTimeout('/api/auth/status', { cache: 'no-store' }, 8000);
+            if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
             const status = await res.json();
             this.auth.setupRequired = Boolean(status.setup_required);
-            await this.loadAll();
           } catch (err) {
             this.auth.error = String(err.message || err);
             this.auth.token = '';
             localStorage.removeItem('qt_front_token');
-            await this.loadAll();
           } finally {
             if (!this.auth.token && !this.isPublicView(this.mobileView)) this.mobileView = 'overview';
             this.authReady = true;
           }
+          this.loadAll().catch((err) => {
+            this.auth.error = String(err.message || err);
+          });
         },
         openAuth(mode = 'login') {
           this.auth.mode = mode;
@@ -1438,6 +1457,7 @@
           this.loading = true;
           try {
             const q = new URLSearchParams({ mobile: String(window.innerWidth <= 767) });
+            q.set('light', 'true');
             if (this.asOf) q.set('as_of', this.asOf);
             let snapshotPath = '/api/front/public_snapshot';
             if (this.isLoggedIn) snapshotPath = '/api/front/snapshot';
@@ -1445,29 +1465,39 @@
             this.status = snapshot.status_payload || {};
             this.jobStatus = snapshot.jobs || {};
             this.jobLogs = snapshot.logs || {};
-            this.accountView = snapshot.trading_account || {};
-            this.newsFeed = snapshot.news || {};
-            this.recommendations = snapshot.recommendations || {};
-            this.strategyModels = snapshot.strategy_models || {};
+            if (snapshot.trading_account) this.accountView = snapshot.trading_account;
+            if (snapshot.news) this.newsFeed = snapshot.news;
+            if (snapshot.recommendations) this.recommendations = snapshot.recommendations;
+            if (snapshot.strategy_models) this.strategyModels = snapshot.strategy_models;
             this.userProfile = { ...this.userProfile, ...(snapshot.frontend_profile || {}) };
             this.profileForm = { ...this.profileForm, ...this.userProfile };
             this.followedModel = snapshot.followed_model || {};
             this.marketSentiment = snapshot.market_sentiment || {};
-            this.plan = snapshot.daily_plan || {};
+            if (snapshot.daily_plan) this.plan = snapshot.daily_plan;
             if (!this.asOf) this.asOf = this.accountView.as_of || this.plan.as_of || this.asOf;
+            this.loadVisibleDetails();
           } finally {
             this.loading = false;
           }
         },
+        loadVisibleDetails() {
+          if (!this.isLoggedIn) return;
+          const mobile = window.innerWidth <= 767;
+          window.setTimeout(() => {
+            if (!this.isLoggedIn) return;
+            if (!mobile || ['overview', 'positions', 'deals'].includes(this.mobileView)) this.loadMarketData(true);
+            if (!mobile || ['overview', 'buy'].includes(this.mobileView)) {
+              this.loadRecommendations(true);
+              this.loadPlan(true);
+            }
+          }, 0);
+        },
         async loadMarketData(quiet = false) {
           try {
-            if (this.isLoggedIn) {
-              await this.loadAll();
-              return;
-            }
+            if (!this.isLoggedIn) return;
             const date = this.asOf || '';
             const accountQuery = date ? `?as_of=${date}&limit=500` : '?limit=500';
-            const account = await this.api(`/api/quant/trading_account${accountQuery}`);
+            const account = await this.api(`/api/front/trading_account${accountQuery}`);
             this.accountView = account;
             if (!this.asOf && account.as_of) this.asOf = account.as_of;
           } catch (err) {
@@ -1486,13 +1516,10 @@
         },
         async loadPlan(quiet = false) {
           try {
-            if (this.isLoggedIn) {
-              await this.loadAll();
-              return;
-            }
+            if (!this.isLoggedIn) return;
             const date = this.asOf || '';
             const planQuery = date ? `?as_of=${date}&limit_days=120` : '?limit_days=120';
-            const plan = await this.api(`/api/quant/daily_plan${planQuery}`);
+            const plan = await this.api(`/api/front/daily_plan${planQuery}`);
             this.plan = plan;
             if (!this.asOf && plan.as_of) this.asOf = plan.as_of;
           } catch (err) {
@@ -1501,13 +1528,10 @@
         },
         async loadRecommendations(quiet = false) {
           try {
-            if (this.isLoggedIn) {
-              await this.loadAll();
-              return;
-            }
+            if (!this.isLoggedIn) return;
             const q = new URLSearchParams({ lookback_days: '2', top_n: window.innerWidth <= 767 ? '12' : '30' });
             if (this.asOf) q.set('as_of', this.asOf);
-            this.recommendations = await this.api(`/api/quant/recommendations?${q.toString()}`);
+            this.recommendations = await this.api(`/api/front/recommendations?${q.toString()}`);
           } catch (err) {
             if (!quiet) throw err;
           }
@@ -1536,6 +1560,7 @@
           if (view === 'strategy' && !this.strategyModels.items) this.loadAll();
           if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'news' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
+          if (['positions', 'deals'].includes(view) && this.auth.token && !this.accountView.account) this.loadMarketData(true);
           if (view === 'deals') this.activeTab = 'deals';
         },
         isPublicView(view) {

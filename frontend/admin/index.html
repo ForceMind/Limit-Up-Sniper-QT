@@ -1427,6 +1427,11 @@
         window.removeEventListener('resize', this.resizeChart);
       },
       methods: {
+        fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+          const controller = new AbortController();
+          const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+          return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timer));
+        },
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
@@ -1439,7 +1444,9 @@
               this.stopTimers();
             }
             let message = text || `HTTP ${res.status}`;
-            if (res.status === 504) {
+            if (res.status === 524) {
+              message = 'Cloudflare 等待源站超时：服务器首屏接口或后台任务执行太久。系统已改为轻量首屏，当前模块请稍后重试。';
+            } else if (res.status === 504) {
               message = 'Nginx 等待后端超时：任务可能执行太久或后端正忙。请稍后刷新，必要时在服务器执行 qt nginx-upload 并查看服务日志。';
             } else if (res.status === 413) {
               message = '请求被 Nginx 拒绝：数据太大。请在服务器执行 qt nginx-upload 后重试。';
@@ -1452,18 +1459,24 @@
           return await res.json();
         },
         async initAuth() {
+          let shouldLoadAdmin = false;
           try {
-            const res = await fetch('/api/auth/status');
+            const res = await this.fetchWithTimeout('/api/auth/status', { cache: 'no-store' }, 8000);
+            if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
             const status = await res.json();
             this.auth.setupRequired = Boolean(status.setup_required);
-            if (!this.auth.token) return;
-            await this.afterAuthReady();
+            shouldLoadAdmin = Boolean(this.auth.token);
           } catch (err) {
             this.auth.error = String(err.message || err);
             this.auth.token = '';
             localStorage.removeItem('qt_admin_token');
           } finally {
             this.authReady = true;
+          }
+          if (shouldLoadAdmin) {
+            this.afterAuthReady().catch((err) => {
+              this.clientError = String(err.message || err);
+            });
           }
         },
         async afterAuthReady() {
@@ -1627,7 +1640,7 @@
           if (!quiet) this.loading = true;
           this.clientError = '';
           try {
-            await this.loadAdminSnapshot(quiet);
+            await this.loadAdminSnapshot(quiet, true);
             return;
           } catch (err) {
             this.clientError = String(err.message || err);
@@ -1662,8 +1675,9 @@
           if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
           if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
         },
-        async loadAdminSnapshot(quiet = true) {
+        async loadAdminSnapshot(quiet = true, light = true) {
           const q = new URLSearchParams();
+          q.set('light', String(Boolean(light)));
           if (this.asOf) q.set('as_of', this.asOf);
           const snapshot = await this.api(`/api/admin/snapshot?${q.toString()}`);
           this.applyAdminSnapshot(snapshot);
@@ -1676,7 +1690,7 @@
         },
         async loadDetailData(quiet = true) {
           try {
-            await this.loadAdminSnapshot(quiet);
+            await this.loadAdminSnapshot(quiet, true);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
           }
