@@ -9,7 +9,8 @@
 - `backend/data/news_history.json`：历史新闻。
 - `backend/data/news_analysis_records.json`：历史AI分析记录。
 - `backend/data/biying_stock_list.json`：股票代码和名称映射。
-- `backend/data/kline_day_cache/*.json`：每只股票的日K数据。
+- `backend/data/quant_data.sqlite3` 的 `market_daily_bars`：每只股票的日 K 主数据。
+- `backend/data/kline_day_cache/*.json`：旧日 K JSON 缓存，只作为兼容读取和迁移来源。
 
 当前没有实时下单，也没有真实账户接口。
 

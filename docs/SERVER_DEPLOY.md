@@ -14,7 +14,7 @@
 
 ```text
 backend/app              后端 API 与量化引擎
-backend/data             历史新闻、AI分析记录、K线缓存、运行状态
+backend/data             SQLite 主库、历史新闻、AI分析记录、K线兼容缓存、运行状态
 frontend                 前台交易终端
 frontend/admin           后台管理
 qt.sh                    根目录统一命令入口
@@ -185,16 +185,18 @@ sudo systemctl reload nginx
 ```nginx
 client_max_body_size 1024m;
 proxy_request_buffering off;
+proxy_send_timeout 1800;
+proxy_read_timeout 1800;
 ```
 
-如果上传时报 `413 Request Entity Too Large`，说明当前服务器实际生效的 Nginx 配置仍然太小。执行：
+如果上传时报 `413 Request Entity Too Large`，说明当前服务器实际生效的 Nginx 上传大小太小；如果报 `504 Gateway Time-out`，说明 Nginx 等后端响应超时。两种情况都执行：
 
 ```bash
 qt nginx-upload
-sudo nginx -T | grep -n "client_max_body_size"
+sudo nginx -T | grep -nE "client_max_body_size|proxy_read_timeout|proxy_send_timeout"
 ```
 
-`qt install` 和 `qt update` 也会自动尝试把指向本服务端口的 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE`，默认 `1024m`。
+`qt install` 和 `qt update` 也会自动尝试把指向本服务端口的 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE` 和 `QT_NGINX_PROXY_TIMEOUT`，默认 `1024m` 和 `1800` 秒。
 
 正式域名和 TLS 证书按服务器实际情况调整。
 
@@ -231,7 +233,7 @@ python scripts/check_data_coverage.py /path/to/other/backend/data
 python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db backend/data/quant_data.sqlite3
 ```
 
-`backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。
+`backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。日 K 的长期主存储是 SQLite 的 `market_daily_bars` 表，旧的 `kline_day_cache/*.json` 只作为兼容缓存和迁移来源。
 
 迁移服务器时优先使用后台页面，不要通过 GitHub 上传真实数据：
 
@@ -281,7 +283,7 @@ curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/a
 
 - 新闻抓取：24 小时运行，默认每 1 小时抓取一次财联社电报并合并到 `news_history.json`
 - AI 分析：默认每 1 小时增量调用 DeepSeek，将新闻结构化为事件、行业、个股、利好利空和影响强度
-- 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；周末和非开盘时间不触发行情同步
+- 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；日 K 补齐使用必盈历史行情并写入 SQLite；周末和非开盘时间不触发盘中行情同步
 - 模拟交易：按当前模型触发买入/卖出，触发后可通过 SMTP 发送邮件
 - 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘一次
 - 遗传进化：多组参数并行回放，按收益、回撤、胜率选择最优参数，后台可手动应用

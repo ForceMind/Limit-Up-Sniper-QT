@@ -571,6 +571,10 @@ class QuantEngine:
                 }
             )
 
+        payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
+        rows = payload if isinstance(payload, list) else []
+        for row in rows:
+            add_row(row)
         for row in self._sqlite_rows(
             """
             SELECT date, open, close, high, low, volume, amount
@@ -580,11 +584,6 @@ class QuantEngine:
             """,
             (code,),
         ):
-            add_row(row)
-
-        payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
-        rows = payload if isinstance(payload, list) else []
-        for row in rows:
             add_row(row)
         by_date = {row["date"]: row for row in clean_rows}
         merged_rows = [by_date[key] for key in sorted(by_date.keys())]
@@ -4070,6 +4069,11 @@ class QuantEngine:
         portfolio = self.paper_portfolio(as_of=as_of)
         events = self.events()
         state = self._load_state()
+        kline_codes = {path.stem for path in KLINE_DAY_DIR.glob("*.json")} if KLINE_DAY_DIR.exists() else set()
+        for row in self._sqlite_rows("SELECT DISTINCT code FROM market_daily_bars WHERE code IS NOT NULL AND code != ''"):
+            clean_code = digits6(row.get("code"))
+            if clean_code:
+                kline_codes.add(clean_code)
         return {
             "status": "ok",
             "version": "quant-refactor-0.1",
@@ -4079,7 +4083,7 @@ class QuantEngine:
                 "ai_record_count": len(self.load_analysis_records()),
                 "event_count": len(events),
                 "stock_count": len(self.universe.code_to_name),
-                "kline_stock_count": len(list(KLINE_DAY_DIR.glob("*.json"))) if KLINE_DAY_DIR.exists() else 0,
+                "kline_stock_count": len(kline_codes),
                 "lhb_record_count": len(self.load_lhb_records(limit=200000)),
             },
             "recommendations": recs,

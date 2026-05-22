@@ -296,6 +296,8 @@ docs/
 - 接口读取优先 SQLite，缺失时 fallback 到 JSON。
 - 稳定后再停止散落 JSON 写入。
 
+当前进度：日 K 同步已经直接写入 SQLite `market_daily_bars`，读取时 SQLite 优先、JSON 只补缺口；默认已经停止继续写 `kline_day_cache/*.json`，仅保留 `QT_WRITE_KLINE_JSON_CACHE=true` 作为旧脚本兼容开关。
+
 ## 7. 测试计划
 
 单元测试：

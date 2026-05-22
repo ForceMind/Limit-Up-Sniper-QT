@@ -29,7 +29,7 @@
 ## 技术栈
 
 - 后端：Python、FastAPI、Uvicorn
-- 数据：本地 JSON/CSV 文件，保存在 `backend/data`
+- 数据：SQLite 为主存储，JSON/CSV 作为配置、样例和旧数据兼容缓存，保存在 `backend/data`
 - AI：DeepSeek API
 - 行情：必盈数据接口
 - 前端：静态 HTML/CSS/JavaScript，由 FastAPI 直接托管
@@ -106,6 +106,7 @@ cp .env.example .env
 - `NEWS_FETCH_INTERVAL_SECONDS`、`AI_ANALYSIS_INTERVAL_SECONDS`、`MARKET_SYNC_INTERVAL_SECONDS`：自动任务间隔
 - `STRATEGY_REPLAY_ENABLED`、`STRATEGY_REPLAY_START_DATE`、`STRATEGY_REPLAY_INTERVAL_SECONDS`、`STRATEGY_REPLAY_MODE`：策略复盘调度，默认从 `2026-03-01` 开始，每小时跑一次分时复盘
 - `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
+- `QT_WRITE_KLINE_JSON_CACHE`：默认 `false`。日 K 新数据直接写入 SQLite；只有需要兼容旧脚本时才额外写回 `kline_day_cache/*.json`
 
 首次部署时会自动生成随机后台入口路径，不再公开固定 `/admin`。先在服务器执行 `qt admin-path` 或 `bash qt.sh admin-path` 查看入口，再访问该入口初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
@@ -127,6 +128,7 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 ```
 
 该数据库属于本地运行数据，不提交 Git。当前迁移范围包括新闻、AI 分析、AI 缓存、结构化事件、日线、分时、龙虎榜、市场快照、模拟账户、策略进化、访问日志和任务日志。
+日 K 的长期主存储是 `backend/data/quant_data.sqlite3` 里的 `market_daily_bars` 表。`backend/data/kline_day_cache/*.json` 只作为历史兼容和迁移来源；新的日 K 同步默认不会继续写散落 JSON 文件。
 
 上传到服务器时不要走 GitHub。后台管理页已经提供迁移入口：
 
@@ -137,7 +139,7 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、龙虎榜、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
 
-如果上传时报 `413 Request Entity Too Large`，是 Nginx 限制太小。服务器执行 `qt nginx-upload` 会把指向本服务端口的 Nginx 配置调到默认 `1024m` 并重载。
+如果上传时报 `413 Request Entity Too Large`，是 Nginx 上传大小限制太小；如果报 `504 Gateway Time-out`，是 Nginx 等后端响应超时。服务器执行 `qt nginx-upload` 会把指向本服务端口的 Nginx 配置调到默认 `1024m` 上传限制和 `1800` 秒等待超时并重载。
 
 如果服务器以前跑过样例数据，上传后持仓仍显示“样例算力”，到后台 `运维` 点击 `清理样例持仓`。候选、计划和账户接口也会过滤样例代码，防止样例重新出现在今日买入候选里。
 

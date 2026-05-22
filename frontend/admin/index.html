@@ -1438,7 +1438,13 @@
               localStorage.removeItem('qt_admin_token');
               this.stopTimers();
             }
-            const error = new Error(text || `HTTP ${res.status}`);
+            let message = text || `HTTP ${res.status}`;
+            if (res.status === 504) {
+              message = 'Nginx 等待后端超时：任务可能执行太久或后端正忙。请稍后刷新，必要时在服务器执行 qt nginx-upload 并查看服务日志。';
+            } else if (res.status === 413) {
+              message = '请求被 Nginx 拒绝：数据太大。请在服务器执行 qt nginx-upload 后重试。';
+            }
+            const error = new Error(message);
             error.status = res.status;
             error.body = text;
             throw error;
@@ -1958,6 +1964,8 @@
               } else {
                 if (xhr.status === 413) {
                   reject(new Error('上传被 Nginx 拒绝：请求体超过限制。请在服务器执行 qt nginx-upload 后重试。'));
+                } else if (xhr.status === 504) {
+                  reject(new Error('Nginx 等待后端超时：数据包可能太大或服务器正在合并数据。请在服务器执行 qt nginx-upload 修复等待超时，然后查看后台日志确认任务是否仍在运行。'));
                 } else {
                   reject(new Error(xhr.responseText || `上传失败：HTTP ${xhr.status}`));
                 }

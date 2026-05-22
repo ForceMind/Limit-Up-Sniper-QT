@@ -4,6 +4,8 @@
 
 真实运行数据可以通过 `QUANT_DATA_DIR` 指向服务器本地或独立磁盘的数据目录，避免覆盖仓库里的样例数据。
 
+当前实现里，日线行情同步已经直接写入 `quant_data.sqlite3` 的 `market_daily_bars` 表。读取 K 线时优先使用 SQLite，同一天同时存在 SQLite 和 JSON 时以 SQLite 为准；`kline_day_cache/*.json` 只作为旧数据迁移来源和兼容 fallback。除非显式设置 `QT_WRITE_KLINE_JSON_CACHE=true`，新的日 K 同步不会再写散落 JSON 文件。
+
 ## 必须进数据库
 
 | 数据 | 当前文件 | 数据库表建议 | 原因 |
@@ -44,7 +46,7 @@
 python scripts/check_data_coverage.py
 ```
 
-如果 `news_history.json` 的最早日期晚于 `2026-03-01`，说明服务器没有完整保留从 3 月开始的新闻，需要重新补拉或导入历史新闻。
+检查脚本会同时显示 JSON 文件和 `quant_data.sqlite3` 里 `news_raw`、`news_events`、`market_daily_bars`、`market_minute_bars`、`lhb_records` 的数量、日期范围和股票数。如果 SQLite 里的新闻最早日期仍晚于 `2026-03-01`，说明服务器没有完整保留从 3 月开始的新闻，需要重新补拉或导入历史新闻。
 
 ## JSON/CSV 入库
 

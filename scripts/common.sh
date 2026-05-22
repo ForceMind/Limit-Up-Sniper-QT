@@ -39,6 +39,7 @@ BACKUP_ROOT="${BACKUP_ROOT:-$ROOT_DIR/backups}"
 HOST="${QUANT_HOST:-0.0.0.0}"
 PORT="${QUANT_PORT:-8000}"
 NGINX_UPLOAD_MAX_SIZE="${QT_NGINX_UPLOAD_MAX_SIZE:-1024m}"
+NGINX_PROXY_TIMEOUT="${QT_NGINX_PROXY_TIMEOUT:-1800}"
 
 if [[ -t 1 ]]; then
   COLOR_BLUE=$'\033[1;34m'
@@ -172,34 +173,69 @@ find_nginx_qt_configs() {
 patch_nginx_upload_config() {
   local file="$1"
   local limit="${2:-$NGINX_UPLOAD_MAX_SIZE}"
+  local timeout="${3:-$NGINX_PROXY_TIMEOUT}"
   [[ -f "$file" ]] || return 1
-  local has_proxy=0 needs_buffering=0
-  grep -qE "proxy_pass[[:space:]]+http://127[.]0[.]0[.]1" "$file" && has_proxy=1
+  local has_proxy=0 needs_buffering=0 needs_timeout=0 needs_body=0
+  grep -qE "proxy_pass[[:space:]]+http://(127[.]0[.]0[.]1|localhost)" "$file" && has_proxy=1
   if [[ "$has_proxy" -eq 1 ]] && ! grep -qE "proxy_request_buffering[[:space:]]+off;" "$file"; then
     needs_buffering=1
   fi
-  if grep -qE "client_max_body_size[[:space:]]+${limit};" "$file" && [[ "$needs_buffering" -eq 0 ]]; then
-    success "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe5\xb7\xb2\xe6\x98\xaf')"" ${limit}: $file"
+  if ! grep -qE "client_max_body_size[[:space:]]+${limit};" "$file"; then
+    needs_body=1
+  fi
+  if [[ "$has_proxy" -eq 1 ]]; then
+    grep -qE "proxy_read_timeout[[:space:]]+${timeout};" "$file" || needs_timeout=1
+    grep -qE "proxy_send_timeout[[:space:]]+${timeout};" "$file" || needs_timeout=1
+    grep -qE "proxy_connect_timeout[[:space:]]+60;" "$file" || needs_timeout=1
+  fi
+  if [[ "$needs_body" -eq 0 && "$needs_buffering" -eq 0 && "$needs_timeout" -eq 0 ]]; then
+    success "Nginx 上传限制和等待超时已是 ${limit}/${timeout}s: $file"
     return 0
   fi
   local backup="${file}.qt_upload_backup_$(date +%Y%m%d_%H%M%S)"
   run_as_root cp "$file" "$backup" || return 1
-  if grep -qE "client_max_body_size[[:space:]]+" "$file"; then
-    run_as_root sed -i -E "s/client_max_body_size[[:space:]]+[^;]+;/client_max_body_size ${limit};/g" "$file"
-  elif grep -qE "server[[:space:]]*\\{" "$file"; then
-    run_as_root sed -i -E "/server[[:space:]]*\\{/a\\    client_max_body_size ${limit};" "$file"
-  else
-    warn "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0')"" server { ""$(zh '\xe6\xae\xb5\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" $file"
-    return 1
+
+  if [[ "$needs_body" -eq 1 ]]; then
+    if grep -qE "client_max_body_size[[:space:]]+" "$file"; then
+      run_as_root sed -i -E "s/client_max_body_size[[:space:]]+[^;]+;/client_max_body_size ${limit};/g" "$file"
+    elif grep -qE "server[[:space:]]*\\{" "$file"; then
+      run_as_root sed -i -E "/server[[:space:]]*\\{/a\\    client_max_body_size ${limit};" "$file"
+    else
+      warn "未找到 server { 段，跳过 $file"
+      return 1
+    fi
   fi
-  if [[ "$needs_buffering" -eq 1 ]]; then
-    run_as_root sed -i -E "/proxy_http_version[[:space:]]+1[.]1;/a\\        proxy_request_buffering off;" "$file" || true
+
+  if [[ "$has_proxy" -eq 1 && "$needs_buffering" -eq 1 ]]; then
+    if grep -qE "proxy_http_version[[:space:]]+1[.]1;" "$file"; then
+      run_as_root sed -i -E "/proxy_http_version[[:space:]]+1[.]1;/a\\        proxy_request_buffering off;" "$file" || true
+    else
+      run_as_root sed -i -E "/proxy_pass[[:space:]]+http/a\\        proxy_request_buffering off;" "$file" || true
+    fi
   fi
-  success "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe5\xb7\xb2\xe8\xae\xbe\xe7\xbd\xae\xe4\xb8\xba')"" ${limit}: $file"
+
+  if [[ "$has_proxy" -eq 1 && "$needs_timeout" -eq 1 ]]; then
+    if grep -qE "proxy_connect_timeout[[:space:]]+" "$file"; then
+      run_as_root sed -i -E "s/proxy_connect_timeout[[:space:]]+[^;]+;/proxy_connect_timeout 60;/g" "$file"
+    else
+      run_as_root sed -i -E "/proxy_pass[[:space:]]+http/a\\        proxy_connect_timeout 60;" "$file" || true
+    fi
+    if grep -qE "proxy_send_timeout[[:space:]]+" "$file"; then
+      run_as_root sed -i -E "s/proxy_send_timeout[[:space:]]+[^;]+;/proxy_send_timeout ${timeout};/g" "$file"
+    else
+      run_as_root sed -i -E "/proxy_pass[[:space:]]+http/a\\        proxy_send_timeout ${timeout};" "$file" || true
+    fi
+    if grep -qE "proxy_read_timeout[[:space:]]+" "$file"; then
+      run_as_root sed -i -E "s/proxy_read_timeout[[:space:]]+[^;]+;/proxy_read_timeout ${timeout};/g" "$file"
+    else
+      run_as_root sed -i -E "/proxy_pass[[:space:]]+http/a\\        proxy_read_timeout ${timeout};" "$file" || true
+    fi
+  fi
+  success "Nginx 上传限制和等待超时已设置为 ${limit}/${timeout}s: $file"
 }
 
 ensure_nginx_upload_limit() {
-  section "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6')"
+  section "Nginx 上传限制和等待超时"
   if ! command -v nginx >/dev/null 2>&1; then
     warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" nginx""$(zh '\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe4\xbf\xae\xe5\xa4\x8d')"
     return 0
@@ -210,12 +246,12 @@ ensure_nginx_upload_limit() {
   done < <(find_nginx_qt_configs)
   if [[ "${#files[@]}" -eq 0 ]]; then
     warn "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0\xe6\x8c\x87\xe5\x90\x91')"" 127.0.0.1:${PORT} ""$(zh '\xe7\x9a\x84')"" Nginx ""$(zh '\xe7\xab\x99\xe7\x82\xb9\xe9\x85\x8d\xe7\xbd\xae')"
-    echo "$(zh '\xe8\xaf\xb7\xe6\x89\x8b\xe5\x8a\xa8\xe5\x9c\xa8\xe5\xaf\xb9\xe5\xba\x94')"" server { ""$(zh '\xe6\xae\xb5\xe5\x8a\xa0\xe4\xb8\x8a\xef\xbc\x9a')""client_max_body_size ${NGINX_UPLOAD_MAX_SIZE};"
+    echo "请手动在对应 server/location 段加上：client_max_body_size ${NGINX_UPLOAD_MAX_SIZE}; proxy_read_timeout ${NGINX_PROXY_TIMEOUT}; proxy_send_timeout ${NGINX_PROXY_TIMEOUT};"
     return 0
   fi
   local file changed=0
   for file in "${files[@]}"; do
-    patch_nginx_upload_config "$file" "$NGINX_UPLOAD_MAX_SIZE" && changed=1 || true
+    patch_nginx_upload_config "$file" "$NGINX_UPLOAD_MAX_SIZE" "$NGINX_PROXY_TIMEOUT" && changed=1 || true
   done
   if [[ "$changed" -eq 1 ]]; then
     if run_as_root nginx -t; then

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -53,8 +54,17 @@ def _summarize_file(path: Path) -> dict[str, Any]:
     }
 
 
-def _summarize_kline_dir(path: Path) -> dict[str, Any]:
+def _summarize_kline_dir(path: Path, inspect_rows: bool = True) -> dict[str, Any]:
     files = sorted(path.glob("*.json")) if path.exists() else []
+    if not inspect_rows:
+        return {
+            "dir": str(path),
+            "files": len(files),
+            "rows": "-",
+            "min_date": "",
+            "max_date": "",
+            "size_bytes": sum(file_path.stat().st_size for file_path in files if file_path.exists()),
+        }
     row_count = 0
     dates: list[str] = []
     for file_path in files:
@@ -75,8 +85,17 @@ def _summarize_kline_dir(path: Path) -> dict[str, Any]:
     }
 
 
-def _summarize_intraday_dir(path: Path) -> dict[str, Any]:
+def _summarize_intraday_dir(path: Path, inspect_rows: bool = True) -> dict[str, Any]:
     files = sorted(path.glob("*.csv")) if path.exists() else []
+    if not inspect_rows:
+        return {
+            "dir": str(path),
+            "files": len(files),
+            "rows": "-",
+            "min_date": "",
+            "max_date": "",
+            "size_bytes": sum(file_path.stat().st_size for file_path in files if file_path.exists()),
+        }
     row_count = 0
     dates: list[str] = []
     for file_path in files:
@@ -101,14 +120,50 @@ def _summarize_intraday_dir(path: Path) -> dict[str, Any]:
     }
 
 
+def _summarize_sqlite_table(db_path: Path, table: str, date_column: str, code_column: str = "") -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "name": f"{db_path}:{table}",
+        "exists": db_path.exists(),
+        "size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+        "items": 0,
+        "codes": "-",
+        "min_date": "",
+        "max_date": "",
+    }
+    if not db_path.exists():
+        return summary
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS count, MIN({date_column}) AS min_date, MAX({date_column}) AS max_date FROM {table}"
+            ).fetchone()
+            if row:
+                summary["items"] = int(row[0] or 0)
+                summary["min_date"] = str(row[1] or "")[:10]
+                summary["max_date"] = str(row[2] or "")[:10]
+            if code_column:
+                code_row = conn.execute(
+                    f"SELECT COUNT(DISTINCT {code_column}) FROM {table} WHERE {code_column} IS NOT NULL AND {code_column} != ''"
+                ).fetchone()
+                summary["codes"] = int((code_row or [0])[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        summary["error"] = str(exc)
+    return summary
+
+
 def _print_table(rows: Iterable[dict[str, Any]]) -> None:
     for row in rows:
-        name = row.get("file") or row.get("dir")
+        name = row.get("name") or row.get("file") or row.get("dir")
+        error = f", error={row.get('error')}" if row.get("error") else ""
         print(
             f"{name}: count={row.get('items', row.get('rows', 0))}, "
             f"files={row.get('files', '-')}, "
+            f"codes={row.get('codes', '-')}, "
             f"min={row.get('min_date') or '-'}, max={row.get('max_date') or '-'}, "
-            f"size={row.get('size_bytes', '-')}"
+            f"size={row.get('size_bytes', '-')}{error}"
         )
 
 
@@ -123,19 +178,28 @@ def _data_dir_from_args(argv: list[str]) -> Path:
 
 def main() -> None:
     data_dir = _data_dir_from_args(sys.argv)
+    db_path = data_dir / "quant_data.sqlite3"
+    sqlite_available = db_path.exists()
     rows = [
         _summarize_file(data_dir / "news_history.json"),
         _summarize_file(data_dir / "news_analysis_records.json"),
         _summarize_file(data_dir / "quant_events_cache.json"),
         _summarize_file(data_dir / "strategy_evolution_state.json"),
         _summarize_file(data_dir / "access_logs.json"),
-        _summarize_kline_dir(data_dir / "kline_day_cache"),
-        _summarize_intraday_dir(data_dir / "kline_cache"),
+        _summarize_kline_dir(data_dir / "kline_day_cache", inspect_rows=not sqlite_available),
+        _summarize_intraday_dir(data_dir / "kline_cache", inspect_rows=not sqlite_available),
+        _summarize_sqlite_table(db_path, "news_raw", "date"),
+        _summarize_sqlite_table(db_path, "news_events", "date", "code"),
+        _summarize_sqlite_table(db_path, "market_daily_bars", "date", "code"),
+        _summarize_sqlite_table(db_path, "market_minute_bars", "date", "code"),
+        _summarize_sqlite_table(db_path, "lhb_records", "trade_date", "stock_code"),
     ]
     _print_table(rows)
-    news = rows[0]
-    if not news.get("min_date") or str(news["min_date"]) > "2026-03-01":
-        print("WARNING: news_history.json does not cover 2026-03-01. Historical replay from March is incomplete.")
+    news_json = rows[0]
+    news_sqlite = rows[7]
+    news_min_date = str(news_sqlite.get("min_date") or news_json.get("min_date") or "")
+    if not news_min_date or news_min_date > "2026-03-01":
+        print("WARNING: news data does not cover 2026-03-01. Historical replay from March is incomplete.")
 
 
 if __name__ == "__main__":
