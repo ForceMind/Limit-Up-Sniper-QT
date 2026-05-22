@@ -38,6 +38,7 @@ VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
 BACKUP_ROOT="${BACKUP_ROOT:-$ROOT_DIR/backups}"
 HOST="${QUANT_HOST:-0.0.0.0}"
 PORT="${QUANT_PORT:-8000}"
+NGINX_UPLOAD_MAX_SIZE="${QT_NGINX_UPLOAD_MAX_SIZE:-1024m}"
 
 if [[ -t 1 ]]; then
   COLOR_BLUE=$'\033[1;34m'
@@ -152,6 +153,83 @@ EOF
   rm -f "$tmp_service"
   warn "$(zh '\xe6\x97\xa0\xe6\xb3\x95\xe5\x86\x99\xe5\x85\xa5')"" systemd ""$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe9\x85\x8d\xe7\xbd\xae\xef\xbc\x8c\xe5\xb0\x86\xe6\x94\xb9\xe7\x94\xa8')"" nohup ""$(zh '\xe5\x90\xaf\xe5\x8a\xa8\xe6\x96\xb9\xe5\xbc\x8f')"
   return 1
+}
+
+find_nginx_qt_configs() {
+  local dirs=("/etc/nginx/conf.d" "/etc/nginx/sites-enabled" "/etc/nginx/sites-available")
+  local dir file real
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' file; do
+      if grep -Eq "127[.]0[.]0[.]1:${PORT}|localhost:${PORT}|server_name[[:space:]].*(qt|zhangting)|proxy_pass[[:space:]]+http://127[.]0[.]0[.]1" "$file" 2>/dev/null; then
+        real="$(readlink -f "$file" 2>/dev/null || printf '%s' "$file")"
+        printf '%s\n' "$real"
+      fi
+    done < <(find "$dir" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+  done | awk '!seen[$0]++'
+}
+
+patch_nginx_upload_config() {
+  local file="$1"
+  local limit="${2:-$NGINX_UPLOAD_MAX_SIZE}"
+  [[ -f "$file" ]] || return 1
+  local has_proxy=0 needs_buffering=0
+  grep -qE "proxy_pass[[:space:]]+http://127[.]0[.]0[.]1" "$file" && has_proxy=1
+  if [[ "$has_proxy" -eq 1 ]] && ! grep -qE "proxy_request_buffering[[:space:]]+off;" "$file"; then
+    needs_buffering=1
+  fi
+  if grep -qE "client_max_body_size[[:space:]]+${limit};" "$file" && [[ "$needs_buffering" -eq 0 ]]; then
+    success "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe5\xb7\xb2\xe6\x98\xaf')"" ${limit}: $file"
+    return 0
+  fi
+  local backup="${file}.qt_upload_backup_$(date +%Y%m%d_%H%M%S)"
+  run_as_root cp "$file" "$backup" || return 1
+  if grep -qE "client_max_body_size[[:space:]]+" "$file"; then
+    run_as_root sed -i -E "s/client_max_body_size[[:space:]]+[^;]+;/client_max_body_size ${limit};/g" "$file"
+  elif grep -qE "server[[:space:]]*\\{" "$file"; then
+    run_as_root sed -i -E "/server[[:space:]]*\\{/a\\    client_max_body_size ${limit};" "$file"
+  else
+    warn "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0')"" server { ""$(zh '\xe6\xae\xb5\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" $file"
+    return 1
+  fi
+  if [[ "$needs_buffering" -eq 1 ]]; then
+    run_as_root sed -i -E "/proxy_http_version[[:space:]]+1[.]1;/a\\        proxy_request_buffering off;" "$file" || true
+  fi
+  success "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe5\xb7\xb2\xe8\xae\xbe\xe7\xbd\xae\xe4\xb8\xba')"" ${limit}: $file"
+}
+
+ensure_nginx_upload_limit() {
+  section "Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6')"
+  if ! command -v nginx >/dev/null 2>&1; then
+    warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" nginx""$(zh '\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe4\xbf\xae\xe5\xa4\x8d')"
+    return 0
+  fi
+  local files=()
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && files+=("$file")
+  done < <(find_nginx_qt_configs)
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    warn "$(zh '\xe6\x9c\xaa\xe6\x89\xbe\xe5\x88\xb0\xe6\x8c\x87\xe5\x90\x91')"" 127.0.0.1:${PORT} ""$(zh '\xe7\x9a\x84')"" Nginx ""$(zh '\xe7\xab\x99\xe7\x82\xb9\xe9\x85\x8d\xe7\xbd\xae')"
+    echo "$(zh '\xe8\xaf\xb7\xe6\x89\x8b\xe5\x8a\xa8\xe5\x9c\xa8\xe5\xaf\xb9\xe5\xba\x94')"" server { ""$(zh '\xe6\xae\xb5\xe5\x8a\xa0\xe4\xb8\x8a\xef\xbc\x9a')""client_max_body_size ${NGINX_UPLOAD_MAX_SIZE};"
+    return 0
+  fi
+  local file changed=0
+  for file in "${files[@]}"; do
+    patch_nginx_upload_config "$file" "$NGINX_UPLOAD_MAX_SIZE" && changed=1 || true
+  done
+  if [[ "$changed" -eq 1 ]]; then
+    if run_as_root nginx -t; then
+      if command -v systemctl >/dev/null 2>&1; then
+        run_as_root systemctl reload nginx || run_as_root nginx -s reload || true
+      else
+        run_as_root nginx -s reload || true
+      fi
+      success "Nginx ""$(zh '\xe5\xb7\xb2\xe9\x87\x8d\xe8\xbd\xbd\xef\xbc\x8c\xe5\x8f\xaf\xe9\x87\x8d\xe6\x96\xb0\xe4\xb8\x8a\xe4\xbc\xa0\xe6\x95\xb0\xe6\x8d\xae\xe5\x8c\x85')"
+    else
+      error "Nginx ""$(zh '\xe9\x85\x8d\xe7\xbd\xae\xe6\xa3\x80\xe6\x9f\xa5\xe5\xa4\xb1\xe8\xb4\xa5\xef\xbc\x8c\xe5\xb7\xb2\xe7\x95\x99\xe4\xb8\x8b')"" .qt_upload_backup_* ""$(zh '\xe5\xa4\x87\xe4\xbb\xbd')"
+      return 1
+    fi
+  fi
 }
 
 api_url() {

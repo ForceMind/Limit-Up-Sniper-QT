@@ -1956,7 +1956,11 @@
                   reject(new Error('服务器返回的导入任务响应不是 JSON'));
                 }
               } else {
-                reject(new Error(xhr.responseText || `上传失败：HTTP ${xhr.status}`));
+                if (xhr.status === 413) {
+                  reject(new Error('上传被 Nginx 拒绝：请求体超过限制。请在服务器执行 qt nginx-upload 后重试。'));
+                } else {
+                  reject(new Error(xhr.responseText || `上传失败：HTTP ${xhr.status}`));
+                }
               }
             };
             xhr.onerror = () => reject(new Error('上传请求失败，请检查服务器连接'));

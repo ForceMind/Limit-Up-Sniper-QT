@@ -26,6 +26,7 @@ usage() {
   bash qt.sh install          第一次部署服务器
   bash qt.sh                  日常一键更新，等同于 bash qt.sh update
   bash qt.sh status           查看服务、Git 版本和 API 状态
+  bash qt.sh nginx-upload     修复 Nginx 上传大小限制
   bash qt.sh version          查看前后端版本并验证模块接口
   bash qt.sh doctor           检查部署环境和脚本权限
   qt                           服务器快捷命令，打开交互式运维面板
@@ -37,6 +38,7 @@ usage() {
   restart | start | reload    重启服务
   stop                        停止服务
   status | ps                 查看状态
+  nginx-upload | fix-nginx    修复 Nginx 上传大小限制
   logs   | log                查看实时日志
   backup | bak                备份 backend/data
   restore <tar.gz>            从备份恢复 backend/data

@@ -180,6 +180,22 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+数据包上传会经过 Nginx，配置里必须允许足够大的请求体。项目模板默认：
+
+```nginx
+client_max_body_size 1024m;
+proxy_request_buffering off;
+```
+
+如果上传时报 `413 Request Entity Too Large`，说明当前服务器实际生效的 Nginx 配置仍然太小。执行：
+
+```bash
+qt nginx-upload
+sudo nginx -T | grep -n "client_max_body_size"
+```
+
+`qt install` 和 `qt update` 也会自动尝试把指向本服务端口的 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE`，默认 `1024m`。
+
 正式域名和 TLS 证书按服务器实际情况调整。
 
 ## 页面入口

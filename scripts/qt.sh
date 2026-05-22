@@ -37,6 +37,7 @@ usage() {
   qt stop                    停止服务
   qt status                  查看服务状态、Git 版本、认证状态
   qt admin-path              查看或生成后台入口路径
+  qt nginx-upload            修复 Nginx 上传大小限制
   qt logs                    查看实时日志
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
@@ -378,6 +379,7 @@ cmd_panel() {
 13) GitHub 上传前安全扫描
 14) 部署环境检查
 15) 查看后台入口路径
+16) 修复 Nginx 上传限制
 0) 退出
 
 EOF
@@ -407,6 +409,7 @@ EOF
       13) panel_run "$(zh '\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')" bash "$SCRIPT_DIR/qt.sh" scan ;;
       14) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       15) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
+      16) panel_run "修复 Nginx 上传限制" bash "$SCRIPT_DIR/qt.sh" nginx-upload ;;
       0|q|Q)
         echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
@@ -467,6 +470,10 @@ case "$cmd" in
     require_project_root
     section "后台入口"
     print_admin_entry_path
+    ;;
+  nginx-upload|fix-nginx|nginx)
+    require_project_root
+    ensure_nginx_upload_limit
     ;;
   version|verify)
     cmd_version

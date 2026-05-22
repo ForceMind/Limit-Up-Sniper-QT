@@ -34,6 +34,8 @@ fi
 "$(venv_pip)" install --upgrade pip
 "$(venv_pip)" install -r "$ROOT_DIR/backend/requirements.txt"
 
+ensure_nginx_upload_limit || true
+
 bash "$SCRIPT_DIR/restart_server.sh"
 
 echo "$(zh '\xe6\x9b\xb4\xe6\x96\xb0\xe5\xae\x8c\xe6\x88\x90')"
