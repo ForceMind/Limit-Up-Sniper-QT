@@ -23,6 +23,14 @@
     .log-window { height: calc(100vh - 178px); min-height: 520px; scrollbar-width: thin; }
     .tab-button { border-radius: 6px; }
     .tab-button.active { background: #111827; color: #fff; }
+    .trade-view-button { border-radius: 4px; background: #fff; color: #111827; }
+    .trade-view-button:hover { background: #f5f5f5; }
+    .trade-view-button.active,
+    .trade-view-button.active:hover {
+      background: #111827 !important;
+      border-color: #111827 !important;
+      color: #fff !important;
+    }
     @media (max-width: 1279px) {
       .app-shell { display: block !important; }
       .sidebar { position: sticky; top: 0; z-index: 40; border-right: 0; border-bottom: 1px solid #d6d9de; padding: 12px; }
@@ -351,7 +359,7 @@
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div class="font-semibold">交易账户</div>
               <div class="flex gap-1 text-sm">
-                <button v-for="view in tradeViews" :key="view.key" @click="tradeView = view.key" class="h-8 px-3 border border-neutral-300 bg-white hover:bg-neutral-50" :class="tradeView === view.key ? 'bg-neutral-900 text-white border-neutral-900' : ''">{{ view.label }}</button>
+                <button v-for="view in tradeViews" :key="view.key" @click="tradeView = view.key" class="trade-view-button h-8 px-3 border border-neutral-300" :class="{ active: tradeView === view.key }">{{ view.label }}</button>
               </div>
             </div>
 
@@ -1172,12 +1180,16 @@
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
           const res = await fetch(url, { ...options, headers });
           if (!res.ok) {
+            const text = await res.text();
             if (res.status === 401 || res.status === 403) {
               this.auth.token = '';
               localStorage.removeItem('qt_admin_token');
               this.stopTimers();
             }
-            throw new Error(await res.text());
+            const error = new Error(text || `HTTP ${res.status}`);
+            error.status = res.status;
+            error.body = text;
+            throw error;
           }
           return await res.json();
         },
@@ -1609,7 +1621,9 @@
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
           } catch (err) {
-            this.clientError = String(err.message || err);
+            this.clientError = err.status === 404
+              ? '清理样例持仓接口不存在：服务器后端还没有更新到最新版本，或者更新后没有重启服务。请在服务器执行 bash qt.sh update；完成后再点“清理样例持仓”。'
+              : String(err.message || err);
           } finally {
             this.clearingSample = false;
           }

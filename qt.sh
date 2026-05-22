@@ -25,6 +25,7 @@ usage() {
   backup | bak                备份 backend/data
   restore <tar.gz>            从备份恢复 backend/data
   auth                        账号密码管理
+  clear-sample | sample       清理样例持仓
   scan   | security           GitHub 上传前安全扫描
   doctor | check              部署环境检查
 

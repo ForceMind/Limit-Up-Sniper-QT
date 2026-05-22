@@ -29,6 +29,7 @@ usage() {
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
   qt auth                    账号密码管理
+  qt clear-sample            清理样例持仓
   qt scan                    GitHub 上传前安全扫描
   qt doctor                  部署环境检查
   qt help                    显示帮助
@@ -330,8 +331,9 @@ cmd_panel() {
 6) 备份数据
 7) 恢复数据
 8) 账号密码管理
-9) GitHub 上传前安全扫描
-10) 部署环境检查
+9) 清理样例持仓
+10) GitHub 上传前安全扫描
+11) 部署环境检查
 0) 退出
 
 EOF
@@ -354,8 +356,9 @@ EOF
         [[ -n "$backup_file" ]] && panel_run "恢复数据" bash "$SCRIPT_DIR/qt.sh" restore "$backup_file"
         ;;
       8) cmd_auth ;;
-      9) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
-      10) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      9) panel_run "清理样例持仓" bash "$SCRIPT_DIR/qt.sh" clear-sample ;;
+      10) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
+      11) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       0|q|Q)
         echo "已退出运维面板"
         exit 0
@@ -366,6 +369,20 @@ EOF
         ;;
     esac
   done
+}
+
+cmd_clear_sample_state() {
+  require_project_root
+  local tool="$ROOT_DIR/scripts/clear_sample_state.py"
+  [[ -f "$tool" ]] || die "找不到样例持仓清理工具：$tool"
+  section "清理样例持仓"
+  if [[ -x "$(venv_python)" ]]; then
+    PYTHONPATH="$ROOT_DIR/backend" "$(venv_python)" "$tool"
+  elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$tool"
+  else
+    die "找不到 Python，无法清理样例持仓"
+  fi
 }
 
 cmd="${1:-panel}"
@@ -400,6 +417,9 @@ case "$cmd" in
     ;;
   auth|user|users|password|passwd)
     cmd_auth
+    ;;
+  clear-sample|clean-sample|sample)
+    cmd_clear_sample_state
     ;;
   scan|security)
     section "GitHub 上传前安全扫描"
