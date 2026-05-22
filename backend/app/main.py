@@ -401,6 +401,86 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
     return next_payload
 
 
+def _find_strategy_model(model_id: str) -> Dict[str, Any]:
+    model_id = str(model_id or "active").strip() or "active"
+    models_payload = strategy_evolution.models()
+    for model in _strategy_catalog_items(models_payload):
+        if str(model.get("id") or "") == model_id:
+            return model
+    raise HTTPException(status_code=404, detail="strategy model not found")
+
+
+def _model_backtest_payload(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+) -> Dict[str, Any]:
+    params = quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {})
+    start_date = str(start_date or quant_engine.first_data_date() or "").strip() or None
+    end_date = str(end_date or quant_engine.latest_event_date() or "").strip() or None
+    mode = str(mode or "intraday").strip().lower()
+    with quant_engine.temporary_strategy_params(params):
+        if mode in {"intraday", "intraday_5m", "minute"}:
+            timeline = quant_engine.walk_forward_intraday(
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=params.get("account_initial_cash"),
+                max_positions=int(params.get("max_positions", 5)),
+                hold_days=int(params.get("max_hold_days", 3)),
+                top_n=int(params.get("top_n", 5)),
+                auto_fill=False,
+            )
+        else:
+            timeline = quant_engine.walk_forward(
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=params.get("account_initial_cash"),
+                max_positions=int(params.get("max_positions", 5)),
+                hold_days=int(params.get("max_hold_days", 3)),
+                top_n=int(params.get("top_n", 5)),
+                auto_fill=False,
+            )
+        trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
+        account = quant_engine.account_from_trades(
+            trades,
+            initial_cash=timeline.get("initial_cash", params.get("account_initial_cash")),
+            as_of=end_date or timeline.get("end_date"),
+            limit=limit,
+        )
+    return {
+        "status": "ok",
+        "model": model,
+        "model_id": model.get("id"),
+        "model_name": model.get("name"),
+        "mode": timeline.get("mode", mode),
+        "start_date": timeline.get("start_date") or start_date,
+        "end_date": timeline.get("end_date") or end_date,
+        "summary": {
+            "initial_cash": timeline.get("initial_cash"),
+            "final_value": timeline.get("final_value"),
+            "return_pct": timeline.get("return_pct", 0),
+            "max_drawdown_pct": timeline.get("max_drawdown_pct", 0),
+            "annualized_return_pct": timeline.get("annualized_return_pct", 0),
+            "sharpe_ratio": timeline.get("sharpe_ratio", 0),
+            "profit_factor": timeline.get("profit_factor", 0),
+            "win_rate": timeline.get("win_rate", 0),
+            "closed_trades": timeline.get("closed_trades", 0),
+            "trade_count": len(trades),
+            "total_fees": timeline.get("total_fees", 0),
+        },
+        "account": account.get("account", {}),
+        "positions": account.get("positions", []),
+        "trade_records": trades if limit <= 0 else trades[-limit:],
+        "delivery_records": account.get("delivery_records", []),
+        "daily_settlements": account.get("daily_settlements", []),
+        "equity_curve": timeline.get("equity_curve", []),
+        "days": timeline.get("days", []),
+        "strategy_params": params,
+    }
+
+
 @app.get("/api/front/public_snapshot")
 def frontend_public_snapshot(
     as_of: Optional[str] = Query(default=None),
@@ -602,6 +682,23 @@ def quant_resume_evolution():
 @app.get("/api/quant/models")
 def quant_strategy_models():
     return strategy_evolution.models()
+
+
+@app.get("/api/quant/model/backtest")
+def quant_strategy_model_backtest(
+    model_id: str = Query(default="active"),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    mode: str = Query(default="intraday"),
+    limit: int = Query(default=0, ge=0, le=5000),
+):
+    return _model_backtest_payload(
+        model=_find_strategy_model(model_id),
+        start_date=start_date,
+        end_date=end_date,
+        mode=mode,
+        limit=limit,
+    )
 
 
 @app.post("/api/quant/model/apply")

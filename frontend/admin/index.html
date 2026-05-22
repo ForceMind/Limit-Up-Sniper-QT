@@ -479,7 +479,10 @@
 
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
-              <div class="font-semibold">策略回测</div>
+              <div>
+                <div class="font-semibold">当前策略回测与交割单</div>
+                <div class="text-xs text-neutral-500 mt-1">这里是回测复盘主入口；每个进化策略的独立交割单在“策略库”里查看。</div>
+              </div>
               <button @click="loadBacktest(false)" :disabled="backtestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ backtestLoading ? '回测中' : '刷新回测' }}</button>
             </div>
             <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
@@ -491,6 +494,34 @@
               <div class="metric"><div class="text-xs text-neutral-500">闭环交易</div><div class="mt-2 text-lg font-semibold">{{ backtestResult.closed_trades || 0 }}</div></div>
               <div class="metric"><div class="text-xs text-neutral-500">缺日K</div><div class="mt-2 text-lg font-semibold text-amber-700">{{ ((backtestResult.data_diagnostics || {}).missing_daily_kline_count) || 0 }}</div></div>
               <div class="metric"><div class="text-xs text-neutral-500">总费用</div><div class="mt-2 text-lg font-semibold">{{ money(backtestResult.total_fees) }}</div></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="font-semibold">回测交割单</div>
+              <div class="text-xs text-neutral-500">来自当前策略在所选区间内的完整复盘成交</div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[360px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">交割编号</th><th class="px-3 py-2 text-left">日期</th><th class="px-3 py-2 text-left">方向</th><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">价格</th><th class="px-3 py-2 text-right">净发生</th><th class="px-3 py-2 text-right">费用</th><th class="px-3 py-2 text-right">实现盈亏</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in (backtestResult.delivery_records || [])" :key="'bt-delivery-' + row.deal_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">{{ row.deal_id }}</td>
+                    <td class="px-3 py-2">{{ row.date }}</td>
+                    <td class="px-3 py-2" :class="sideClass(row.side)">{{ row.direction || row.side }}</td>
+                    <td class="px-3 py-2">{{ row.name }} <span class="text-xs text-neutral-500">{{ row.code }}</span></td>
+                    <td class="px-3 py-2 text-right">{{ qty(row.qty) }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(row.price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(row.net_amount) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(row.total_fee) }}</td>
+                    <td class="px-3 py-2 text-right" :class="numClass(row.realized_pnl)">{{ money(row.realized_pnl) }}</td>
+                  </tr>
+                  <tr v-if="!(backtestResult.delivery_records || []).length"><td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无回测交割单，请先点击“刷新回测”或检查数据区间</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
 
@@ -684,7 +715,10 @@
 
             <div class="panel">
               <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
-                <div class="font-semibold">遗传进化</div>
+              <div>
+                <div class="font-semibold">策略库：回测后的可复用模型</div>
+                <div class="text-xs text-neutral-500 mt-1">每个模型都可以查看该参数组合跑出的成交、交割单和资金流水。</div>
+              </div>
                 <button @click="evolveStrategy" :disabled="evolutionToggling" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolutionActionText }}</button>
               </div>
               <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
@@ -705,7 +739,7 @@
               <div class="table-wrap overflow-auto max-h-[360px]">
                 <table class="w-full text-sm">
                   <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
-                    <tr><th class="px-3 py-2 text-left">模型</th><th class="px-3 py-2 text-right">目标</th><th class="px-3 py-2 text-right">收益</th><th class="px-3 py-2 text-right">回撤</th><th class="px-3 py-2 text-right">胜率</th><th class="px-3 py-2 text-right">交易</th><th class="px-3 py-2 text-right">操作</th></tr>
+                    <tr><th class="px-3 py-2 text-left">模型</th><th class="px-3 py-2 text-right">目标</th><th class="px-3 py-2 text-right">收益</th><th class="px-3 py-2 text-right">回撤</th><th class="px-3 py-2 text-right">胜率</th><th class="px-3 py-2 text-right">交易</th><th class="px-3 py-2 text-right">回测数据</th><th class="px-3 py-2 text-right">操作</th></tr>
                   </thead>
                   <tbody class="divide-y divide-neutral-100">
                     <tr v-for="model in evolutionModels" :key="model.id" class="hover:bg-neutral-50">
@@ -715,12 +749,56 @@
                       <td class="px-3 py-2 text-right">{{ pct(model.max_drawdown_pct) }}</td>
                       <td class="px-3 py-2 text-right">{{ pct(model.win_rate) }}</td>
                       <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
+                      <td class="px-3 py-2 text-right">
+                        <button @click="loadStrategyBacktest(model)" :disabled="strategyBacktestLoading" class="h-8 px-3 border border-neutral-300 bg-white text-xs disabled:opacity-50">查看交割单</button>
+                      </td>
                       <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">应用</button></td>
                     </tr>
-                    <tr v-if="!evolutionModels.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
+                    <tr v-if="!evolutionModels.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
                   </tbody>
                 </table>
               </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div class="font-semibold">策略回测详情与交割单</div>
+                <div class="text-xs text-neutral-500 mt-1">{{ selectedStrategyBacktest.model_name || '先在上方策略表点击“查看交割单”' }}</div>
+              </div>
+              <button v-if="selectedStrategyBacktest.model_id" @click="loadStrategyBacktest(selectedStrategyBacktest.model)" :disabled="strategyBacktestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyBacktestLoading ? '加载中' : '重新回测' }}</button>
+            </div>
+            <div v-if="selectedStrategyBacktest.status" class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+              <div class="metric"><div class="text-xs text-neutral-500">起止</div><div class="mt-2 font-semibold">{{ selectedStrategyBacktest.start_date || '-' }} / {{ selectedStrategyBacktest.end_date || '-' }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">收益</div><div class="mt-2 text-lg font-semibold" :class="numClass((selectedStrategyBacktest.summary || {}).return_pct)">{{ pct((selectedStrategyBacktest.summary || {}).return_pct) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">回撤</div><div class="mt-2 text-lg font-semibold text-green-700">{{ pct((selectedStrategyBacktest.summary || {}).max_drawdown_pct) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">胜率</div><div class="mt-2 text-lg font-semibold">{{ pct((selectedStrategyBacktest.summary || {}).win_rate) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">交易</div><div class="mt-2 text-lg font-semibold">{{ (selectedStrategyBacktest.summary || {}).trade_count || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">闭环</div><div class="mt-2 text-lg font-semibold">{{ (selectedStrategyBacktest.summary || {}).closed_trades || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">总资产</div><div class="mt-2 text-lg font-semibold">{{ money((selectedStrategyBacktest.account || {}).total_asset) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">总费用</div><div class="mt-2 text-lg font-semibold">{{ money((selectedStrategyBacktest.summary || {}).total_fees) }}</div></div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[420px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">交割编号</th><th class="px-3 py-2 text-left">日期</th><th class="px-3 py-2 text-left">方向</th><th class="px-3 py-2 text-left">股票</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">价格</th><th class="px-3 py-2 text-right">净发生</th><th class="px-3 py-2 text-right">费用</th><th class="px-3 py-2 text-right">实现盈亏</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in (selectedStrategyBacktest.delivery_records || [])" :key="'model-delivery-' + row.deal_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">{{ row.deal_id }}</td>
+                    <td class="px-3 py-2">{{ row.date }}</td>
+                    <td class="px-3 py-2" :class="sideClass(row.side)">{{ row.direction || row.side }}</td>
+                    <td class="px-3 py-2">{{ row.name }} <span class="text-xs text-neutral-500">{{ row.code }}</span></td>
+                    <td class="px-3 py-2 text-right">{{ qty(row.qty) }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(row.price, 3) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(row.net_amount) }}</td>
+                    <td class="px-3 py-2 text-right">{{ money(row.total_fee) }}</td>
+                    <td class="px-3 py-2 text-right" :class="numClass(row.realized_pnl)">{{ money(row.realized_pnl) }}</td>
+                  </tr>
+                  <tr v-if="!(selectedStrategyBacktest.delivery_records || []).length"><td colspan="9" class="px-3 py-10 text-center text-neutral-500">请选择一个策略查看回测交割单</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </section>
@@ -1030,9 +1108,9 @@
             { key: 'overview', label: '运行总览' },
             { key: 'signals', label: '信号与新闻' },
             { key: 'trading', label: '持仓成交' },
-            { key: 'analysis', label: '全程复盘' },
+            { key: 'analysis', label: '回测复盘' },
             { key: 'data', label: '数据与AI' },
-            { key: 'strategy', label: '策略进化' },
+            { key: 'strategy', label: '策略库' },
             { key: 'settings', label: '配置与安全' },
             { key: 'access', label: '访问审计' },
             { key: 'ops', label: '运维' },
@@ -1045,7 +1123,7 @@
             { key: 'kline_fill', label: '日K补齐', desc: '回测前补齐缺失K线' },
             { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
-            { key: 'strategy_replay', label: '策略复盘', desc: '从3月1日滚动验证' },
+            { key: 'strategy_replay', label: '策略复盘', desc: '从服务器已有数据起点滚动验证' },
           ],
           tradeViews: [
             { key: 'positions', label: '持仓' },
@@ -1122,6 +1200,8 @@
           configMessage: '',
           activeTimeline: {},
           backtestResult: {},
+          selectedStrategyBacktest: {},
+          strategyBacktestLoading: false,
           selectedDayDate: '',
           tradeMode: 'intraday',
           equityChart: null,
@@ -1878,6 +1958,25 @@
           this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
           await this.refreshAll();
         },
+        async loadStrategyBacktest(model) {
+          if (!model || !model.id) return;
+          this.strategyBacktestLoading = true;
+          this.clientError = '';
+          try {
+            const q = new URLSearchParams({
+              model_id: model.id,
+              mode: this.tradeMode || 'intraday',
+              limit: '0',
+            });
+            if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
+            if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
+            this.selectedStrategyBacktest = await this.api(`/api/quant/model/backtest?${q.toString()}`);
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.strategyBacktestLoading = false;
+          }
+        },
         async loadTimeline(quiet = false) {
           this.timelineLoading = !quiet;
           try {
@@ -2092,6 +2191,10 @@
           return `${this.fixed(Number(value || 0) * 100)}%`;
         },
         money(value) {
+          const n = Number(value || 0);
+          return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '-';
+        },
+        qty(value) {
           const n = Number(value || 0);
           return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '-';
         },

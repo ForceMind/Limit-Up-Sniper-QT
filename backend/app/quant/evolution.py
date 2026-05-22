@@ -326,6 +326,10 @@ class StrategyEvolution:
                     "profit_factor": item.get("profit_factor", 0),
                     "win_rate": item.get("win_rate", 0),
                     "closed_trades": item.get("closed_trades", 0),
+                    "backtest": item.get("backtest", {}),
+                    "trade_records": item.get("trade_records", []),
+                    "delivery_records": item.get("delivery_records", []),
+                    "daily_settlements": item.get("daily_settlements", []),
                     "params": params,
                 }
             )
@@ -357,6 +361,13 @@ class StrategyEvolution:
         performance = result.get("performance") if isinstance(result.get("performance"), dict) else {}
         sharpe_ratio = safe_float(performance.get("sharpe_ratio"), 0)
         profit_factor = safe_float(performance.get("profit_factor"), 0)
+        trade_records = result.get("trades") if isinstance(result.get("trades"), list) else []
+        account = quant_engine.account_from_trades(
+            trade_records,
+            initial_cash=result.get("initial_cash", params.get("account_initial_cash")),
+            as_of=end_date or result.get("end_date"),
+            limit=0,
+        )
         trade_penalty = 10.0 if closed_trades < 5 else 0.0
         objective = (
             return_pct
@@ -375,6 +386,24 @@ class StrategyEvolution:
             "profit_factor": round(profit_factor, 4),
             "win_rate": round(win_rate, 4),
             "closed_trades": int(closed_trades),
+            "backtest": {
+                "mode": result.get("mode", "daily"),
+                "start_date": result.get("start_date") or start_date,
+                "end_date": result.get("end_date") or end_date,
+                "initial_cash": result.get("initial_cash", params.get("account_initial_cash")),
+                "final_value": result.get("final_value", params.get("account_initial_cash")),
+                "return_pct": round(return_pct, 4),
+                "max_drawdown_pct": round(max_drawdown_pct, 4),
+                "sharpe_ratio": round(sharpe_ratio, 4),
+                "profit_factor": round(profit_factor, 4),
+                "win_rate": round(win_rate, 4),
+                "closed_trades": int(closed_trades),
+                "trade_count": len(trade_records),
+                "total_fees": performance.get("total_fees", 0),
+            },
+            "trade_records": trade_records,
+            "delivery_records": account.get("delivery_records", []),
+            "daily_settlements": account.get("daily_settlements", []),
             "params": params,
         }
 

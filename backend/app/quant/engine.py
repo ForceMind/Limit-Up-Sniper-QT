@@ -2949,6 +2949,12 @@ class QuantEngine:
         diagnostics = self._backtest_data_diagnostics(start_date=start_date, end_date=end_date, hold_days=hold_days)
         timeline_trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
         timeline_performance = timeline.get("performance") if isinstance(timeline.get("performance"), dict) else {}
+        backtest_account = self.account_from_trades(
+            timeline_trades,
+            initial_cash=timeline.get("initial_cash", initial_cash),
+            as_of=end_date,
+            limit=500,
+        )
         status = "ok" if (trades or timeline_trades or diagnostics.get("event_count", 0) > 0) else "no_data"
         message = "backtest completed"
         if status == "no_data":
@@ -2986,6 +2992,10 @@ class QuantEngine:
             "score_buckets": {key: self._aggregate_stats(val) for key, val in buckets.items()},
             "recent_trades": trades[-80:],
             "trade_records": timeline_trades[-500:],
+            "account": backtest_account.get("account", {}),
+            "positions": backtest_account.get("positions", []),
+            "delivery_records": backtest_account.get("delivery_records", []),
+            "daily_settlements": backtest_account.get("daily_settlements", []),
             "days": timeline.get("days", [])[-260:] if isinstance(timeline.get("days"), list) else [],
             "equity_curve": timeline.get("equity_curve", []),
             "performance": timeline_performance,
@@ -3134,6 +3144,239 @@ class QuantEngine:
                 return f"{trade.get('date', '')} {raw_time[:8]}".strip()
             return raw_time
         return f"{trade.get('date', '')} 15:00:00".strip()
+
+    def account_from_trades(
+        self,
+        trades: List[Dict[str, Any]],
+        initial_cash: Optional[float] = None,
+        as_of: Optional[str] = None,
+        limit: int = 0,
+    ) -> Dict[str, Any]:
+        as_of = as_of or self.latest_event_date()
+        params = self.strategy_params()
+        initial_asset = max(1.0, safe_float(initial_cash, params["account_initial_cash"]))
+        raw_trades = [trade for trade in trades if isinstance(trade, dict) and not contains_sample_marker(trade)]
+        visible_trades = [
+            trade
+            for trade in raw_trades
+            if not as_of or str(trade.get("date", "")) <= as_of
+        ]
+        visible_trades = sorted(
+            enumerate(visible_trades, start=1),
+            key=lambda pair: (str(pair[1].get("date") or ""), self._trade_clock(pair[1]), pair[0]),
+        )
+
+        lots_by_code: Dict[str, List[Dict[str, Any]]] = {}
+        deals: List[Dict[str, Any]] = []
+        daily_settlement: Dict[str, Dict[str, float]] = {}
+        total_fees = 0.0
+        realized_pnl = 0.0
+        adjusted_cash = initial_asset
+
+        for index, trade in visible_trades:
+            side = str(trade.get("side") or "").upper()
+            if side not in {"BUY", "SELL"}:
+                continue
+            code = digits6(trade.get("code"))
+            if not code:
+                continue
+            qty = safe_float(trade.get("qty"), 0)
+            price = safe_float(trade.get("price"), 0)
+            amount = qty * price
+            if qty <= 0 or price <= 0 or amount <= 0:
+                continue
+
+            fees = self._broker_fees(side, amount)
+            if "total_fee" in trade:
+                total_fee = max(0.0, safe_float(trade.get("total_fee"), fees["total_fee"]))
+                fees["total_fee"] = round(total_fee, 2)
+                fees["commission"] = round(max(0.0, safe_float(trade.get("commission"), fees["commission"])), 2)
+                fees["stamp_duty"] = round(max(0.0, safe_float(trade.get("stamp_duty"), fees["stamp_duty"])), 2)
+                fees["transfer_fee"] = round(max(0.0, safe_float(trade.get("transfer_fee"), fees["transfer_fee"])), 2)
+            total_fees += fees["total_fee"]
+            trade_date = str(trade.get("date") or "")
+            trade_time = self._trade_clock(trade)
+            name = str(trade.get("name") or self.universe.name(code))
+            cash_flow = 0.0
+            cost_amount = 0.0
+            deal_realized = 0.0
+
+            if side == "BUY":
+                cash_flow = -(amount + fees["total_fee"])
+                cost_amount = amount + fees["total_fee"]
+                lots_by_code.setdefault(code, []).append(
+                    {
+                        "qty": qty,
+                        "price": price,
+                        "cost_amount": cost_amount,
+                        "entry_date": trade_date,
+                        "name": name,
+                        "reason": trade.get("reason", ""),
+                        "buy_score": safe_float(trade.get("score"), 0),
+                    }
+                )
+            else:
+                sell_qty_left = qty
+                queue = lots_by_code.setdefault(code, [])
+                while sell_qty_left > 0 and queue:
+                    lot = queue[0]
+                    lot_qty = safe_float(lot.get("qty"), 0)
+                    if lot_qty <= 0:
+                        queue.pop(0)
+                        continue
+                    matched = min(sell_qty_left, lot_qty)
+                    lot_cost = safe_float(lot.get("cost_amount"), 0) * matched / lot_qty
+                    cost_amount += lot_cost
+                    lot["qty"] = lot_qty - matched
+                    lot["cost_amount"] = safe_float(lot.get("cost_amount"), 0) - lot_cost
+                    sell_qty_left -= matched
+                    if lot["qty"] <= 0.000001:
+                        queue.pop(0)
+                if sell_qty_left > 0:
+                    pnl_pct = safe_float(trade.get("pnl_pct"), 0)
+                    fallback_cost_price = price / (1 + pnl_pct / 100) if pnl_pct > -99.0 else price
+                    cost_amount += sell_qty_left * fallback_cost_price
+                cash_flow = amount - fees["total_fee"]
+                deal_realized = cash_flow - cost_amount
+                realized_pnl += deal_realized
+            adjusted_cash += cash_flow
+
+            deal = {
+                "deal_id": f"BT-{trade_date.replace('-', '')}-{index:05d}",
+                "date": trade_date,
+                "time": trade_time,
+                "side": side,
+                "direction": "买入" if side == "BUY" else "卖出",
+                "code": code,
+                "name": name,
+                "qty": int(qty) if float(qty).is_integer() else round(qty, 2),
+                "price": round(price, 3),
+                "amount": round(amount, 2),
+                "commission": fees["commission"],
+                "stamp_duty": fees["stamp_duty"],
+                "transfer_fee": fees["transfer_fee"],
+                "total_fee": fees["total_fee"],
+                "net_amount": round(cash_flow, 2),
+                "cost_amount": round(cost_amount, 2),
+                "realized_pnl": round(deal_realized, 2),
+                "score": round(safe_float(trade.get("score"), 0), 2) if trade.get("score") is not None else None,
+                "pnl_pct": round(safe_float(trade.get("pnl_pct"), 0), 3) if trade.get("pnl_pct") is not None else None,
+                "reason": trade.get("reason", ""),
+            }
+            deals.append(deal)
+
+            bucket = daily_settlement.setdefault(
+                trade_date,
+                {
+                    "buy_amount": 0.0,
+                    "sell_amount": 0.0,
+                    "commission": 0.0,
+                    "stamp_duty": 0.0,
+                    "transfer_fee": 0.0,
+                    "total_fee": 0.0,
+                    "net_amount": 0.0,
+                    "realized_pnl": 0.0,
+                    "deal_count": 0.0,
+                },
+            )
+            if side == "BUY":
+                bucket["buy_amount"] += amount
+            else:
+                bucket["sell_amount"] += amount
+            bucket["commission"] += fees["commission"]
+            bucket["stamp_duty"] += fees["stamp_duty"]
+            bucket["transfer_fee"] += fees["transfer_fee"]
+            bucket["total_fee"] += fees["total_fee"]
+            bucket["net_amount"] += cash_flow
+            bucket["realized_pnl"] += deal_realized
+            bucket["deal_count"] += 1
+
+        positions = []
+        position_cost = 0.0
+        market_value = 0.0
+        for code, lots in lots_by_code.items():
+            active_lots = [lot for lot in lots if safe_float(lot.get("qty"), 0) > 0]
+            if not active_lots:
+                continue
+            qty = sum(safe_float(lot.get("qty"), 0) for lot in active_lots)
+            cost_amount = sum(safe_float(lot.get("cost_amount"), 0) for lot in active_lots)
+            first_lot = active_lots[0]
+            price_row = self.latest_price(code, as_of=as_of)
+            last_price = safe_float((price_row or {}).get("close"), safe_float(first_lot.get("price"), 0))
+            cost_price = cost_amount / qty if qty > 0 else last_price
+            value = qty * last_price
+            pnl_amount = value - cost_amount
+            position_cost += cost_amount
+            market_value += value
+            positions.append(
+                {
+                    "code": code,
+                    "name": first_lot.get("name") or self.universe.name(code),
+                    "qty": int(qty) if float(qty).is_integer() else round(qty, 2),
+                    "available_qty": int(qty) if float(qty).is_integer() else round(qty, 2),
+                    "entry_price": round(safe_float(first_lot.get("price"), cost_price), 3),
+                    "cost_price": round(cost_price, 3),
+                    "cost_amount": round(cost_amount, 2),
+                    "last_price": round(last_price, 3),
+                    "last_date": (price_row or {}).get("date", as_of),
+                    "market_value": round(value, 2),
+                    "pnl_amount": round(pnl_amount, 2),
+                    "pnl_pct": round(pnl_amount / cost_amount * 100, 3) if cost_amount > 0 else 0.0,
+                    "buy_score": safe_float(first_lot.get("buy_score"), 0),
+                    "reason": first_lot.get("reason", ""),
+                }
+            )
+
+        settlement_rows = [
+            {
+                "date": date,
+                "buy_amount": round(item["buy_amount"], 2),
+                "sell_amount": round(item["sell_amount"], 2),
+                "commission": round(item["commission"], 2),
+                "stamp_duty": round(item["stamp_duty"], 2),
+                "transfer_fee": round(item["transfer_fee"], 2),
+                "total_fee": round(item["total_fee"], 2),
+                "net_amount": round(item["net_amount"], 2),
+                "realized_pnl": round(item["realized_pnl"], 2),
+                "deal_count": int(item["deal_count"]),
+            }
+            for date, item in daily_settlement.items()
+        ]
+        deals.sort(key=lambda item: (item.get("time", ""), item.get("deal_id", "")), reverse=True)
+        settlement_rows.sort(key=lambda item: item["date"], reverse=True)
+        today_deals = [deal for deal in deals if deal.get("date") == as_of]
+        total_asset = adjusted_cash + market_value
+        total_pnl = total_asset - initial_asset
+        if limit and limit > 0:
+            visible_deals = deals[:limit]
+            visible_settlements = settlement_rows[:limit]
+        else:
+            visible_deals = deals
+            visible_settlements = settlement_rows
+        return {
+            "status": "ok",
+            "as_of": as_of,
+            "account": {
+                "initial_cash": round(initial_asset, 2),
+                "total_asset": round(total_asset, 2),
+                "cash": round(adjusted_cash, 2),
+                "available_cash": round(max(0.0, adjusted_cash), 2),
+                "market_value": round(market_value, 2),
+                "position_cost": round(position_cost, 2),
+                "unrealized_pnl": round(market_value - position_cost, 2),
+                "realized_pnl": round(realized_pnl, 2),
+                "total_pnl": round(total_pnl, 2),
+                "return_pct": round(total_pnl / initial_asset * 100, 3) if initial_asset > 0 else 0.0,
+                "position_count": len(positions),
+                "deal_count": len(deals),
+                "total_fees": round(total_fees, 2),
+            },
+            "positions": positions,
+            "today_deals": today_deals if not limit else today_deals[:limit],
+            "history_deals": visible_deals,
+            "delivery_records": visible_deals,
+            "daily_settlements": visible_settlements,
+        }
 
     def trading_account(self, as_of: Optional[str] = None, limit: int = 500) -> Dict[str, Any]:
         as_of = as_of or self.latest_event_date()
