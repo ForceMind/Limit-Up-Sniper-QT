@@ -107,6 +107,7 @@ cp .env.example .env
 - `STRATEGY_REPLAY_ENABLED`、`STRATEGY_REPLAY_START_DATE`、`STRATEGY_REPLAY_INTERVAL_SECONDS`、`STRATEGY_REPLAY_MODE`：策略复盘调度，默认从 `2026-03-01` 开始，每小时跑一次分时复盘
 - `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
 - `QT_WRITE_KLINE_JSON_CACHE`：默认 `false`。日 K 新数据直接写入 SQLite；只有需要兼容旧脚本时才额外写回 `kline_day_cache/*.json`
+- `QT_SKIP_AUTO_MIGRATE`：默认 `false`。`qt install` 和 `qt update` 会自动把当前数据目录里的 JSON/CSV 合并进 SQLite；临时不想迁移时设为 `true`
 
 首次部署时会自动生成随机后台入口路径，不再公开固定 `/admin`。先在服务器执行 `qt admin-path` 或 `bash qt.sh admin-path` 查看入口，再访问该入口初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
@@ -220,7 +221,7 @@ bash qt.sh install
 bash qt.sh
 ```
 
-`bash qt.sh` 等同于 `bash qt.sh update`，会先备份 `backend/data`，再 `git pull --ff-only`、安装依赖并重启服务。
+`bash qt.sh` 等同于 `bash qt.sh update`，会先备份当前运行数据目录，再 `git pull --ff-only`、安装依赖、自动整理 SQLite 并重启服务。自动迁移使用 `INSERT OR REPLACE` 和业务主键去重，重复更新不会整库覆盖。
 
 常用运维命令：
 

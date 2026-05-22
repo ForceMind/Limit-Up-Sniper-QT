@@ -93,6 +93,14 @@ ensure_data_dir() {
   mkdir -p "$ROOT_DIR/backend/data"
 }
 
+runtime_data_dir() {
+  local data_dir="${QUANT_DATA_DIR:-$ROOT_DIR/backend/data}"
+  if [[ "$data_dir" != /* ]]; then
+    data_dir="$ROOT_DIR/$data_dir"
+  fi
+  printf '%s\n' "$data_dir"
+}
+
 venv_python() {
   echo "$VENV_DIR/bin/python"
 }
@@ -113,6 +121,31 @@ run_as_root() {
   else
     return 1
   fi
+}
+
+auto_migrate_sqlite() {
+  local skip="${QT_SKIP_AUTO_MIGRATE:-0}"
+  if [[ "$skip" == "1" || "$skip" == "true" || "$skip" == "TRUE" || "$skip" == "yes" || "$skip" == "YES" ]]; then
+    warn "已跳过 SQLite 自动迁移：QT_SKIP_AUTO_MIGRATE=$skip"
+    return 0
+  fi
+
+  local script="$ROOT_DIR/scripts/migrate_data_to_sqlite.py"
+  if [[ ! -f "$script" ]]; then
+    warn "未找到 SQLite 迁移脚本，跳过自动迁移"
+    return 0
+  fi
+
+  local data_dir db_file python_bin
+  data_dir="$(runtime_data_dir)"
+  db_file="$data_dir/quant_data.sqlite3"
+  python_bin="$(check_python_bin)"
+  mkdir -p "$data_dir"
+
+  section "SQLite 数据自动迁移"
+  info "数据目录：$data_dir"
+  "$python_bin" "$script" --source "$data_dir" --db "$db_file"
+  success "SQLite 数据自动迁移完成：$db_file"
 }
 
 refresh_systemd_service() {

@@ -99,7 +99,7 @@ cd /opt/qt
 bash qt.sh
 ```
 
-`bash qt.sh` 等同于 `bash qt.sh update`，会先备份 `backend/data`，再执行 `git pull --ff-only`、更新依赖并重启服务。
+`bash qt.sh` 等同于 `bash qt.sh update`，会先备份当前运行数据目录，再执行 `git pull --ff-only`、更新依赖、自动把 JSON/CSV 运行数据合并进 SQLite，并重启服务。自动迁移可以重复执行，不会整库覆盖；如需临时跳过，设置 `QT_SKIP_AUTO_MIGRATE=true`。
 
 ## 重启服务
 
@@ -234,6 +234,8 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 ```
 
 `backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。日 K 的长期主存储是 SQLite 的 `market_daily_bars` 表，旧的 `kline_day_cache/*.json` 只作为兼容缓存和迁移来源。
+
+`qt install` 和 `qt update` 会自动执行同一套迁移逻辑。手动命令主要用于指定其他旧数据目录，或在服务器外单独整理数据包。
 
 迁移服务器时优先使用后台页面，不要通过 GitHub 上传真实数据：
 

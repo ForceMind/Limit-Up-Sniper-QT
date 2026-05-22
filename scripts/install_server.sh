@@ -34,6 +34,8 @@ fi
 "$(venv_pip)" install --upgrade pip
 "$(venv_pip)" install -r "$ROOT_DIR/backend/requirements.txt"
 
+auto_migrate_sqlite
+
 mkdir -p "$ROOT_DIR/backend/data" "$BACKUP_ROOT"
 
 section "后台入口"

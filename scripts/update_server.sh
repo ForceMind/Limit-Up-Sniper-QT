@@ -34,6 +34,8 @@ fi
 "$(venv_pip)" install --upgrade pip
 "$(venv_pip)" install -r "$ROOT_DIR/backend/requirements.txt"
 
+auto_migrate_sqlite
+
 ensure_nginx_upload_limit || true
 
 bash "$SCRIPT_DIR/restart_server.sh"

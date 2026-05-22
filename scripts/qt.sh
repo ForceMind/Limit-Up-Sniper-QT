@@ -31,7 +31,7 @@ usage() {
 
 直接命令：
   qt install                 首次部署：安装依赖并注册 systemd 服务
-  qt update                  一键更新：备份数据、拉取代码、更新依赖、重启服务
+  qt update                  一键更新：备份数据、拉取代码、更新依赖、自动迁移SQLite、重启服务
   qt version                 查看前后端版本并验证模块接口
   qt restart                 重启服务
   qt stop                    停止服务

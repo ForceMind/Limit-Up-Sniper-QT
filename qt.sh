@@ -33,7 +33,7 @@ usage() {
 
 常用命令：
   install | deploy | init     第一次部署
-  update  | upgrade | up      备份数据、拉取代码、更新依赖、重启服务
+  update  | upgrade | up      备份数据、拉取代码、更新依赖、自动迁移SQLite、重启服务
   version | verify            查看前后端版本并验证模块接口
   restart | start | reload    重启服务
   stop                        停止服务
