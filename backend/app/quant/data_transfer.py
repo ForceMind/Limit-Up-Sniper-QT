@@ -62,6 +62,9 @@ COPY_ONLY_IF_MISSING = {
     "trade_notification_state.json",
 }
 
+SAMPLE_CODES = {"600001", "600002"}
+SAMPLE_MARKERS = ("样例", "Fixture")
+
 BLOCKED_NAMES = {
     ".env",
     "auth.json",
@@ -198,6 +201,40 @@ def _write_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def _contains_sample_marker(value: Any) -> bool:
+    if isinstance(value, dict):
+        code = str(value.get("code") or value.get("stock_code") or "").strip()
+        if code in SAMPLE_CODES:
+            return True
+        return any(_contains_sample_marker(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_sample_marker(item) for item in value)
+    if isinstance(value, str):
+        return any(marker in value for marker in SAMPLE_MARKERS)
+    return False
+
+
+def is_sample_quant_state(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    positions = payload.get("positions") if isinstance(payload.get("positions"), list) else []
+    trades = payload.get("trades") if isinstance(payload.get("trades"), list) else []
+    return bool(_contains_sample_marker(positions) or _contains_sample_marker(trades))
+
+
+def clear_sample_quant_state(target_dir: Path = DATA_DIR) -> Dict[str, Any]:
+    state_file = target_dir / "quant_state.json"
+    state = _read_json(state_file, {})
+    if not is_sample_quant_state(state):
+        return {"status": "ok", "cleared": False, "message": "未发现样例持仓"}
+    cleaned = dict(state)
+    cleaned["positions"] = []
+    cleaned["trades"] = []
+    cleaned["sample_state_cleared_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+    _write_json(state_file, cleaned)
+    return {"status": "ok", "cleared": True, "state_file": str(state_file)}
+
+
 def _merge_list(file_name: str, existing: list[Any], incoming: list[Any]) -> tuple[list[Any], int]:
     merged: dict[str, Any] = {}
     for item in existing:
@@ -237,6 +274,14 @@ def _merge_dict_payload(file_name: str, existing: dict[str, Any], incoming: dict
 def _merge_json_file(target_file: Path, incoming_bytes: bytes) -> tuple[str, int]:
     file_name = target_file.name
     incoming = json.loads(incoming_bytes.decode("utf-8-sig"))
+    if file_name == "quant_state.json" and target_file.exists():
+        existing = _read_json(target_file, {})
+        if is_sample_quant_state(existing):
+            if isinstance(incoming, dict) and not is_sample_quant_state(incoming):
+                _write_json(target_file, incoming)
+                return "replaced_sample_state", 1
+            result = clear_sample_quant_state(target_file.parent)
+            return "cleared_sample_state", 1 if result.get("cleared") else 0
     if file_name in COPY_ONLY_IF_MISSING and target_file.exists():
         return "kept_existing", 0
     if not target_file.exists():
@@ -405,6 +450,7 @@ def import_data_package(package_file: Path, target_dir: Path = DATA_DIR) -> Dict
     imported = 0
     added_records = 0
     actions: dict[str, int] = {}
+    imported_names: set[str] = set()
     target_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(package_file, "r:*") as archive:
         for member in archive.getmembers():
@@ -422,7 +468,13 @@ def import_data_package(package_file: Path, target_dir: Path = DATA_DIR) -> Dict
                 action, added = _merge_member(target_file, rel_path, source.read())
             actions[action] = actions.get(action, 0) + 1
             added_records += int(added or 0)
+            imported_names.add(rel_path.name)
             imported += 1
+    data_like_names = imported_names - OPTIONAL_LOG_FILES
+    if "quant_state.json" not in imported_names and data_like_names:
+        result = clear_sample_quant_state(target_dir)
+        if result.get("cleared"):
+            actions["cleared_sample_state"] = actions.get("cleared_sample_state", 0) + 1
     return {
         "status": "ok",
         "imported_files": imported,

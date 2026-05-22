@@ -31,6 +31,7 @@ JOB_LABELS = {
     "admin_backup": "数据备份",
     "admin_data_export": "数据导出",
     "admin_data_import": "数据导入",
+    "admin_data_clear_sample": "清理样例",
     "admin_restart": "服务重启",
     "admin_config": "配置保存",
 }

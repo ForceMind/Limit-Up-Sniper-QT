@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.quant.access_audit import access_logs, record_access
 from app.quant.biying_sync import biying_minute_sync
-from app.quant.data_transfer import DataPackageError, create_safe_data_package, import_data_package
+from app.quant.data_transfer import DataPackageError, clear_sample_quant_state, create_safe_data_package, import_data_package
 from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine
 from app.quant.evolution import strategy_evolution
 from app.quant.jobs import job_manager
@@ -695,6 +695,15 @@ async def admin_data_import(request: Request, backup: bool = Query(default=True)
             upload_file.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+@app.post("/api/admin/data/clear_sample_state")
+def admin_clear_sample_state():
+    result = clear_sample_quant_state(DATA_DIR)
+    if result.get("cleared"):
+        _refresh_quant_caches()
+    job_manager._append_log("warning", "后台已检查并清理样例持仓", job="admin_data_clear_sample", stage="finish", payload=result)
+    return result
 
 
 @app.get("/api/admin/access_logs")

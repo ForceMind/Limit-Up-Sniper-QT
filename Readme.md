@@ -137,6 +137,8 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
 
+如果服务器以前跑过样例数据，上传后持仓仍显示“样例算力”，到后台 `运维` 点击 `清理样例持仓`，再运行 `立即AI分析` / `运行交易循环`。
+
 Windows 本机也可以用根目录脚本作为备用：
 
 ```powershell

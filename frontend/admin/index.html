@@ -862,6 +862,7 @@
               <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
               <button @click="downloadDataPackage" :disabled="downloadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
               <button @click="openDataImport" :disabled="uploadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '合并中' : '上传合并数据' }}</button>
+              <button @click="clearSampleState" :disabled="clearingSample" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ clearingSample ? '清理中' : '清理样例持仓' }}</button>
               <button @click="restartService" :disabled="restarting" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
               <input ref="dataPackageInput" type="file" accept=".tar.gz,.tgz,application/gzip" class="hidden" @change="uploadDataPackage">
             </div>
@@ -919,6 +920,7 @@
             <option value="admin_backup">备份</option>
             <option value="admin_data_export">导出</option>
             <option value="admin_data_import">导入</option>
+            <option value="admin_data_clear_sample">样例</option>
             <option value="admin_restart">重启</option>
           </select>
           <select v-model="logLevel" @change="fetchLogs" class="h-8 px-2 bg-[#161c22] border border-neutral-700 text-neutral-100">
@@ -1010,6 +1012,7 @@
           backuping: false,
           downloadingData: false,
           uploadingData: false,
+          clearingSample: false,
           restarting: false,
           strategySaving: false,
           fitting: false,
@@ -1598,6 +1601,19 @@
             this.uploadingData = false;
           }
         },
+        async clearSampleState() {
+          if (!window.confirm('只会清理样例算力/样例电力这类样例持仓，不会清真实股票持仓。确认继续吗？')) return;
+          this.clearingSample = true;
+          try {
+            this.adminResult = await this.api('/api/admin/data/clear_sample_state', { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.clearingSample = false;
+          }
+        },
         async restartService() {
           this.restarting = true;
           try {
@@ -1824,6 +1840,7 @@
             admin_backup: '数据备份',
             admin_data_export: '数据导出',
             admin_data_import: '数据导入',
+            admin_data_clear_sample: '清理样例',
             admin_restart: '服务重启',
           };
           return labels[String(job || '')] || '系统';
