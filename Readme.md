@@ -132,10 +132,10 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 ```text
 /admin -> 运维 -> 下载数据包
-/admin -> 运维 -> 上传导入数据
+/admin -> 运维 -> 上传合并数据
 ```
 
-迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传导入即可。导入前服务器会自动备份当前 `backend/data`。
+迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
 
 Windows 本机也可以用根目录脚本作为备用：
 

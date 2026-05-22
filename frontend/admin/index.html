@@ -861,7 +861,7 @@
               <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
               <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
               <button @click="downloadDataPackage" :disabled="downloadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
-              <button @click="openDataImport" :disabled="uploadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '导入中' : '上传导入数据' }}</button>
+              <button @click="openDataImport" :disabled="uploadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '合并中' : '上传合并数据' }}</button>
               <button @click="restartService" :disabled="restarting" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
               <input ref="dataPackageInput" type="file" accept=".tar.gz,.tgz,application/gzip" class="hidden" @change="uploadDataPackage">
             </div>
@@ -1578,7 +1578,7 @@
           const file = event?.target?.files?.[0];
           if (event?.target) event.target.value = '';
           if (!file) return;
-          if (!window.confirm('导入前服务器会自动备份当前数据，确认上传并覆盖运行数据吗？')) return;
+          if (!window.confirm('导入前服务器会自动备份当前数据；上传包会按新闻、行情、事件等类型合并，不会直接覆盖服务器数据。确认继续吗？')) return;
           this.uploadingData = true;
           try {
             const headers = new Headers({ 'Content-Type': 'application/gzip' });

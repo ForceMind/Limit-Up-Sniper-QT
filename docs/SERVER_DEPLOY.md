@@ -221,10 +221,10 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 ```text
 旧服务器 /admin -> 运维 -> 下载数据包
-新服务器 /admin -> 运维 -> 上传导入数据
+新服务器 /admin -> 运维 -> 上传合并数据
 ```
 
-导入前新服务器会自动备份当前 `backend/data`。如果需要从 Windows 本机直接推送到服务器，也可以在项目根目录运行：
+导入前新服务器会自动备份当前 `backend/data`。导入不是整包覆盖，而是按数据类型去重合并；上传包可以只包含新闻、只包含行情或只包含 SQLite。账号、密钥和运行配置不会被导入。如果需要从 Windows 本机直接推送到服务器，也可以在项目根目录运行：
 
 ```powershell
 .\upload-data.ps1 -Server root@服务器IP
