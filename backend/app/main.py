@@ -1200,6 +1200,7 @@ def quant_ai_failures(limit: int = Query(default=100, ge=1, le=500)):
     return ai_failures(limit=limit)
 
 
+@app.get("/api/quant/backtest")
 @app.post("/api/quant/backtest")
 def quant_backtest(
     as_of: Optional[str] = Query(default=None),
