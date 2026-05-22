@@ -1111,6 +1111,61 @@
         </div>
       </aside>
     </div>
+
+    <div v-if="showImportDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+      <div class="w-full max-w-2xl rounded-lg bg-white shadow-2xl border border-neutral-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-neutral-200 flex items-center justify-between gap-3">
+          <div>
+            <div class="font-semibold">上传合并数据</div>
+            <div class="text-xs text-neutral-500 mt-1">{{ importFileName || '数据迁移包' }}</div>
+          </div>
+          <button
+            v-if="!uploadingData"
+            @click="showImportDialog = false"
+            class="h-8 px-3 border border-neutral-300 bg-white text-sm hover:bg-neutral-50"
+          >关闭</button>
+        </div>
+        <div class="p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <div class="font-semibold">{{ importJob.message || '等待开始' }}</div>
+            <div class="text-neutral-500">{{ importStatusText(importJob.status) }} · {{ importProgress }}%</div>
+          </div>
+          <div class="h-3 bg-neutral-100 rounded-full overflow-hidden">
+            <div class="h-full bg-neutral-900 transition-all" :style="{ width: `${importProgress}%` }"></div>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div class="border border-neutral-200 p-3">
+              <div class="text-xs text-neutral-500">阶段</div>
+              <div class="mt-1 font-semibold">{{ importStageText(importJob.stage) }}</div>
+            </div>
+            <div class="border border-neutral-200 p-3">
+              <div class="text-xs text-neutral-500">文件</div>
+              <div class="mt-1 font-semibold">{{ importJob.imported_files || 0 }} / {{ importJob.total_files || ((importJob.validation || {}).files) || 0 }}</div>
+            </div>
+            <div class="border border-neutral-200 p-3">
+              <div class="text-xs text-neutral-500">新增/更新记录</div>
+              <div class="mt-1 font-semibold">{{ qty(importJob.added_records || ((importJob.result || {}).added_records)) }}</div>
+            </div>
+            <div class="border border-neutral-200 p-3">
+              <div class="text-xs text-neutral-500">上传大小</div>
+              <div class="mt-1 font-semibold">{{ formatBytes(importJob.received_bytes || ((importJob.validation || {}).payload_bytes)) }}</div>
+            </div>
+          </div>
+          <div v-if="importJob.current_file || importJob.sqlite_table" class="text-xs text-neutral-500">
+            当前：{{ importJob.sqlite_table ? `SQLite 表 ${importJob.sqlite_table}` : importJob.current_file }}
+          </div>
+          <div class="bg-neutral-950 text-neutral-100 rounded-md p-3 max-h-52 overflow-auto text-xs space-y-1">
+            <div v-for="item in importLogs" :key="`${item.ts}-${item.message}`">
+              <span class="text-neutral-500">{{ shortTime(item.ts) }}</span>
+              <span class="ml-2">{{ item.message }}</span>
+            </div>
+            <div v-if="!importLogs.length" class="text-neutral-500">暂无进度日志</div>
+          </div>
+          <div v-if="importJob.error" class="text-sm text-red-700">{{ importJob.error }}</div>
+          <div v-if="uploadingData" class="text-xs text-neutral-500">合并任务在服务器后台运行；页面会自动刷新状态。</div>
+        </div>
+      </div>
+    </div>
     </template>
   </div>
 
@@ -1181,6 +1236,10 @@
           backuping: false,
           downloadingData: false,
           uploadingData: false,
+          showImportDialog: false,
+          importJob: {},
+          importFileName: '',
+          importPollTimer: null,
           clearingSample: false,
           restarting: false,
           strategySaving: false,
@@ -1330,6 +1389,15 @@
           const dates = this.biyingStatus.cache_dates || {};
           return Object.values(dates).reduce((sum, value) => sum + Number(value || 0), 0);
         },
+        importProgress() {
+          const value = Number((this.importJob || {}).progress || 0);
+          if (!Number.isFinite(value)) return 0;
+          return Math.max(0, Math.min(100, Math.round(value)));
+        },
+        importLogs() {
+          const logs = (this.importJob || {}).logs || [];
+          return Array.isArray(logs) ? logs.slice(-30) : [];
+        },
       },
       watch: {
         activeTab(value) {
@@ -1355,6 +1423,7 @@
       },
       beforeUnmount() {
         this.stopTimers();
+        this.stopImportPolling();
         window.removeEventListener('resize', this.resizeChart);
       },
       methods: {
@@ -1824,28 +1893,119 @@
         openDataImport() {
           if (this.$refs.dataPackageInput) this.$refs.dataPackageInput.click();
         },
+        stopImportPolling() {
+          if (this.importPollTimer) {
+            clearInterval(this.importPollTimer);
+            this.importPollTimer = null;
+          }
+        },
+        startImportPolling(jobId) {
+          this.stopImportPolling();
+          this.pollDataImportJob(jobId);
+          this.importPollTimer = setInterval(() => this.pollDataImportJob(jobId), 1500);
+        },
+        async pollDataImportJob(jobId) {
+          if (!jobId) return;
+          try {
+            const result = await this.api(`/api/admin/data/import/${jobId}`);
+            const job = result.job || {};
+            this.importJob = { ...this.importJob, ...job };
+            if (job.status === 'done' || job.status === 'failed') {
+              this.stopImportPolling();
+              this.uploadingData = false;
+              this.adminResult = job.result || job;
+              await this.refreshAll(true);
+              if (!this.liveConnected) await this.fetchLogs();
+            }
+          } catch (err) {
+            this.stopImportPolling();
+            this.uploadingData = false;
+            this.importJob = {
+              ...this.importJob,
+              status: 'failed',
+              stage: 'failed',
+              progress: 100,
+              message: '读取合并进度失败',
+              error: String(err.message || err),
+            };
+          }
+        },
+        uploadDataPackageRequest(file) {
+          return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/admin/data/import?backup=true');
+            xhr.setRequestHeader('Content-Type', 'application/gzip');
+            if (this.auth.token) xhr.setRequestHeader('Authorization', `Bearer ${this.auth.token}`);
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              const uploadPct = Math.max(1, Math.min(14, Math.round((event.loaded / event.total) * 14)));
+              this.importJob = {
+                ...this.importJob,
+                status: 'uploading',
+                stage: 'uploading',
+                progress: uploadPct,
+                message: `正在上传数据包 ${uploadPct}%`,
+                received_bytes: event.loaded,
+              };
+            };
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  resolve(JSON.parse(xhr.responseText || '{}'));
+                } catch (err) {
+                  reject(new Error('服务器返回的导入任务响应不是 JSON'));
+                }
+              } else {
+                reject(new Error(xhr.responseText || `上传失败：HTTP ${xhr.status}`));
+              }
+            };
+            xhr.onerror = () => reject(new Error('上传请求失败，请检查服务器连接'));
+            xhr.send(file);
+          });
+        },
         async uploadDataPackage(event) {
           const file = event?.target?.files?.[0];
           if (event?.target) event.target.value = '';
           if (!file) return;
           if (!window.confirm('导入前服务器会自动备份当前数据；上传包会按新闻、行情、事件等类型合并，不会直接覆盖服务器数据。确认继续吗？')) return;
           this.uploadingData = true;
+          this.showImportDialog = true;
+          this.importFileName = file.name;
+          this.importJob = {
+            status: 'uploading',
+            stage: 'uploading',
+            progress: 5,
+            message: '正在上传数据包',
+            received_bytes: file.size,
+            logs: [{ ts: new Date().toISOString(), message: '正在上传数据包', stage: 'uploading' }],
+          };
           try {
-            const headers = new Headers({ 'Content-Type': 'application/gzip' });
-            if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
-            const res = await fetch('/api/admin/data/import?backup=true', {
-              method: 'POST',
-              headers,
-              body: file,
-            });
-            if (!res.ok) throw new Error(await res.text());
-            this.adminResult = await res.json();
-            await this.refreshAll();
-            if (!this.liveConnected) await this.fetchLogs();
+            const accepted = await this.uploadDataPackageRequest(file);
+            this.importJob = {
+              ...this.importJob,
+              ...accepted,
+              status: 'queued',
+              stage: 'queued',
+              progress: 15,
+              message: accepted.message || '数据包已上传，后台正在合并',
+              logs: [
+                ...((this.importJob.logs || [])),
+                { ts: new Date().toISOString(), message: accepted.message || '数据包已上传，后台正在合并', stage: 'queued' },
+              ],
+            };
+            this.adminResult = accepted;
+            this.startImportPolling(accepted.job_id);
           } catch (err) {
             this.clientError = String(err.message || err);
-          } finally {
             this.uploadingData = false;
+            this.importJob = {
+              ...this.importJob,
+              status: 'failed',
+              stage: 'failed',
+              progress: 100,
+              message: '上传或启动合并失败',
+              error: String(err.message || err),
+            };
           }
         },
         async clearSampleState() {
@@ -2121,6 +2281,29 @@
           if (text === 'failed') return 'bg-red-100 text-red-800';
           return 'bg-neutral-100 text-neutral-700';
         },
+        importStatusText(status) {
+          const labels = {
+            uploading: '上传中',
+            queued: '排队中',
+            running: '运行中',
+            done: '已完成',
+            failed: '失败',
+          };
+          return labels[String(status || '')] || '等待中';
+        },
+        importStageText(stage) {
+          const labels = {
+            uploading: '上传数据包',
+            queued: '等待合并',
+            backup: '备份现有数据',
+            importing: '合并文件',
+            sqlite_merge: '合并 SQLite',
+            refresh: '刷新缓存',
+            done: '完成',
+            failed: '失败',
+          };
+          return labels[String(stage || '')] || '准备中';
+        },
         actionClass(action) {
           const text = String(action || '');
           if (text.includes('买入')) return 'bg-red-100 text-red-700';
@@ -2195,6 +2378,12 @@
             blocked: '已拦截',
             unavailable: '不可用',
             scheduled: '已安排',
+            backup: '备份',
+            importing: '合并',
+            sqlite_merge: '合并 SQLite',
+            refresh: '刷新缓存',
+            done: '完成',
+            failed: '失败',
           };
           return labels[String(stage || '')] || '-';
         },
@@ -2211,6 +2400,14 @@
         money(value) {
           const n = Number(value || 0);
           return Number.isFinite(n) ? n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '-';
+        },
+        formatBytes(value) {
+          const n = Number(value || 0);
+          if (!Number.isFinite(n) || n <= 0) return '-';
+          if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+          if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+          if (n >= 1024) return `${(n / 1024).toFixed(2)} KB`;
+          return `${n} B`;
         },
         qty(value) {
           const n = Number(value || 0);

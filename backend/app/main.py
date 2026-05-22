@@ -7,7 +7,9 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -21,7 +23,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.quant.access_audit import access_logs, record_access
 from app.quant.biying_sync import biying_minute_sync
-from app.quant.data_transfer import DataPackageError, clear_sample_quant_state, create_safe_data_package, import_data_package
+from app.quant.data_transfer import (
+    DataPackageError,
+    clear_sample_quant_state,
+    create_safe_data_package,
+    import_data_package,
+    validate_data_package,
+)
 from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine, safe_float
 from app.quant.evolution import strategy_evolution
 from app.quant.lhb_sync import lhb_status
@@ -127,6 +135,151 @@ def _refresh_quant_caches() -> None:
         quant_engine.clear_market_cache()
     except Exception:
         pass
+
+
+DATA_IMPORT_JOBS: Dict[str, Dict[str, Any]] = {}
+DATA_IMPORT_JOBS_LOCK = threading.Lock()
+
+
+def _now_shanghai_iso() -> str:
+    return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+
+
+def _data_import_job_snapshot(job_id: str) -> Dict[str, Any]:
+    with DATA_IMPORT_JOBS_LOCK:
+        job = dict(DATA_IMPORT_JOBS.get(job_id) or {})
+        logs = job.get("logs") if isinstance(job.get("logs"), list) else []
+        job["logs"] = list(logs)[-80:]
+        return job
+
+
+def _update_data_import_job(job_id: str, **updates: Any) -> Dict[str, Any]:
+    with DATA_IMPORT_JOBS_LOCK:
+        job = DATA_IMPORT_JOBS.setdefault(
+            job_id,
+            {
+                "job_id": job_id,
+                "status": "queued",
+                "stage": "queued",
+                "progress": 0,
+                "message": "等待开始合并",
+                "logs": [],
+                "created_at": _now_shanghai_iso(),
+            },
+        )
+        log_message = str(updates.pop("log_message", "") or "").strip()
+        job.update({key: value for key, value in updates.items() if value is not None})
+        job["updated_at"] = _now_shanghai_iso()
+        if log_message:
+            logs = job.setdefault("logs", [])
+            if isinstance(logs, list):
+                logs.append({"ts": job["updated_at"], "message": log_message, "stage": job.get("stage")})
+                del logs[:-80]
+        return dict(job)
+
+
+def _data_import_progress(job_id: str, payload: Dict[str, Any]) -> None:
+    total_files = int(safe_float(payload.get("total_files"), 0))
+    imported_files = int(safe_float(payload.get("imported_files"), 0))
+    sqlite_table_count = int(safe_float(payload.get("sqlite_table_count"), 0))
+    sqlite_table_index = int(safe_float(payload.get("sqlite_table_index"), 0))
+    progress = 35
+    if total_files > 0:
+        progress = 35 + int(min(58, imported_files / total_files * 58))
+    if sqlite_table_count > 0:
+        progress = max(progress, 35 + int(min(58, sqlite_table_index / sqlite_table_count * 58)))
+    message = str(payload.get("message") or "正在合并数据")
+    _update_data_import_job(
+        job_id,
+        status="running",
+        stage=str(payload.get("stage") or "importing"),
+        progress=min(93, max(35, progress)),
+        message=message,
+        imported_files=imported_files or None,
+        total_files=total_files or None,
+        current_file=payload.get("current_file"),
+        sqlite_table=payload.get("sqlite_table"),
+        sqlite_table_index=sqlite_table_index or None,
+        sqlite_table_count=sqlite_table_count or None,
+        added_records=payload.get("added_records"),
+        log_message=message,
+    )
+
+
+def _run_data_import_job(job_id: str, upload_file: Path, received: int, backup: bool) -> None:
+    backup_result: Dict[str, Any] = {}
+    try:
+        _update_data_import_job(
+            job_id,
+            status="running",
+            stage="backup",
+            progress=20,
+            message="正在备份服务器现有数据",
+            log_message="正在备份服务器现有数据",
+        )
+        if backup:
+            backup_result = _create_data_backup()
+            if backup_result.get("status") != "ok":
+                raise RuntimeError(f"导入前备份失败：{backup_result.get('message') or 'unknown'}")
+        else:
+            _update_data_import_job(job_id, backup_skipped=True)
+        _update_data_import_job(
+            job_id,
+            stage="importing",
+            progress=32,
+            message="备份完成，开始合并上传数据",
+            backup=backup_result,
+            log_message="备份完成，开始合并上传数据",
+        )
+        result = import_data_package(
+            upload_file,
+            DATA_DIR,
+            progress=lambda payload: _data_import_progress(job_id, payload),
+        )
+        _update_data_import_job(
+            job_id,
+            stage="refresh",
+            progress=96,
+            message="数据已合并，正在刷新量化缓存",
+            result=result,
+            backup=backup_result,
+            received_bytes=received,
+            log_message="数据已合并，正在刷新量化缓存",
+        )
+        _refresh_quant_caches()
+        result["backup"] = backup_result
+        result["received_bytes"] = received
+        _update_data_import_job(
+            job_id,
+            status="done",
+            stage="done",
+            progress=100,
+            message="上传数据已合并完成",
+            result=result,
+            backup=backup_result,
+            received_bytes=received,
+            finished_at=_now_shanghai_iso(),
+            log_message="上传数据已合并完成",
+        )
+        job_manager._append_log("warning", "后台已导入数据迁移包", job="admin_data_import", stage="finish", payload=result)
+    except Exception as exc:
+        payload = {"error": str(exc), "job_id": job_id}
+        _update_data_import_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            progress=100,
+            message=f"数据合并失败：{exc}",
+            error=str(exc),
+            finished_at=_now_shanghai_iso(),
+            log_message=f"数据合并失败：{exc}",
+        )
+        job_manager._append_log("error", "后台数据导入失败", job="admin_data_import", stage="failed", payload=payload)
+    finally:
+        try:
+            upload_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _json_fingerprint(payload: Any) -> str:
@@ -1023,13 +1176,21 @@ def admin_data_export(include_logs: bool = Query(default=False)):
     )
 
 
+@app.get("/api/admin/data/import/{job_id}")
+def admin_data_import_status(job_id: str):
+    job = _data_import_job_snapshot(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="data import job not found")
+    return {"status": "ok", "job": job}
+
+
 @app.post("/api/admin/data/import")
-async def admin_data_import(request: Request, backup: bool = Query(default=True)):
+async def admin_data_import(request: Request, background_tasks: BackgroundTasks, backup: bool = Query(default=True)):
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     max_bytes = int(max(1.0, _env_float("QT_DATA_UPLOAD_MAX_MB", 1024.0)) * 1024 * 1024)
     upload_fd, upload_name = tempfile.mkstemp(prefix="qt_data_upload_", suffix=".tar.gz", dir=str(BACKUP_DIR))
     os.close(upload_fd)
-    upload_file = Path(upload_name)
+    upload_file: Optional[Path] = Path(upload_name)
     received = 0
     try:
         with upload_file.open("wb") as handle:
@@ -1042,25 +1203,37 @@ async def admin_data_import(request: Request, backup: bool = Query(default=True)
                 handle.write(chunk)
         if received <= 0:
             raise HTTPException(status_code=400, detail="上传文件为空")
-        backup_result: Dict[str, Any] = {}
-        if backup:
-            backup_result = _create_data_backup()
-            if backup_result.get("status") != "ok":
-                raise HTTPException(status_code=500, detail=f"导入前备份失败：{backup_result.get('message') or 'unknown'}")
-        result = await asyncio.to_thread(import_data_package, upload_file, DATA_DIR)
-        _refresh_quant_caches()
-        result["backup"] = backup_result
-        result["received_bytes"] = received
-        job_manager._append_log("warning", "后台已导入数据迁移包", job="admin_data_import", stage="finish", payload=result)
-        return result
+        validation = validate_data_package(upload_file)
+        job_id = uuid.uuid4().hex[:16]
+        _update_data_import_job(
+            job_id,
+            status="queued",
+            stage="queued",
+            progress=15,
+            message="数据包已上传，等待后台合并",
+            received_bytes=received,
+            validation=validation,
+            upload_file=str(upload_file),
+            log_message="数据包已上传，等待后台合并",
+        )
+        background_tasks.add_task(_run_data_import_job, job_id, upload_file, received, backup)
+        upload_file = None
+        return {
+            "status": "accepted",
+            "job_id": job_id,
+            "message": "数据包已上传，后台正在合并；请在进度浮窗查看状态",
+            "received_bytes": received,
+            "validation": validation,
+        }
     except DataPackageError as exc:
         job_manager._append_log("error", "后台数据导入被拒绝", job="admin_data_import", stage="rejected", payload={"error": str(exc)})
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        try:
-            upload_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if upload_file is not None:
+            try:
+                upload_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @app.post("/api/admin/data/clear_sample_state")

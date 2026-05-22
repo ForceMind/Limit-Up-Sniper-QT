@@ -10,7 +10,7 @@ import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable
 from zoneinfo import ZoneInfo
 
 from app.quant.engine import DATA_DIR
@@ -79,6 +79,9 @@ BLOCKED_NAMES = {
 
 class DataPackageError(ValueError):
     pass
+
+
+ProgressCallback = Callable[[Dict[str, Any]], None]
 
 
 def _now_stamp() -> str:
@@ -353,7 +356,7 @@ def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes) -> tuple[str, int]:
+def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes, progress: ProgressCallback | None = None) -> tuple[str, int]:
     if not target_file.exists():
         target_file.write_bytes(incoming_bytes)
         return "created", 1
@@ -370,7 +373,18 @@ def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes) -> tuple[str, i
                 for row in target.execute("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
             ]
             changed = 0
-            for table in source_tables:
+            total_tables = len(source_tables)
+            for index, table in enumerate(source_tables, start=1):
+                if progress:
+                    progress(
+                        {
+                            "stage": "sqlite_merge",
+                            "sqlite_table": table,
+                            "sqlite_table_index": index,
+                            "sqlite_table_count": total_tables,
+                            "message": f"正在合并 SQLite 表 {table} ({index}/{total_tables})",
+                        }
+                    )
                 table_q = _quote_identifier(table)
                 target_exists = target.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
                 if not target_exists:
@@ -386,6 +400,17 @@ def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes) -> tuple[str, i
                 before = target.total_changes
                 target.execute(f"INSERT OR REPLACE INTO {table_q} ({cols_sql}) SELECT {cols_sql} FROM incoming.{table_q}")
                 changed += target.total_changes - before
+                if progress:
+                    progress(
+                        {
+                            "stage": "sqlite_merge",
+                            "sqlite_table": table,
+                            "sqlite_table_index": index,
+                            "sqlite_table_count": total_tables,
+                            "sqlite_changed_rows": changed,
+                            "message": f"已合并 SQLite 表 {table} ({index}/{total_tables})",
+                        }
+                    )
             target.commit()
             target.execute("DETACH DATABASE incoming")
             return "merged", changed
@@ -398,9 +423,14 @@ def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes) -> tuple[str, i
             pass
 
 
-def _merge_member(target_file: Path, rel_path: PurePosixPath, incoming_bytes: bytes) -> tuple[str, int]:
+def _merge_member(
+    target_file: Path,
+    rel_path: PurePosixPath,
+    incoming_bytes: bytes,
+    progress: ProgressCallback | None = None,
+) -> tuple[str, int]:
     if target_file.name == "quant_data.sqlite3":
-        return _merge_sqlite_file(target_file, incoming_bytes)
+        return _merge_sqlite_file(target_file, incoming_bytes, progress=progress)
     if target_file.suffix.lower() == ".json":
         return _merge_json_file(target_file, incoming_bytes)
     if target_file.suffix.lower() == ".csv":
@@ -444,7 +474,11 @@ def validate_data_package(package_file: Path) -> Dict[str, Any]:
     return {"files": files, "payload_bytes": total_size}
 
 
-def import_data_package(package_file: Path, target_dir: Path = DATA_DIR) -> Dict[str, Any]:
+def import_data_package(
+    package_file: Path,
+    target_dir: Path = DATA_DIR,
+    progress: ProgressCallback | None = None,
+) -> Dict[str, Any]:
     target_dir = target_dir.resolve()
     validation = validate_data_package(package_file)
     imported = 0
@@ -452,6 +486,16 @@ def import_data_package(package_file: Path, target_dir: Path = DATA_DIR) -> Dict
     actions: dict[str, int] = {}
     imported_names: set[str] = set()
     target_dir.mkdir(parents=True, exist_ok=True)
+    if progress:
+        progress(
+            {
+                "stage": "importing",
+                "imported_files": 0,
+                "total_files": validation["files"],
+                "payload_bytes": validation["payload_bytes"],
+                "message": "数据包校验通过，开始合并数据",
+            }
+        )
     with tarfile.open(package_file, "r:*") as archive:
         for member in archive.getmembers():
             if member.isdir():
@@ -465,11 +509,33 @@ def import_data_package(package_file: Path, target_dir: Path = DATA_DIR) -> Dict
             if source is None:
                 continue
             with source:
-                action, added = _merge_member(target_file, rel_path, source.read())
+                if progress:
+                    progress(
+                        {
+                            "stage": "importing",
+                            "imported_files": imported,
+                            "total_files": validation["files"],
+                            "current_file": str(rel_path),
+                            "message": f"正在合并 {rel_path}",
+                        }
+                    )
+                action, added = _merge_member(target_file, rel_path, source.read(), progress=progress)
             actions[action] = actions.get(action, 0) + 1
             added_records += int(added or 0)
             imported_names.add(rel_path.name)
             imported += 1
+            if progress:
+                progress(
+                    {
+                        "stage": "importing",
+                        "imported_files": imported,
+                        "total_files": validation["files"],
+                        "current_file": str(rel_path),
+                        "last_action": action,
+                        "added_records": added_records,
+                        "message": f"已合并 {rel_path}",
+                    }
+                )
     data_like_names = imported_names - OPTIONAL_LOG_FILES
     if "quant_state.json" not in imported_names and data_like_names:
         result = clear_sample_quant_state(target_dir)
