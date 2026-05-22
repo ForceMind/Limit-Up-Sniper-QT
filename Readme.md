@@ -98,16 +98,52 @@ cp .env.example .env
 
 - `DEEPSEEK_API_KEY`：DeepSeek API Key
 - `DEEPSEEK_MODEL`：默认 `deepseek-v4-flash`
+- `QUANT_DATA_DIR`：可选运行数据目录。留空时使用 `backend/data`；如果要复用旧项目数据，可以指向旧项目的 `backend/data`
 - `BIYING_ENABLED`：是否启用必赢行情同步
 - `BIYING_LICENSE_KEY`：必赢数据授权
 - `EMAIL_ENABLED`：是否启用邮件通知
 - `SMTP_SERVER`、`SMTP_USER`、`SMTP_PASSWORD`、`EMAIL_TO`：邮件配置
 - `NEWS_FETCH_INTERVAL_SECONDS`、`AI_ANALYSIS_INTERVAL_SECONDS`、`MARKET_SYNC_INTERVAL_SECONDS`：自动任务间隔
+- `STRATEGY_REPLAY_ENABLED`、`STRATEGY_REPLAY_START_DATE`、`STRATEGY_REPLAY_INTERVAL_SECONDS`、`STRATEGY_REPLAY_MODE`：策略复盘调度，默认从 `2026-03-01` 开始，每小时跑一次分时复盘
 - `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
 
 首次部署后先访问 `/admin`，后台会要求初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
 如果部署后仍看到样例数据，通常是还没有在后台“配置与安全”里填写 DeepSeek、必赢、邮件等服务器本地配置，也没有触发真实数据同步。配置完成后进入“运维”，点击“系统启动”，系统会按顺序执行新闻抓取、AI 分析、行情同步和交易循环。
+
+检查服务器是否已经保存从 3 月开始的新闻和行情：
+
+```bash
+python scripts/check_data_coverage.py
+python scripts/check_data_coverage.py /path/to/other/backend/data
+```
+
+如果 `news_history.json` 最早日期晚于 `2026-03-01`，说明当前服务器没有完整的 3 月以来新闻，策略复盘只能基于现有样本运行。
+
+把历史 JSON/CSV 运行数据整理进 SQLite：
+
+```bash
+python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db backend/data/quant_data.sqlite3
+```
+
+该数据库属于本地运行数据，不提交 Git。当前迁移范围包括新闻、AI 分析、AI 缓存、结构化事件、日线、分时、龙虎榜、市场快照、模拟账户、策略进化、访问日志和任务日志。
+
+上传到服务器时不要走 GitHub。后台管理页已经提供迁移入口：
+
+```text
+/admin -> 运维 -> 下载数据包
+/admin -> 运维 -> 上传导入数据
+```
+
+迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传导入即可。导入前服务器会自动备份当前 `backend/data`。
+
+Windows 本机也可以用根目录脚本作为备用：
+
+```powershell
+.\upload-data.ps1 -Server root@服务器IP
+```
+
+安全数据包不包含 `.env`、`config.json`、`auth.json`、`admin_credentials.json`、`admin_sessions.json`、`ws_token_secret.txt`。
 
 ## 数据与 Git 规则
 
@@ -217,5 +253,6 @@ qt logs
 - [开发计划](docs/DEVELOPMENT_PLAN.md)
 - [买卖与回放逻辑](docs/QUANT_LOGIC.md)
 - [服务器部署说明](docs/SERVER_DEPLOY.md)
+- [数据存储决策](docs/DATA_STORAGE_DECISION.md)
 - [GitHub 上传安全检查](docs/GITHUB_SECURITY.md)
 - [Codex 交接记录](docs/CODEX_HANDOFF.md)

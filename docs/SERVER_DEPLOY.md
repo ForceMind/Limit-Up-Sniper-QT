@@ -38,6 +38,7 @@ cp .env.example .env
 ```bash
 QUANT_HOST=0.0.0.0
 QUANT_PORT=8000
+QUANT_DATA_DIR=
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-flash
 BIYING_ENABLED=true
@@ -54,11 +55,15 @@ NEWS_FETCH_INTERVAL_SECONDS=3600
 AI_ANALYSIS_INTERVAL_SECONDS=3600
 MARKET_SYNC_INTERVAL_SECONDS=300
 TRADE_CYCLE_INTERVAL_SECONDS=300
+STRATEGY_REPLAY_ENABLED=true
+STRATEGY_REPLAY_START_DATE=2026-03-01
+STRATEGY_REPLAY_INTERVAL_SECONDS=3600
+STRATEGY_REPLAY_MODE=intraday
 TRADING_HOLIDAYS=
 TRADING_EXTRA_DAYS=
 ```
 
-服务端优先读取 `.env`，再读取 `backend/data/config.json`。生产服务器不要提交 `.env`。
+服务端优先读取 `.env`，再读取运行数据目录里的 `config.json`。`QUANT_DATA_DIR` 留空时使用 `backend/data`；如果生产数据放在单独磁盘或从旧项目迁移，可以把它指向对应的 `backend/data` 目录。生产服务器不要提交 `.env`。
 
 如果从旧部署迁移，确认 `.env` 里已经改成：
 
@@ -193,7 +198,45 @@ http://服务器IP:8000/admin
 
 首次打开后台会进入初始化页，需要创建两个账号：后台管理员账号和前台交易终端账号。后台账号用于配置密钥、触发任务和运维操作；前台账号只用于查看交易终端。账号哈希保存在 `backend/data/auth.json`，运行配置保存在 `backend/data/config.json`，二者都属于服务器本地文件，不要提交到 Git。
 
-部署后如果页面仍显示样例数据，说明生产数据链路还没有跑起来。先在后台“配置与安全”填写 DeepSeek、必赢、邮件等服务器本地配置，再到“运维”点击“系统启动”。该按钮会按顺序执行新闻抓取、AI 分析、行情同步和交易循环，运行日志会在右侧日志栏显示中文状态。
+部署后如果页面仍显示样例数据，说明生产数据链路还没有跑起来。先在后台“配置与安全”填写 DeepSeek、必赢、邮件等服务器本地配置，再到“运维”点击“系统启动”。该按钮会按顺序执行新闻抓取、AI 分析、行情同步、交易循环和策略复盘，运行日志会在右侧日志栏显示中文状态。
+
+检查服务器是否已经保留从 3 月开始的新闻和行情：
+
+```bash
+python scripts/check_data_coverage.py
+python scripts/check_data_coverage.py /path/to/other/backend/data
+```
+
+如果 `news_history.json` 最早日期晚于 `2026-03-01`，服务器没有完整的 3 月以来新闻。此时策略复盘会运行，但只能用已有新闻和行情样本，结果不能代表 3 月以来完整表现。
+
+把旧数据目录整理进 SQLite：
+
+```bash
+python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db backend/data/quant_data.sqlite3
+```
+
+`backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。
+
+迁移服务器时优先使用后台页面，不要通过 GitHub 上传真实数据：
+
+```text
+旧服务器 /admin -> 运维 -> 下载数据包
+新服务器 /admin -> 运维 -> 上传导入数据
+```
+
+导入前新服务器会自动备份当前 `backend/data`。如果需要从 Windows 本机直接推送到服务器，也可以在项目根目录运行：
+
+```powershell
+.\upload-data.ps1 -Server root@服务器IP
+```
+
+如果服务器项目目录不是 `/root/Limit-Up-Sniper-QT`：
+
+```powershell
+.\upload-data.ps1 -Server root@服务器IP -RemoteDir /你的项目目录
+```
+
+脚本会自动整理 SQLite、生成数据包、上传、服务器备份、解压、重启和检查数据覆盖。这个安全数据包只包含新闻、AI/事件、行情、策略状态和 SQLite，不包含 `.env`、`config.json`、`auth.json`、`admin_credentials.json`、`admin_sessions.json`、`ws_token_secret.txt`。
 
 ## 健康检查
 
@@ -222,6 +265,7 @@ curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/a
 - AI 分析：默认每 1 小时增量调用 DeepSeek，将新闻结构化为事件、行业、个股、利好利空和影响强度
 - 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；周末和非开盘时间不触发行情同步
 - 模拟交易：按当前模型触发买入/卖出，触发后可通过 SMTP 发送邮件
+- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘一次
 - 遗传进化：多组参数并行回放，按收益、回撤、胜率选择最优参数，后台可手动应用
 - 模型回放：前台和后台按全周期线性回放计算买入、卖出、收益和交割单
 

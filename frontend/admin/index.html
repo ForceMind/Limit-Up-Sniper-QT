@@ -251,6 +251,7 @@
                 <div><div class="text-xs text-neutral-500">AI分析</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_ai_analysis_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">交易循环</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_trade_cycle_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">策略复盘</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_strategy_replay_at) }}</div></div>
               </div>
             </div>
             <div class="panel">
@@ -777,6 +778,76 @@
           </div>
         </section>
 
+        <section v-if="activeTab === 'access'" class="space-y-4">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="metric"><div class="text-xs text-neutral-500">访问记录</div><div class="mt-2 text-lg font-semibold">{{ accessLogs.count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">独立 IP</div><div class="mt-2 text-lg font-semibold">{{ accessLogs.unique_visitors || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">登录用户</div><div class="mt-2 text-lg font-semibold">{{ accessLogs.unique_users || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">前台用户</div><div class="mt-2 text-lg font-semibold">{{ frontendUsers.count || 0 }}</div></div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div class="font-semibold">访问审计</div>
+                <div class="text-xs text-neutral-500 mt-1">记录页面和接口访问的时间、用户、IP、浏览器、路径和状态码，不记录密码明文。</div>
+              </div>
+              <div class="flex gap-2">
+                <input v-model="accessFilter" placeholder="筛选用户 / IP / 路径" class="h-9 px-3 border border-neutral-300 text-sm">
+                <button @click="fetchAccessLogs" class="h-9 px-3 bg-neutral-900 text-white text-sm">刷新</button>
+              </div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[520px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left">时间</th>
+                    <th class="px-3 py-2 text-left">用户</th>
+                    <th class="px-3 py-2 text-left">IP</th>
+                    <th class="px-3 py-2 text-left">路径</th>
+                    <th class="px-3 py-2 text-right">状态</th>
+                    <th class="px-3 py-2 text-right">耗时</th>
+                    <th class="px-3 py-2 text-left min-w-[320px]">浏览器</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="item in accessLogItems" :key="`${item.ts}-${item.ip}-${item.path}-${item.duration_ms}`" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 whitespace-nowrap">{{ shortTime(item.ts) }}</td>
+                    <td class="px-3 py-2">{{ item.username || item.scope || 'public' }}</td>
+                    <td class="px-3 py-2">{{ item.ip || '-' }}</td>
+                    <td class="px-3 py-2"><div>{{ item.method }} {{ item.path }}</div><div class="text-xs text-neutral-500 line-clamp-1">{{ item.query || '' }}</div></td>
+                    <td class="px-3 py-2 text-right">{{ item.status_code }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(item.duration_ms, 0) }} ms</td>
+                    <td class="px-3 py-2 text-xs text-neutral-500 line-clamp-2">{{ item.user_agent || '-' }}</td>
+                  </tr>
+                  <tr v-if="!accessLogItems.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无访问记录</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">前台注册用户</div>
+            <div class="table-wrap overflow-auto max-h-[320px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr><th class="px-3 py-2 text-left">用户名</th><th class="px-3 py-2 text-left">注册时间</th><th class="px-3 py-2 text-left">最近登录</th><th class="px-3 py-2 text-right">登录次数</th><th class="px-3 py-2 text-left">注册 IP</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="item in frontendUserItems" :key="item.username">
+                    <td class="px-3 py-2 font-semibold">{{ item.username }}</td>
+                    <td class="px-3 py-2">{{ item.created_at || '-' }}</td>
+                    <td class="px-3 py-2">{{ item.last_login_at || '-' }}</td>
+                    <td class="px-3 py-2 text-right">{{ item.login_count || 0 }}</td>
+                    <td class="px-3 py-2">{{ item.registered_ip || '-' }}</td>
+                  </tr>
+                  <tr v-if="!frontendUserItems.length"><td colspan="5" class="px-3 py-10 text-center text-neutral-500">暂无前台注册用户</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section v-if="activeTab === 'ops'" class="space-y-4">
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
@@ -786,9 +857,13 @@
               <button @click="analyzeAI" :disabled="aiAnalyzing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ aiAnalyzing ? '分析中' : '立即AI分析' }}</button>
               <button @click="syncIntraday" :disabled="syncing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncing ? '同步中' : '同步分时行情' }}</button>
               <button @click="runTradeCycle" :disabled="runningTrade" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ runningTrade ? '交易中' : '运行交易循环' }}</button>
+              <button @click="runStrategyReplay" :disabled="replayingStrategy" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ replayingStrategy ? '复盘中' : '运行策略复盘' }}</button>
               <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
               <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
+              <button @click="downloadDataPackage" :disabled="downloadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
+              <button @click="openDataImport" :disabled="uploadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '导入中' : '上传导入数据' }}</button>
               <button @click="restartService" :disabled="restarting" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
+              <input ref="dataPackageInput" type="file" accept=".tar.gz,.tgz,application/gzip" class="hidden" @change="uploadDataPackage">
             </div>
             <pre v-if="adminResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(adminResult) }}</pre>
           </div>
@@ -838,9 +913,12 @@
             <option value="ai_analysis">AI</option>
             <option value="market_sync">行情</option>
             <option value="trade_cycle">交易</option>
+            <option value="strategy_replay">策略复盘</option>
             <option value="system_startup">系统启动</option>
             <option value="admin_config">配置</option>
             <option value="admin_backup">备份</option>
+            <option value="admin_data_export">导出</option>
+            <option value="admin_data_import">导入</option>
             <option value="admin_restart">重启</option>
           </select>
           <select v-model="logLevel" @change="fetchLogs" class="h-8 px-2 bg-[#161c22] border border-neutral-700 text-neutral-100">
@@ -885,6 +963,7 @@
             { key: 'data', label: '数据与AI' },
             { key: 'strategy', label: '策略进化' },
             { key: 'settings', label: '配置与安全' },
+            { key: 'access', label: '访问审计' },
             { key: 'ops', label: '运维' },
           ],
           jobCards: [
@@ -892,6 +971,7 @@
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
             { key: 'market_sync', label: '分时行情', desc: '交易时段同步必赢数据' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
+            { key: 'strategy_replay', label: '策略复盘', desc: '从3月1日滚动验证' },
           ],
           tradeViews: [
             { key: 'positions', label: '持仓' },
@@ -925,8 +1005,11 @@
           aiAnalyzing: false,
           syncing: false,
           runningTrade: false,
+          replayingStrategy: false,
           testingEmail: false,
           backuping: false,
+          downloadingData: false,
+          uploadingData: false,
           restarting: false,
           strategySaving: false,
           fitting: false,
@@ -946,6 +1029,8 @@
           notificationStatus: {},
           evolutionStatus: {},
           strategyModels: {},
+          accessLogs: {},
+          frontendUsers: {},
           fitResult: {},
           syncResult: {},
           adminResult: {},
@@ -961,6 +1046,7 @@
           logs: [],
           logJob: '',
           logLevel: '',
+          accessFilter: '',
           logUpdatedAt: '',
           showPayloads: false,
           syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
@@ -1041,6 +1127,8 @@
         aiFailureItems() { return this.aiFailures.items || []; },
         aiRecordItems() { return this.aiRecords.items || []; },
         fitCandidates() { return this.fitResult.candidates || []; },
+        accessLogItems() { return this.accessLogs.items || []; },
+        frontendUserItems() { return this.frontendUsers.items || []; },
         evolutionModels() {
           const direct = this.evolutionStatus.models || [];
           return direct.length ? direct : (this.strategyModels.items || []);
@@ -1058,6 +1146,9 @@
           }
           if (value === 'settings' && !Object.keys(this.configForm || {}).length) {
             this.loadRuntimeConfig(false);
+          }
+          if (value === 'access') {
+            this.fetchAccessLogs();
           }
         },
       },
@@ -1279,6 +1370,8 @@
           this.notificationStatus = snapshot.notification_status || this.notificationStatus;
           this.evolutionStatus = snapshot.evolution_status || this.evolutionStatus;
           this.strategyModels = snapshot.strategy_models || this.strategyModels;
+          this.accessLogs = snapshot.access_logs || this.accessLogs;
+          this.frontendUsers = snapshot.frontend_users || this.frontendUsers;
           this.dashboard = snapshot.dashboard || this.dashboard;
           this.tradingAccount = snapshot.trading_account || this.tradingAccount;
           this.newsFeed = snapshot.news || this.newsFeed;
@@ -1319,6 +1412,20 @@
             const result = await this.api(`/api/jobs/logs?${q.toString()}`);
             this.logs = result.items || [];
             this.logUpdatedAt = this.nowChinaShort();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          }
+        },
+        async fetchAccessLogs() {
+          try {
+            const q = new URLSearchParams({ limit: '220' });
+            const term = String(this.accessFilter || '').trim();
+            if (term) {
+              if (/^[0-9a-fA-F:.]+$/.test(term)) q.set('ip', term);
+              else if (term.startsWith('/')) q.set('path', term);
+              else q.set('username', term);
+            }
+            this.accessLogs = await this.api(`/api/admin/access_logs?${q.toString()}`);
           } catch (err) {
             this.clientError = String(err.message || err);
           }
@@ -1405,6 +1512,18 @@
             this.runningTrade = false;
           }
         },
+        async runStrategyReplay() {
+          this.replayingStrategy = true;
+          try {
+            const q = new URLSearchParams({ start_date: '2026-03-01', mode: 'intraday' });
+            if (this.asOf) q.set('end_date', this.asOf);
+            await this.api(`/api/jobs/strategy/replay?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } finally {
+            this.replayingStrategy = false;
+          }
+        },
         async testEmail() {
           this.testingEmail = true;
           try {
@@ -1423,6 +1542,60 @@
             this.clientError = String(err.message || err);
           } finally {
             this.backuping = false;
+          }
+        },
+        async downloadDataPackage() {
+          this.downloadingData = true;
+          try {
+            const headers = new Headers();
+            if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
+            const res = await fetch('/api/admin/data/export', { headers });
+            if (!res.ok) throw new Error(await res.text());
+            const blob = await res.blob();
+            const disposition = res.headers.get('content-disposition') || '';
+            const match = disposition.match(/filename="?([^"]+)"?/i);
+            const filename = match ? match[1] : `qt_safe_data_export_${Date.now()}.tar.gz`;
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            this.adminResult = { status: 'ok', message: '数据包已下载', filename, size_bytes: blob.size };
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.downloadingData = false;
+          }
+        },
+        openDataImport() {
+          if (this.$refs.dataPackageInput) this.$refs.dataPackageInput.click();
+        },
+        async uploadDataPackage(event) {
+          const file = event?.target?.files?.[0];
+          if (event?.target) event.target.value = '';
+          if (!file) return;
+          if (!window.confirm('导入前服务器会自动备份当前数据，确认上传并覆盖运行数据吗？')) return;
+          this.uploadingData = true;
+          try {
+            const headers = new Headers({ 'Content-Type': 'application/gzip' });
+            if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
+            const res = await fetch('/api/admin/data/import?backup=true', {
+              method: 'POST',
+              headers,
+              body: file,
+            });
+            if (!res.ok) throw new Error(await res.text());
+            this.adminResult = await res.json();
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.uploadingData = false;
           }
         },
         async restartService() {
@@ -1645,9 +1818,12 @@
             ai_analysis: 'AI 分析',
             market_sync: '行情同步',
             trade_cycle: '交易循环',
+            strategy_replay: '策略复盘',
             system_startup: '系统启动',
             admin_config: '配置保存',
             admin_backup: '数据备份',
+            admin_data_export: '数据导出',
+            admin_data_import: '数据导入',
             admin_restart: '服务重启',
           };
           return labels[String(job || '')] || '系统';

@@ -133,11 +133,13 @@
 </head>
 <body class="bg-[#eef1f5] text-neutral-900 min-h-screen">
   <div id="app" v-cloak class="min-h-screen">
-    <div v-if="authReady && !auth.token" class="min-h-screen flex items-center justify-center bg-[#eef1f5] p-4">
-      <form @submit.prevent="loginFrontend" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4">
+    <div v-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登录状态...</div>
+    <template v-else>
+    <div v-if="auth.visible" class="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4">
+      <form @submit.prevent="auth.mode === 'register' ? registerFrontend() : loginFrontend()" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4 shadow-xl">
         <div>
-          <h1 class="text-xl font-semibold">前台登录</h1>
-          <p class="mt-1 text-sm text-neutral-500">请输入前台交易终端账号。如未初始化，请联系管理员处理。</p>
+          <h1 class="text-xl font-semibold">{{ auth.mode === 'register' ? '注册前台用户' : '前台登录' }}</h1>
+          <p class="mt-1 text-sm text-neutral-500">输入用户名和密码即可使用前台。概览和新闻无需登录。</p>
         </div>
         <label class="block text-sm">
           <span class="block text-xs text-neutral-500 mb-1">用户名</span>
@@ -148,24 +150,28 @@
           <input v-model="auth.password" type="password" autocomplete="current-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
         </label>
         <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
-        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '登录中' : '登录前台' }}</button>
+        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '处理中' : (auth.mode === 'register' ? '注册并登录' : '登录前台') }}</button>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <button type="button" @click="auth.mode = auth.mode === 'register' ? 'login' : 'register'; auth.error = ''" class="h-9 border border-neutral-300 bg-white">{{ auth.mode === 'register' ? '已有账号登录' : '注册新用户' }}</button>
+          <button type="button" @click="auth.visible = false" class="h-9 border border-neutral-300 bg-white">先看概览</button>
+        </div>
       </form>
     </div>
-    <div v-else-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登录状态...</div>
-    <template v-else>
     <div class="mobile-app">
       <div class="mobile-topbar">
         <div>
-          <div class="mobile-kicker">A股量化交易终端 · {{ clockText || '--:--' }}</div>
+          <div class="mobile-kicker">{{ displayUser }} · {{ clockText || '--:--' }} · 情绪{{ marketMood.label || '中性' }}</div>
           <span class="mobile-date">{{ accountView.as_of || asOf || '-' }}</span>
           <span class="market-pill">{{ scheduler.market_open ? '交易中' : '休市' }}</span>
         </div>
         <div class="flex items-center gap-2">
-          <button @click="logout" class="account-select">退出</button>
+          <button v-if="isLoggedIn" @click="logout" class="account-select">退出</button>
+          <button v-else @click="openAuth('login')" class="account-select">登录/注册</button>
         </div>
       </div>
 
       <section class="mobile-red-card">
+        <template v-if="isLoggedIn">
         <div class="flex items-start justify-between gap-3">
           <div>
             <div class="label">总资产(元)</div>
@@ -200,6 +206,43 @@
             <div class="big">{{ money(frozenMarketValue) }}</div>
           </div>
         </div>
+        </template>
+        <template v-else>
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="label">市场情绪</div>
+            <div class="big">{{ marketMood.label || '中性' }}</div>
+          </div>
+          <div class="text-right">
+            <div class="label">情绪分</div>
+            <div class="value">{{ fixed(marketMood.score, 3) }}</div>
+          </div>
+        </div>
+        <div class="mobile-red-grid">
+          <div>
+            <div class="label">最新新闻</div>
+            <div class="value">{{ latestNewsCount }}</div>
+          </div>
+          <div>
+            <div class="label">利好/利空</div>
+            <div class="value">{{ marketMood.positive_count || 0 }} / {{ marketMood.negative_count || 0 }}</div>
+          </div>
+          <div>
+            <div class="label">交易时段</div>
+            <div class="value">{{ scheduler.market_open ? '交易中' : '休市' }}</div>
+          </div>
+        </div>
+        <div class="mobile-red-bottom">
+          <div>
+            <div class="label">当前用户</div>
+            <div class="big">游客</div>
+          </div>
+          <div>
+            <div class="label">数据日期</div>
+            <div class="big">{{ dataDate || asOf || '-' }}</div>
+          </div>
+        </div>
+        </template>
       </section>
 
       <main class="mobile-content">
@@ -262,7 +305,7 @@
           </div>
         </section>
 
-        <section v-show="mobileView === 'buy'" class="mobile-panel">
+        <section v-if="isLoggedIn" v-show="mobileView === 'buy'" class="mobile-panel">
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">买入信号</div>
@@ -298,7 +341,7 @@
           <div v-if="!buyList.length" class="p-10 text-center text-neutral-500 text-sm">这一天没有达到买入阈值的股票</div>
         </section>
 
-        <section v-show="mobileView === 'positions'" class="mobile-panel">
+        <section v-if="isLoggedIn" v-show="mobileView === 'positions'" class="mobile-panel">
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">持仓 {{ positions.length }}</div>
@@ -328,7 +371,7 @@
           <div v-if="!positions.length" class="p-10 text-center text-neutral-500 text-sm">暂无持仓</div>
         </section>
 
-        <section v-show="mobileView === 'deals'" class="mobile-panel">
+        <section v-if="isLoggedIn" v-show="mobileView === 'deals'" class="mobile-panel">
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">成交与交割</div>
@@ -393,7 +436,7 @@
           </div>
         </section>
 
-        <section v-show="mobileView === 'strategy'" class="mobile-panel">
+        <section v-if="isLoggedIn" v-show="mobileView === 'strategy'" class="mobile-panel">
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">多策略模型</div>
@@ -483,11 +526,13 @@
           <div class="text-xs text-neutral-300 mt-1">模拟账户、持仓、成交、交割单和每日买入计划</div>
         </div>
         <div class="header-actions flex flex-wrap items-center gap-2">
+          <span class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm inline-flex items-center">{{ displayUser }} · 情绪{{ marketMood.label || '中性' }}</span>
           <input v-model="asOf" type="date" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm outline-none focus:border-red-500">
           <button @click="loadAll" :disabled="loading" class="h-9 px-3 bg-red-600 text-white text-sm disabled:opacity-50">
             {{ loading ? '刷新中' : '刷新' }}
           </button>
-          <button @click="logout" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">退出</button>
+          <button v-if="isLoggedIn" @click="logout" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">退出</button>
+          <button v-else @click="openAuth('login')" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">登录/注册</button>
         </div>
       </div>
     </header>
@@ -496,39 +541,55 @@
       <section class="mobile-page metric-grid grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3" :class="{ 'active-mobile': mobileView === 'overview' }">
         <div class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">交易日</div>
-          <div class="text-lg font-semibold mt-1">{{ plan.as_of || accountView.as_of || '-' }}</div>
+          <div class="text-lg font-semibold mt-1">{{ plan.as_of || accountView.as_of || dataDate || asOf || '-' }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="!isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">市场情绪</div>
+          <div class="text-lg font-semibold mt-1">{{ marketMood.label || '中性' }}</div>
+        </div>
+        <div v-if="!isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">情绪分</div>
+          <div class="text-lg font-semibold mt-1">{{ fixed(marketMood.score, 3) }}</div>
+        </div>
+        <div v-if="!isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">最新新闻</div>
+          <div class="text-lg font-semibold mt-1">{{ latestNewsCount }}</div>
+        </div>
+        <div v-if="!isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">交易时段</div>
+          <div class="text-lg font-semibold mt-1">{{ scheduler.market_open ? '交易中' : '休市' }}</div>
+        </div>
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">总资产</div>
           <div class="text-lg font-semibold mt-1">{{ money(account.total_asset) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">可用资金</div>
           <div class="text-lg font-semibold mt-1">{{ money(account.available_cash) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">持仓市值</div>
           <div class="text-lg font-semibold mt-1">{{ money(account.market_value) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">浮动盈亏</div>
           <div class="text-lg font-semibold mt-1" :class="numClass(account.unrealized_pnl)">{{ money(account.unrealized_pnl) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">已实现盈亏</div>
           <div class="text-lg font-semibold mt-1" :class="numClass(account.realized_pnl)">{{ money(account.realized_pnl) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">总盈亏</div>
           <div class="text-lg font-semibold mt-1" :class="numClass(account.total_pnl)">{{ money(account.total_pnl) }} / {{ pct(account.return_pct) }}</div>
         </div>
-        <div class="metric-card bg-white border border-neutral-300 p-3">
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
           <div class="text-xs text-neutral-500">今日成交/持仓</div>
           <div class="text-lg font-semibold mt-1">{{ todayDeals.length }} / {{ positions.length }}</div>
         </div>
       </section>
 
-      <section v-if="mobileView !== 'overview'" class="mobile-only terminal-panel p-3">
+      <section v-if="isLoggedIn && mobileView !== 'overview'" class="mobile-only terminal-panel p-3">
         <div class="grid grid-cols-2 gap-3 text-sm">
           <div>
             <div class="text-xs text-neutral-500">总资产</div>
@@ -595,7 +656,7 @@
         </div>
       </section>
 
-      <section class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'strategy' }">
+      <section v-if="isLoggedIn" class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'strategy' }">
         <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
           <div>
             <h2 class="font-semibold">多策略模型</h2>
@@ -687,7 +748,13 @@
         </div>
       </section>
 
-      <section class="mobile-page trade-grid grid grid-cols-1 2xl:grid-cols-[1.1fr_1fr] gap-4" :class="{ 'active-mobile': mobileView === 'buy' || mobileView === 'positions' }">
+      <section v-if="!isLoggedIn" class="bg-white border border-neutral-300 p-5 text-sm">
+        <div class="font-semibold">登录后查看交易数据</div>
+        <div class="mt-1 text-neutral-500">买入计划、持仓、成交、交割单和策略模型需要前台账号。</div>
+        <button @click="openAuth('login')" class="mt-3 h-9 px-3 bg-neutral-900 text-white">登录/注册</button>
+      </section>
+
+      <section v-if="isLoggedIn" class="mobile-page trade-grid grid grid-cols-1 2xl:grid-cols-[1.1fr_1fr] gap-4" :class="{ 'active-mobile': mobileView === 'buy' || mobileView === 'positions' }">
         <div class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'buy' }">
           <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
@@ -848,7 +915,7 @@
         </div>
       </section>
 
-      <section class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'deals' }">
+      <section v-if="isLoggedIn" class="mobile-page bg-white border border-neutral-300" :class="{ 'active-mobile': mobileView === 'deals' }">
         <div class="px-4 py-3 border-b border-neutral-300 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div class="tab-strip flex flex-wrap gap-2">
             <button v-for="tab in tabs" :key="tab.key" @click="activeTab = tab.key" class="h-8 px-3 border text-sm" :class="activeTab === tab.key ? 'bg-[#151922] text-white border-[#151922]' : 'bg-white border-neutral-300'">
@@ -1057,11 +1124,13 @@
           authReady: false,
           auth: {
             token: localStorage.getItem('qt_front_token') || '',
-            username: '',
+            username: localStorage.getItem('qt_front_username') || '',
             password: '',
             loading: false,
             error: '',
             setupRequired: false,
+            visible: false,
+            mode: 'login',
           },
           loading: false,
           syncing: false,
@@ -1075,6 +1144,7 @@
           jobLogs: {},
           recommendations: {},
           strategyModels: {},
+          marketSentiment: {},
           newsFeed: {},
           syncResult: {},
           tabs: [
@@ -1085,6 +1155,9 @@
         };
       },
       computed: {
+        isLoggedIn() { return Boolean(this.auth.token); },
+        displayUser() { return this.isLoggedIn ? (this.auth.username || '已登录') : '游客'; },
+        marketMood() { return this.marketSentiment || {}; },
         account() { return this.accountView.account || {}; },
         scheduler() { return this.jobStatus.scheduler || {}; },
         recentLogs() { return (this.jobLogs.items || []).slice(0, 3); },
@@ -1183,15 +1256,21 @@
             const res = await fetch('/api/auth/status');
             const status = await res.json();
             this.auth.setupRequired = Boolean(status.setup_required);
-            if (!this.auth.token) return;
             await this.loadAll();
           } catch (err) {
             this.auth.error = String(err.message || err);
             this.auth.token = '';
             localStorage.removeItem('qt_front_token');
+            await this.loadAll();
           } finally {
+            if (!this.auth.token && !this.isPublicView(this.mobileView)) this.mobileView = 'overview';
             this.authReady = true;
           }
+        },
+        openAuth(mode = 'login') {
+          this.auth.mode = mode;
+          this.auth.error = '';
+          this.auth.visible = true;
         },
         async loginFrontend() {
           this.auth.loading = true;
@@ -1207,11 +1286,39 @@
               }),
             });
             this.auth.token = result.token || '';
+            this.auth.username = result.username || this.auth.username;
             localStorage.setItem('qt_front_token', this.auth.token);
+            localStorage.setItem('qt_front_username', this.auth.username || '');
+            this.auth.visible = false;
             this.auth.password = '';
             await this.loadAll();
           } catch (err) {
-            this.auth.error = this.auth.setupRequired ? '系统还没有初始化，请联系管理员设置账号。' : String(err.message || err);
+            this.auth.error = String(err.message || err);
+          } finally {
+            this.auth.loading = false;
+          }
+        },
+        async registerFrontend() {
+          this.auth.loading = true;
+          this.auth.error = '';
+          try {
+            const result = await this.api('/api/auth/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                username: this.auth.username,
+                password: this.auth.password,
+              }),
+            });
+            this.auth.token = result.token || '';
+            this.auth.username = result.username || this.auth.username;
+            localStorage.setItem('qt_front_token', this.auth.token);
+            localStorage.setItem('qt_front_username', this.auth.username || '');
+            this.auth.visible = false;
+            this.auth.password = '';
+            await this.loadAll();
+          } catch (err) {
+            this.auth.error = String(err.message || err);
           } finally {
             this.auth.loading = false;
           }
@@ -1220,13 +1327,18 @@
           this.auth.token = '';
           this.auth.password = '';
           localStorage.removeItem('qt_front_token');
+          localStorage.removeItem('qt_front_username');
+          if (!this.isPublicView(this.mobileView)) this.mobileView = 'overview';
+          this.loadAll();
         },
         async loadAll() {
           this.loading = true;
           try {
             const q = new URLSearchParams({ mobile: String(window.innerWidth <= 767) });
             if (this.asOf) q.set('as_of', this.asOf);
-            const snapshot = await this.api(`/api/front/snapshot?${q.toString()}`);
+            let snapshotPath = '/api/front/public_snapshot';
+            if (this.isLoggedIn) snapshotPath = '/api/front/snapshot';
+            const snapshot = await this.api(`${snapshotPath}?${q.toString()}`);
             this.status = snapshot.status_payload || {};
             this.jobStatus = snapshot.jobs || {};
             this.jobLogs = snapshot.logs || {};
@@ -1234,6 +1346,7 @@
             this.newsFeed = snapshot.news || {};
             this.recommendations = snapshot.recommendations || {};
             this.strategyModels = snapshot.strategy_models || {};
+            this.marketSentiment = snapshot.market_sentiment || {};
             this.plan = snapshot.daily_plan || {};
             if (!this.asOf) this.asOf = this.accountView.as_of || this.plan.as_of || this.asOf;
           } finally {
@@ -1293,15 +1406,22 @@
           }
         },
         setMobileView(view) {
+          if (!this.isPublicView(view) && !this.auth.token) {
+            this.openAuth('login');
+            return;
+          }
           this.mobileView = view;
-          if (view === 'overview' && !this.recommendations.items) this.loadRecommendations(true);
+          if (view === 'overview' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'overview' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'buy' && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'buy' && !this.plan.as_of) this.loadPlan(true);
           if (view === 'strategy' && !this.strategyModels.items) this.loadAll();
           if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
-          if (view === 'news' && !this.recommendations.items) this.loadRecommendations(true);
+          if (view === 'news' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'deals') this.activeTab = 'deals';
+        },
+        isPublicView(view) {
+          return ['overview', 'news'].includes(String(view || ''));
         },
         updateClock() {
           this.clockText = new Intl.DateTimeFormat('zh-CN', {

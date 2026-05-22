@@ -26,8 +26,11 @@ JOB_LABELS = {
     "ai_analysis": "AI 分析",
     "market_sync": "行情同步",
     "trade_cycle": "交易循环",
+    "strategy_replay": "策略复盘",
     "system_startup": "系统启动",
     "admin_backup": "数据备份",
+    "admin_data_export": "数据导出",
+    "admin_data_import": "数据导入",
     "admin_restart": "服务重启",
     "admin_config": "配置保存",
 }
@@ -46,6 +49,13 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(float(os.getenv(name, "") or default)))
     except Exception:
         return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = str(os.getenv(name, "") or "").strip().lower()
+    if not value:
+        return default
+    return value not in {"0", "false", "no", "off"}
 
 
 def _job_label(name: str) -> str:
@@ -312,6 +322,49 @@ class QuantJobManager:
 
         return self.run_job("trade_cycle", execute, payload=payload)
 
+    def run_strategy_replay(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        mode: str = "intraday",
+    ) -> Dict[str, Any]:
+        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        mode = str(mode or os.getenv("STRATEGY_REPLAY_MODE") or "intraday").strip().lower()
+        if mode not in {"daily", "intraday"}:
+            mode = "intraday"
+        payload = {"start_date": start_date, "end_date": end_date, "mode": mode}
+
+        def execute() -> Dict[str, Any]:
+            if mode == "daily":
+                result = quant_engine.walk_forward(start_date=start_date, end_date=end_date)
+            else:
+                result = quant_engine.walk_forward_intraday(
+                    start_date=start_date,
+                    end_date=end_date,
+                    use_daily_fallback=True,
+                )
+            days = result.get("days") if isinstance(result.get("days"), list) else []
+            trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+            return {
+                "status": "ok",
+                "mode": result.get("mode") or mode,
+                "start_date": result.get("start_date") or start_date,
+                "end_date": result.get("end_date") or end_date,
+                "initial_cash": result.get("initial_cash", 0),
+                "final_value": result.get("final_value", 0),
+                "return_pct": result.get("return_pct", 0),
+                "max_drawdown_pct": result.get("max_drawdown_pct", 0),
+                "closed_trades": result.get("closed_trades", 0),
+                "win_rate": result.get("win_rate", 0),
+                "day_count": len(days),
+                "trade_count": len(trades),
+                "latest_day": days[-1] if days else {},
+                "generated_at": _iso_now(),
+            }
+
+        return self.run_job("strategy_replay", execute, payload=payload)
+
     def _auto_market_codes(self, date: str, max_codes: int = 80) -> str:
         from app.quant.engine import digits6, quant_engine
 
@@ -357,6 +410,9 @@ class QuantJobManager:
     def _trade_interval_seconds(self) -> int:
         return _env_int("TRADE_CYCLE_INTERVAL_SECONDS", 300 if self._is_market_open() else 3600)
 
+    def _strategy_replay_interval_seconds(self) -> int:
+        return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
+
     def _is_trading_day(self, now: Optional[datetime] = None) -> bool:
         now = now or _now_cn()
         date = now.strftime("%Y-%m-%d")
@@ -381,6 +437,7 @@ class QuantJobManager:
         next_ai_analysis = time.time() + 30
         next_market_sync = time.time() + 40
         next_trade_cycle = time.time() + 50
+        next_strategy_replay = time.time() + 70
         while not self._stop_event.is_set():
             now_ts = time.time()
             now_cn = _now_cn()
@@ -421,6 +478,12 @@ class QuantJobManager:
                     )
                     next_trade_cycle = time.time() + 60
                 ran_task = True
+            if _env_bool("STRATEGY_REPLAY_ENABLED", True) and now_ts >= next_strategy_replay:
+                await asyncio.to_thread(self.run_strategy_replay, None, None, os.getenv("STRATEGY_REPLAY_MODE", "intraday"))
+                next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
+                ran_task = True
+            elif not _env_bool("STRATEGY_REPLAY_ENABLED", True):
+                next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
             if ran_task:
                 state = self._load_state()
                 state["scheduler"] = {
@@ -437,6 +500,10 @@ class QuantJobManager:
                     "market_interval_seconds": self._market_interval_seconds(),
                     "next_trade_cycle_at": datetime.fromtimestamp(next_trade_cycle, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "trade_interval_seconds": self._trade_interval_seconds(),
+                    "next_strategy_replay_at": datetime.fromtimestamp(next_strategy_replay, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
+                    "strategy_replay_start_date": os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01",
+                    "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", True),
                 }
                 self._save_state(state)
                 self._append_log(

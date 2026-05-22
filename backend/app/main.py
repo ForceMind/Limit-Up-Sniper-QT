@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,9 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.quant.access_audit import access_logs, record_access
 from app.quant.biying_sync import biying_minute_sync
+from app.quant.data_transfer import DataPackageError, create_safe_data_package, import_data_package
 from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine
 from app.quant.evolution import strategy_evolution
 from app.quant.jobs import job_manager
@@ -27,7 +30,9 @@ from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
 from app.quant.security import (
     auth_status,
+    frontend_user_summary,
     login,
+    register_frontend_user,
     require_request_scope,
     required_scope_for_api,
     runtime_config_form,
@@ -49,6 +54,13 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except Exception:
+        return default
 
 
 def _create_data_backup() -> Dict[str, Any]:
@@ -84,6 +96,21 @@ def _restart_service_after_response() -> None:
         return
 
 
+def _refresh_quant_caches() -> None:
+    for attr in ("_events_cache", "_kline_cache", "_future_return_cache", "_correlation_cache"):
+        value = getattr(quant_engine, attr, None)
+        if isinstance(value, dict):
+            value.clear()
+        elif isinstance(value, list):
+            value.clear()
+    if hasattr(quant_engine, "_cache_source_key"):
+        setattr(quant_engine, "_cache_source_key", "")
+    try:
+        quant_engine.clear_intraday_cache()
+    except Exception:
+        pass
+
+
 def _json_fingerprint(payload: Any) -> str:
     try:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -114,13 +141,31 @@ if static_dir.exists():
 
 @app.middleware("http")
 async def api_auth_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    auth_payload: Optional[Dict[str, Any]] = None
+    status_code = 500
     required_scope = required_scope_for_api(request.url.path, request.method)
-    if required_scope:
-        try:
-            require_request_scope(request, required_scope)
-        except HTTPException as exc:
-            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+    try:
+        if required_scope:
+            try:
+                auth_payload = require_request_scope(request, required_scope)
+            except HTTPException as exc:
+                status_code = exc.status_code
+                return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        else:
+            authorization = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+            token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+            token = token or str(request.headers.get("x-qt-token") or "").strip()
+            if token:
+                try:
+                    auth_payload = verify_token(token, "frontend")
+                except HTTPException:
+                    auth_payload = None
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        record_access(request, status_code, (time.perf_counter() - started) * 1000, auth_payload)
 
 
 @app.on_event("startup")
@@ -149,6 +194,11 @@ def api_auth_setup(payload: Dict[str, Any] = Body(default_factory=dict)):
 @app.post("/api/auth/login")
 def api_auth_login(payload: Dict[str, Any] = Body(default_factory=dict)):
     return login(payload)
+
+
+@app.post("/api/auth/register")
+def api_auth_register(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return register_frontend_user(payload, request)
 
 
 @app.get("/api/config/status")
@@ -187,6 +237,43 @@ def status():
     }
 
 
+def _market_sentiment(news_payload: Dict[str, Any]) -> Dict[str, Any]:
+    events = news_payload.get("events") if isinstance(news_payload.get("events"), list) else []
+    scores = [float(item.get("sentiment") or 0) for item in events if isinstance(item, dict)]
+    avg = sum(scores) / len(scores) if scores else 0.0
+    positive = sum(1 for value in scores if value > 0)
+    negative = sum(1 for value in scores if value < 0)
+    if avg >= 0.12:
+        label = "偏暖"
+    elif avg <= -0.12:
+        label = "偏冷"
+    else:
+        label = "中性"
+    return {
+        "label": label,
+        "score": round(avg, 4),
+        "positive_count": positive,
+        "negative_count": negative,
+        "sample_count": len(scores),
+    }
+
+
+@app.get("/api/front/public_snapshot")
+def frontend_public_snapshot(
+    as_of: Optional[str] = Query(default=None),
+    mobile: bool = Query(default=False),
+):
+    news_limit = 30 if mobile else 80
+    news_payload = quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    return {
+        "status": "ok",
+        "status_payload": status(),
+        "jobs": {"scheduler": job_manager.status().get("scheduler", {})},
+        "news": news_payload,
+        "market_sentiment": _market_sentiment(news_payload),
+    }
+
+
 @app.get("/api/front/snapshot")
 def frontend_snapshot(
     as_of: Optional[str] = Query(default=None),
@@ -194,16 +281,18 @@ def frontend_snapshot(
 ):
     news_limit = 30 if mobile else 80
     top_n = 12 if mobile else 30
+    news_payload = quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     return {
         "status": "ok",
         "status_payload": status(),
         "jobs": job_manager.status(),
         "logs": job_manager.logs(limit=12),
         "trading_account": quant_engine.trading_account(as_of=as_of, limit=500),
-        "news": quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True),
+        "news": news_payload,
         "recommendations": quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n),
         "daily_plan": quant_engine.daily_plan(as_of=as_of, limit_days=120),
         "strategy_models": strategy_evolution.models(),
+        "market_sentiment": _market_sentiment(news_payload),
     }
 
 
@@ -218,6 +307,8 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None)):
         "notification_status": trade_notifier.status(),
         "evolution_status": strategy_evolution.status(),
         "strategy_models": strategy_evolution.models(),
+        "access_logs": access_logs(limit=120),
+        "frontend_users": frontend_user_summary(),
         "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
         "trading_account": quant_engine.trading_account(as_of=as_of, limit=1000),
         "news": quant_engine.news_feed(as_of=as_of, limit=120, fallback_latest=True),
@@ -469,6 +560,15 @@ def jobs_trading_run(
     return job_manager.run_trade_cycle(date=date, notify=notify)
 
 
+@app.post("/api/jobs/strategy/replay")
+def jobs_strategy_replay(
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    mode: str = Query(default="intraday"),
+):
+    return job_manager.run_strategy_replay(start_date=start_date, end_date=end_date, mode=mode)
+
+
 @app.post("/api/jobs/daily/run")
 def jobs_daily_run(
     date: Optional[str] = Query(default=None),
@@ -518,6 +618,9 @@ def admin_system_startup(
     trade_result = job_manager.run_trade_cycle(date=target_date, notify=notify)
     steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
 
+    replay_result = job_manager.run_strategy_replay(start_date="2026-03-01", end_date=target_date, mode="intraday")
+    steps.append({"name": "策略复盘", "job": "strategy_replay", "result": replay_result})
+
     failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running"}]
     result = {
         "status": "partial" if failed else "ok",
@@ -540,6 +643,68 @@ def admin_backup():
     result = _create_data_backup()
     job_manager._append_log("info", "后台已请求数据备份", job="admin_backup", stage="finish", payload=result)
     return result
+
+
+@app.get("/api/admin/data/export")
+def admin_data_export(include_logs: bool = Query(default=False)):
+    result = create_safe_data_package(BACKUP_DIR, DATA_DIR, include_logs=include_logs)
+    job_manager._append_log("info", "后台已生成数据迁移包", job="admin_data_export", stage="finish", payload=result)
+    package_file = Path(result["package_file"])
+    return FileResponse(
+        package_file,
+        media_type="application/gzip",
+        filename=package_file.name,
+    )
+
+
+@app.post("/api/admin/data/import")
+async def admin_data_import(request: Request, backup: bool = Query(default=True)):
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    max_bytes = int(max(1.0, _env_float("QT_DATA_UPLOAD_MAX_MB", 1024.0)) * 1024 * 1024)
+    upload_fd, upload_name = tempfile.mkstemp(prefix="qt_data_upload_", suffix=".tar.gz", dir=str(BACKUP_DIR))
+    os.close(upload_fd)
+    upload_file = Path(upload_name)
+    received = 0
+    try:
+        with upload_file.open("wb") as handle:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > max_bytes:
+                    raise HTTPException(status_code=413, detail="数据包超过服务器允许大小")
+                handle.write(chunk)
+        if received <= 0:
+            raise HTTPException(status_code=400, detail="上传文件为空")
+        backup_result: Dict[str, Any] = {}
+        if backup:
+            backup_result = _create_data_backup()
+            if backup_result.get("status") != "ok":
+                raise HTTPException(status_code=500, detail=f"导入前备份失败：{backup_result.get('message') or 'unknown'}")
+        result = await asyncio.to_thread(import_data_package, upload_file, DATA_DIR)
+        _refresh_quant_caches()
+        result["backup"] = backup_result
+        result["received_bytes"] = received
+        job_manager._append_log("warning", "后台已导入数据迁移包", job="admin_data_import", stage="finish", payload=result)
+        return result
+    except DataPackageError as exc:
+        job_manager._append_log("error", "后台数据导入被拒绝", job="admin_data_import", stage="rejected", payload={"error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        try:
+            upload_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+@app.get("/api/admin/access_logs")
+def admin_access_logs(
+    limit: int = Query(default=220, ge=1, le=1000),
+    username: Optional[str] = Query(default=None),
+    ip: Optional[str] = Query(default=None),
+    path: Optional[str] = Query(default=None),
+):
+    return access_logs(limit=limit, username=username, ip=ip, path=path)
 
 
 @app.post("/api/admin/restart")

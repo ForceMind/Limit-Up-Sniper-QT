@@ -131,15 +131,17 @@ def auth_status() -> Dict[str, Any]:
     users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
     admin = users.get("admin") if isinstance(users.get("admin"), dict) else {}
     frontend = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
+    frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
     admin_configured = bool(admin.get("username") and admin.get("password"))
-    frontend_configured = bool(frontend.get("username") and frontend.get("password"))
+    frontend_configured = bool(frontend_users) or bool(frontend.get("username") and frontend.get("password"))
     return {
         "status": "ok",
-        "setup_required": not (admin_configured and frontend_configured),
+        "setup_required": not admin_configured,
         "admin_configured": admin_configured,
         "frontend_configured": frontend_configured,
         "admin_username": str(admin.get("username") or ""),
         "frontend_username": str(frontend.get("username") or ""),
+        "frontend_user_count": len(frontend_users) + (1 if frontend.get("username") else 0),
         "token_ttl_seconds": max(TOKEN_TTL_SECONDS, 600),
     }
 
@@ -152,6 +154,15 @@ def _clean_password(value: Any) -> str:
     return str(value or "")
 
 
+def _request_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return ""
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    client_host = request.client.host if request.client else ""
+    return forwarded or real_ip or client_host
+
+
 def setup_auth(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not auth_status()["setup_required"]:
         raise HTTPException(status_code=409, detail="auth is already configured")
@@ -159,29 +170,124 @@ def setup_auth(payload: Dict[str, Any]) -> Dict[str, Any]:
     admin_password = _clean_password(payload.get("admin_password") or payload.get("password"))
     frontend_username = _clean_username(payload.get("frontend_username") or "trader")
     frontend_password = _clean_password(payload.get("frontend_password"))
-    if len(admin_username) < 3 or len(frontend_username) < 3:
+    if len(admin_username) < 3:
         raise HTTPException(status_code=400, detail="username must be at least 3 characters")
-    if len(admin_password) < 8 or len(frontend_password) < 8:
+    if len(admin_password) < 8:
         raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+    existing = _load_auth()
+    existing_users = existing.get("users") if isinstance(existing.get("users"), dict) else {}
+    frontend_users = existing_users.get("frontend_users") if isinstance(existing_users.get("frontend_users"), dict) else {}
     auth = {
-        "version": 1,
-        "created_at": _now_iso(),
+        "version": 2,
+        "created_at": existing.get("created_at") or _now_iso(),
         "updated_at": _now_iso(),
-        "token_secret": secrets.token_urlsafe(32),
+        "token_secret": existing.get("token_secret") or secrets.token_urlsafe(32),
         "users": {
             "admin": {"username": admin_username, "password": _hash_password(admin_password)},
-            "frontend": {"username": frontend_username, "password": _hash_password(frontend_password)},
+            "frontend_users": frontend_users,
         },
     }
+    if frontend_password:
+        if len(frontend_username) < 3 or len(frontend_password) < 6:
+            raise HTTPException(status_code=400, detail="frontend username or password is too short")
+        auth["users"]["frontend_users"][frontend_username] = {
+            "username": frontend_username,
+            "password": _hash_password(frontend_password),
+            "created_at": _now_iso(),
+            "last_login_at": "",
+            "login_count": 0,
+        }
     _save_auth(auth)
     return {
         "status": "ok",
         "setup_required": False,
         "admin_username": admin_username,
-        "frontend_username": frontend_username,
+        "frontend_username": frontend_username if frontend_password else "",
         "token": create_token("admin", admin_username),
         "scope": "admin",
     }
+
+
+def _frontend_user_record(auth: Dict[str, Any], username: str) -> Optional[Dict[str, Any]]:
+    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
+    frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
+    record = frontend_users.get(username)
+    if isinstance(record, dict):
+        return record
+    legacy = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
+    if username == str(legacy.get("username") or ""):
+        return legacy
+    return None
+
+
+def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[str, Any]:
+    username = _clean_username(payload.get("username"))
+    password = _clean_password(payload.get("password"))
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="username must be at least 3 characters")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="password must be at least 6 characters")
+    auth = _load_auth()
+    auth.setdefault("version", 2)
+    auth.setdefault("created_at", _now_iso())
+    auth.setdefault("token_secret", secrets.token_urlsafe(32))
+    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
+    auth["users"] = users
+    frontend_users = users.setdefault("frontend_users", {})
+    if _frontend_user_record(auth, username):
+        raise HTTPException(status_code=409, detail="username already exists")
+    frontend_users[username] = {
+        "username": username,
+        "password": _hash_password(password),
+        "created_at": _now_iso(),
+        "last_login_at": _now_iso(),
+        "login_count": 1,
+        "registered_ip": _request_ip(request) if request else "",
+        "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
+    }
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {
+        "status": "ok",
+        "scope": "frontend",
+        "username": username,
+        "token": create_token("frontend", username),
+        "token_ttl_seconds": max(TOKEN_TTL_SECONDS, 600),
+    }
+
+
+def frontend_user_summary() -> Dict[str, Any]:
+    auth = _load_auth()
+    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
+    frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
+    items = []
+    for username, record in frontend_users.items():
+        if not isinstance(record, dict):
+            continue
+        items.append(
+            {
+                "username": str(record.get("username") or username),
+                "created_at": str(record.get("created_at") or ""),
+                "last_login_at": str(record.get("last_login_at") or ""),
+                "login_count": int(safe_float(record.get("login_count"), 0)),
+                "registered_ip": str(record.get("registered_ip") or ""),
+                "registered_user_agent": str(record.get("registered_user_agent") or ""),
+            }
+        )
+    legacy = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
+    if legacy.get("username"):
+        items.append(
+            {
+                "username": str(legacy.get("username") or ""),
+                "created_at": str(legacy.get("created_at") or ""),
+                "last_login_at": str(legacy.get("last_login_at") or ""),
+                "login_count": int(safe_float(legacy.get("login_count"), 0)),
+                "registered_ip": "",
+                "registered_user_agent": "",
+            }
+        )
+    items.sort(key=lambda item: item.get("last_login_at") or item.get("created_at") or "", reverse=True)
+    return {"status": "ok", "items": items, "count": len(items)}
 
 
 def login(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -189,15 +295,22 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     if scope not in {"admin", "frontend"}:
         raise HTTPException(status_code=400, detail="invalid login scope")
     status = auth_status()
-    if status["setup_required"]:
+    if scope == "admin" and status["setup_required"]:
         raise HTTPException(status_code=401, detail="setup required")
     username = _clean_username(payload.get("username"))
     password = _clean_password(payload.get("password"))
     auth = _load_auth()
     users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
-    record = users.get(scope) if isinstance(users.get(scope), dict) else {}
+    if scope == "admin":
+        record = users.get("admin") if isinstance(users.get("admin"), dict) else {}
+    else:
+        record = _frontend_user_record(auth, username) or {}
     if username != str(record.get("username") or "") or not _verify_password(password, record.get("password") or {}):
         raise HTTPException(status_code=401, detail="username or password is incorrect")
+    record["last_login_at"] = _now_iso()
+    record["login_count"] = int(safe_float(record.get("login_count"), 0)) + 1
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
     return {
         "status": "ok",
         "scope": scope,
@@ -208,7 +321,8 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def require_request_scope(request: Request, required_scope: str) -> Dict[str, Any]:
-    if auth_status()["setup_required"]:
+    status = auth_status()
+    if required_scope == "admin" and status["setup_required"]:
         raise HTTPException(status_code=401, detail="setup required")
     authorization = request.headers.get("authorization") or request.headers.get("Authorization") or ""
     token = ""
@@ -225,7 +339,14 @@ def required_scope_for_api(path: str, method: str) -> Optional[str]:
         return None
     if not path.startswith("/api/"):
         return None
-    if path.startswith(("/api/admin", "/api/config", "/api/ai", "/api/notifications")):
+    if str(method).upper() == "GET" and (
+        path == "/api/front/public_snapshot"
+        or path.startswith("/api/quant/news")
+    ):
+        return None
+    if path == "/api/status":
+        return "admin"
+    if path.startswith(("/api/admin", "/api/jobs", "/api/data", "/api/config", "/api/ai", "/api/notifications")):
         return "admin"
     if path.startswith("/api/quant/evolution"):
         return "admin"
