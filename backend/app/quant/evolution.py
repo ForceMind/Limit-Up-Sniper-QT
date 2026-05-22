@@ -10,6 +10,7 @@ from app.quant.engine import DATA_DIR, quant_engine, read_json, safe_float, writ
 
 
 EVOLUTION_STATE_FILE = DATA_DIR / "strategy_evolution_state.json"
+EVOLUTION_PAUSE_FILE = DATA_DIR / "strategy_evolution_pause.json"
 
 
 GENES: Dict[str, tuple[float, float]] = {
@@ -44,6 +45,40 @@ class StrategyEvolution:
     def status(self) -> Dict[str, Any]:
         payload = read_json(self.state_file, {})
         return payload if isinstance(payload, dict) else {"status": "idle"}
+
+    def _pause_requested(self) -> bool:
+        payload = read_json(EVOLUTION_PAUSE_FILE, {})
+        return bool(isinstance(payload, dict) and payload.get("paused"))
+
+    def pause(self) -> Dict[str, Any]:
+        paused_at = datetime.now().isoformat(timespec="seconds")
+        write_json(EVOLUTION_PAUSE_FILE, {"paused": True, "paused_at": paused_at})
+        payload = self.status()
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["pause_requested"] = True
+        payload["progress_message"] = "已请求暂停，当前代完成后停止"
+        if payload.get("status") != "running":
+            payload["status"] = "paused"
+            payload["progress_message"] = "进化已暂停，可恢复后重新启动"
+        payload["updated_at"] = paused_at
+        write_json(self.state_file, payload)
+        return {"status": "ok", "paused": True, "message": payload["progress_message"]}
+
+    def resume(self) -> Dict[str, Any]:
+        try:
+            EVOLUTION_PAUSE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        payload = self.status()
+        if isinstance(payload, dict):
+            payload["pause_requested"] = False
+            payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            if payload.get("status") == "paused":
+                payload["status"] = "idle"
+                payload["progress_message"] = "已恢复，可重新启动进化"
+            write_json(self.state_file, payload)
+        return {"status": "ok", "paused": False, "message": "已恢复进化控制"}
 
     def models(self) -> Dict[str, Any]:
         payload = self.status()
@@ -90,17 +125,46 @@ class StrategyEvolution:
     ) -> Dict[str, Any]:
         generations = max(1, min(int(generations or 4), 30))
         population_size = max(6, min(int(population_size or 16), 80))
+        start_date = start_date or quant_engine.first_data_date()
+        end_date = end_date or quant_engine.latest_event_date()
         started_ts = time.time()
         started_at = datetime.now().isoformat(timespec="seconds")
         if not self._lock.acquire(blocking=False):
             return {"status": "running", "message": "strategy evolution is already running"}
         try:
+            write_json(
+                self.state_file,
+                {
+                    "status": "running",
+                    "started_at": started_at,
+                    "generations": generations,
+                    "population_size": population_size,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "progress_pct": 1,
+                    "progress_message": "进化已开始",
+                    "models": self.models().get("items", []),
+                },
+            )
             base = quant_engine.strategy_params()
             population = self._initial_population(base, population_size)
             history = []
             best: Optional[Dict[str, Any]] = None
             last_evaluated: List[Dict[str, Any]] = []
             for generation in range(1, generations + 1):
+                if self._pause_requested():
+                    return self._paused_result(
+                        started_at=started_at,
+                        started_ts=started_ts,
+                        generations=generations,
+                        population_size=population_size,
+                        start_date=start_date,
+                        end_date=end_date,
+                        completed_generations=generation - 1,
+                        best=best,
+                        history=history,
+                        last_evaluated=last_evaluated,
+                    )
                 evaluated = [self._evaluate(candidate, start_date=start_date, end_date=end_date) for candidate in population]
                 evaluated.sort(key=lambda item: item["objective"], reverse=True)
                 last_evaluated = evaluated
@@ -117,6 +181,35 @@ class StrategyEvolution:
                         "population": len(evaluated),
                     }
                 )
+                write_json(
+                    self.state_file,
+                    {
+                        "status": "running",
+                        "started_at": started_at,
+                        "generations": generations,
+                        "population_size": population_size,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "progress_pct": round(generation / generations * 100, 2),
+                        "progress_message": f"已完成第 {generation}/{generations} 代",
+                        "best": best,
+                        "history": history,
+                        "models": self.models().get("items", []),
+                    },
+                )
+                if self._pause_requested():
+                    return self._paused_result(
+                        started_at=started_at,
+                        started_ts=started_ts,
+                        generations=generations,
+                        population_size=population_size,
+                        start_date=start_date,
+                        end_date=end_date,
+                        completed_generations=generation,
+                        best=best,
+                        history=history,
+                        last_evaluated=last_evaluated,
+                    )
                 population = self._next_generation(evaluated, population_size)
 
             finished_at = datetime.now().isoformat(timespec="seconds")
@@ -138,6 +231,8 @@ class StrategyEvolution:
                 "duration_ms": round((time.time() - started_ts) * 1000, 2),
                 "generations": generations,
                 "population_size": population_size,
+                "progress_pct": 100,
+                "progress_message": "进化完成",
                 "start_date": start_date,
                 "end_date": end_date,
                 "applied": applied,
@@ -150,6 +245,47 @@ class StrategyEvolution:
             return result
         finally:
             self._lock.release()
+
+    def _paused_result(
+        self,
+        *,
+        started_at: str,
+        started_ts: float,
+        generations: int,
+        population_size: int,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        completed_generations: int,
+        best: Optional[Dict[str, Any]],
+        history: List[Dict[str, Any]],
+        last_evaluated: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        paused_at = datetime.now().isoformat(timespec="seconds")
+        model_source = list(last_evaluated)
+        if best and not any(item.get("params") == best.get("params") for item in model_source):
+            model_source.append(best)
+            model_source.sort(key=lambda item: item["objective"], reverse=True)
+        models = self._build_models(model_source, paused_at) if model_source else self.models().get("items", [])
+        result = {
+            "status": "paused",
+            "started_at": started_at,
+            "updated_at": paused_at,
+            "duration_ms": round((time.time() - started_ts) * 1000, 2),
+            "generations": generations,
+            "population_size": population_size,
+            "completed_generations": completed_generations,
+            "progress_pct": round(max(0, min(100, completed_generations / max(1, generations) * 100)), 2),
+            "progress_message": "进化已暂停，可恢复后重新启动",
+            "pause_requested": True,
+            "start_date": start_date,
+            "end_date": end_date,
+            "best": best,
+            "best_model": models[0] if models else {},
+            "models": models,
+            "history": history,
+        }
+        write_json(self.state_file, result)
+        return result
 
     def _initial_population(self, base: Dict[str, float], population_size: int) -> List[Dict[str, float]]:
         population = [quant_engine.strategy_params(base)]

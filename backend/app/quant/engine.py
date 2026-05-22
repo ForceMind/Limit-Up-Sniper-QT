@@ -972,6 +972,39 @@ class QuantEngine:
             return max(event.date for event in events)
         return datetime.now().strftime("%Y-%m-%d")
 
+    def first_data_date(self) -> str:
+        dates = set()
+        for query in (
+            "SELECT MIN(date) AS date FROM news_events WHERE date IS NOT NULL",
+            "SELECT MIN(date) AS date FROM news_raw WHERE date IS NOT NULL",
+            "SELECT MIN(date) AS date FROM market_daily_bars WHERE date IS NOT NULL",
+            "SELECT MIN(trade_date) AS date FROM lhb_records WHERE trade_date IS NOT NULL",
+        ):
+            for row in self._sqlite_rows(query):
+                date = str(row.get("date") or "").strip()[:10]
+                if date:
+                    dates.add(date)
+        for event in self._events_cache:
+            if event.date:
+                dates.add(event.date)
+        if not dates:
+            try:
+                for event in self.events():
+                    if event.date:
+                        dates.add(event.date)
+            except Exception:
+                pass
+        if KLINE_DAY_DIR.exists():
+            for path in KLINE_DAY_DIR.glob("*.json"):
+                payload = read_json(path, [])
+                if isinstance(payload, list):
+                    for row in payload[:5]:
+                        date = str((row or {}).get("date") or "").strip()[:10] if isinstance(row, dict) else ""
+                        if date:
+                            dates.add(date)
+                            break
+        return min(dates) if dates else "2026-03-01"
+
     def news_feed(
         self,
         as_of: Optional[str] = None,
@@ -2961,6 +2994,76 @@ class QuantEngine:
             "auto_fill": auto_fill_result,
         }
 
+    def rebuild_paper_from_replay(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        mode: str = "daily",
+    ) -> Dict[str, Any]:
+        start_date = str(start_date or self.first_data_date()).strip()
+        end_date = str(end_date or self.latest_event_date()).strip()
+        mode = str(mode or "daily").strip().lower()
+        if mode == "intraday":
+            timeline = self.walk_forward_intraday(start_date=start_date, end_date=end_date, use_daily_fallback=True)
+        else:
+            timeline = self.walk_forward(start_date=start_date, end_date=end_date)
+        days = timeline.get("days") if isinstance(timeline.get("days"), list) else []
+        trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
+        last_day = days[-1] if days else {}
+        positions = []
+        for pos in last_day.get("positions", []) if isinstance(last_day.get("positions"), list) else []:
+            if not isinstance(pos, dict):
+                continue
+            code = digits6(pos.get("code"))
+            if not code:
+                continue
+            positions.append(
+                {
+                    "code": code,
+                    "name": pos.get("name") or self.universe.name(code),
+                    "qty": safe_float(pos.get("qty"), 0),
+                    "entry_price": safe_float(pos.get("entry_price"), 0),
+                    "entry_date": str(pos.get("entry_date") or ""),
+                    "last_price": safe_float(pos.get("last_price"), 0),
+                    "buy_score": safe_float(pos.get("buy_score"), 0),
+                    "reason": pos.get("reason", ""),
+                }
+            )
+        params = self.strategy_params()
+        state = self._load_state()
+        state["initial_cash"] = timeline.get("initial_cash", params["account_initial_cash"])
+        state["cash"] = safe_float(last_day.get("cash"), timeline.get("final_value", params["account_initial_cash"]))
+        state["positions"] = positions
+        state["trades"] = trades[-2000:]
+        state["as_of"] = end_date
+        state["paper_replay"] = {
+            "mode": timeline.get("mode") or mode,
+            "start_date": start_date,
+            "end_date": end_date,
+            "return_pct": timeline.get("return_pct", 0),
+            "closed_trades": timeline.get("closed_trades", 0),
+            "win_rate": timeline.get("win_rate", 0),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._save_state(state)
+        portfolio = self.paper_portfolio(as_of=end_date)
+        return {
+            "status": "ok",
+            "mode": timeline.get("mode") or mode,
+            "start_date": start_date,
+            "end_date": end_date,
+            "timeline": {
+                "return_pct": timeline.get("return_pct", 0),
+                "final_value": timeline.get("final_value", 0),
+                "closed_trades": timeline.get("closed_trades", 0),
+                "win_rate": timeline.get("win_rate", 0),
+                "trade_count": len(trades),
+                "day_count": len(days),
+            },
+            "portfolio": portfolio,
+        }
+
     def paper_portfolio(self, as_of: Optional[str] = None) -> Dict[str, Any]:
         as_of = as_of or self.latest_event_date()
         state = self._load_state()
@@ -3405,6 +3508,7 @@ class QuantEngine:
         apply_best: bool = True,
     ) -> Dict[str, Any]:
         end_date = end_date or as_of or self.latest_event_date()
+        start_date = start_date or self.first_data_date()
         base = self.strategy_params()
 
         def normalized_candidate(name: str, updates: Dict[str, Any]) -> Dict[str, Any]:

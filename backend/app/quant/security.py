@@ -18,6 +18,11 @@ AUTH_FILE = DATA_DIR / "auth.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 PBKDF2_ITERATIONS = 200_000
 TOKEN_TTL_SECONDS = int(safe_float(os.getenv("QT_AUTH_TOKEN_TTL_SECONDS"), 12 * 60 * 60))
+DEFAULT_FRONTEND_SIMULATED_CASH = 200_000.0
+DEFAULT_FRONTEND_PROFILE = {
+    "simulated_cash": DEFAULT_FRONTEND_SIMULATED_CASH,
+    "strategy_model_id": "active",
+}
 
 
 def _now_iso() -> str:
@@ -154,6 +159,17 @@ def _clean_password(value: Any) -> str:
     return str(value or "")
 
 
+def _normalize_frontend_profile(raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    cash = safe_float(raw.get("simulated_cash"), DEFAULT_FRONTEND_SIMULATED_CASH)
+    cash = max(10_000.0, min(10_000_000.0, cash))
+    model_id = str(raw.get("strategy_model_id") or "active").strip() or "active"
+    return {
+        "simulated_cash": round(cash, 2),
+        "strategy_model_id": model_id[:120],
+    }
+
+
 def _request_ip(request: Optional[Request]) -> str:
     if request is None:
         return ""
@@ -196,6 +212,7 @@ def setup_auth(payload: Dict[str, Any]) -> Dict[str, Any]:
             "created_at": _now_iso(),
             "last_login_at": "",
             "login_count": 0,
+            "profile": _normalize_frontend_profile(None),
         }
     _save_auth(auth)
     return {
@@ -244,6 +261,7 @@ def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] =
         "login_count": 1,
         "registered_ip": _request_ip(request) if request else "",
         "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
+        "profile": _normalize_frontend_profile(payload.get("profile") if isinstance(payload.get("profile"), dict) else None),
     }
     auth["updated_at"] = _now_iso()
     _save_auth(auth)
@@ -272,6 +290,7 @@ def frontend_user_summary() -> Dict[str, Any]:
                 "login_count": int(safe_float(record.get("login_count"), 0)),
                 "registered_ip": str(record.get("registered_ip") or ""),
                 "registered_user_agent": str(record.get("registered_user_agent") or ""),
+                "profile": _normalize_frontend_profile(record.get("profile") if isinstance(record.get("profile"), dict) else None),
             }
         )
     legacy = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
@@ -284,10 +303,41 @@ def frontend_user_summary() -> Dict[str, Any]:
                 "login_count": int(safe_float(legacy.get("login_count"), 0)),
                 "registered_ip": "",
                 "registered_user_agent": "",
+                "profile": _normalize_frontend_profile(legacy.get("profile") if isinstance(legacy.get("profile"), dict) else None),
             }
         )
     items.sort(key=lambda item: item.get("last_login_at") or item.get("created_at") or "", reverse=True)
     return {"status": "ok", "items": items, "count": len(items)}
+
+
+def frontend_user_profile(username: str) -> Dict[str, Any]:
+    username = _clean_username(username)
+    auth = _load_auth()
+    record = _frontend_user_record(auth, username)
+    if not record:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    profile = _normalize_frontend_profile(record.get("profile") if isinstance(record.get("profile"), dict) else None)
+    if record.get("profile") != profile:
+        record["profile"] = profile
+        auth["updated_at"] = _now_iso()
+        _save_auth(auth)
+    return {"status": "ok", "username": username, "profile": profile}
+
+
+def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    username = _clean_username(username)
+    auth = _load_auth()
+    record = _frontend_user_record(auth, username)
+    if not record:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    current = record.get("profile") if isinstance(record.get("profile"), dict) else {}
+    updates = payload if isinstance(payload, dict) else {}
+    profile = _normalize_frontend_profile({**current, **updates})
+    record["profile"] = profile
+    record["profile_updated_at"] = _now_iso()
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "username": username, "profile": profile}
 
 
 def login(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -344,6 +394,8 @@ def required_scope_for_api(path: str, method: str) -> Optional[str]:
         or path.startswith("/api/quant/news")
     ):
         return None
+    if path.startswith("/api/front/"):
+        return "frontend"
     if path == "/api/status":
         return "admin"
     if path.startswith(("/api/admin", "/api/jobs", "/api/data", "/api/config", "/api/ai", "/api/notifications")):

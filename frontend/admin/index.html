@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>涨停狙击手后台</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
@@ -246,7 +246,16 @@
                     <div class="font-semibold mt-1">{{ fixed(jobState(job.key).duration_ms, 0) }} ms</div>
                   </div>
                 </div>
-                <div class="text-sm text-neutral-700">{{ jobSummary(job.key) }}</div>
+                <div class="text-sm text-neutral-700">
+                  <div class="flex items-center justify-between gap-2">
+                    <span>{{ jobSummary(job.key) }}</span>
+                    <span class="text-xs text-neutral-500">{{ jobProgress(job.key) }}%</span>
+                  </div>
+                  <div class="mt-2 h-2 bg-neutral-100 overflow-hidden">
+                    <div class="h-full bg-red-600 transition-all" :style="{ width: jobProgress(job.key) + '%' }"></div>
+                  </div>
+                  <div class="mt-1 text-xs text-neutral-500">{{ jobState(job.key).progress_message || '' }}</div>
+                </div>
               </div>
             </div>
           </div>
@@ -469,6 +478,23 @@
           </div>
 
           <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="font-semibold">策略回测</div>
+              <button @click="loadBacktest(false)" :disabled="backtestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ backtestLoading ? '回测中' : '刷新回测' }}</button>
+            </div>
+            <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+              <div class="metric"><div class="text-xs text-neutral-500">状态</div><div class="mt-2 font-semibold">{{ backtestResult.status || '-' }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">收益</div><div class="mt-2 text-lg font-semibold" :class="numClass(backtestResult.return_pct)">{{ pct(backtestResult.return_pct) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">年化</div><div class="mt-2 text-lg font-semibold" :class="numClass(backtestResult.annualized_return_pct)">{{ pct(backtestResult.annualized_return_pct) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">夏普</div><div class="mt-2 text-lg font-semibold">{{ fixed(backtestResult.sharpe_ratio, 2) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">收益因子</div><div class="mt-2 text-lg font-semibold">{{ fixed(backtestResult.profit_factor, 2) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">闭环交易</div><div class="mt-2 text-lg font-semibold">{{ backtestResult.closed_trades || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">缺日K</div><div class="mt-2 text-lg font-semibold text-amber-700">{{ ((backtestResult.data_diagnostics || {}).missing_daily_kline_count) || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">总费用</div><div class="mt-2 text-lg font-semibold">{{ money(backtestResult.total_fees) }}</div></div>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 font-semibold">资金曲线</div>
             <div ref="equityChart" class="h-[320px]"></div>
           </div>
@@ -561,9 +587,9 @@
               <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="2000" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label class="flex items-end gap-2 h-[57px]"><input v-model="dataFillForm.force" type="checkbox" class="accent-neutral-900 mb-3"><span class="mb-2 text-sm">强制刷新</span></label>
               <div class="flex flex-wrap items-end gap-2">
-                <button @click="fillKline" :disabled="fillingKline" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ fillingKline ? '补齐中' : '补齐缺失日K' }}</button>
-                <button @click="syncLhb" :disabled="syncingLhb" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ syncingLhb ? '拉取中' : '拉取龙虎榜席位' }}</button>
-                <button @click="fetchNews" :disabled="newsFetching" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ newsFetching ? '抓取中' : '补抓新闻' }}</button>
+                <button @click="fillKline" :disabled="fillingKline && !isJobRunning('kline_fill')" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ jobActionText('kline_fill', fillingKline ? '补齐中' : '补齐缺失日K') }}</button>
+                <button @click="syncLhb" :disabled="syncingLhb && !isJobRunning('lhb_sync')" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ jobActionText('lhb_sync', syncingLhb ? '拉取中' : '拉取龙虎榜席位') }}</button>
+                <button @click="fetchNews" :disabled="newsFetching && !isJobRunning('news_fetch')" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ jobActionText('news_fetch', newsFetching ? '抓取中' : '补抓新闻') }}</button>
               </div>
             </div>
             <pre v-if="dataManageResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(dataManageResult) }}</pre>
@@ -659,13 +685,22 @@
             <div class="panel">
               <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
                 <div class="font-semibold">遗传进化</div>
-                <button @click="evolveStrategy" :disabled="evolving" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolving ? '进化中' : '启动进化' }}</button>
+                <button @click="evolveStrategy" :disabled="evolutionToggling" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolutionActionText }}</button>
               </div>
               <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                 <div><div class="text-xs text-neutral-500">状态</div><div class="font-semibold mt-1">{{ evolutionStatus.status || '-' }}</div></div>
                 <div><div class="text-xs text-neutral-500">代数</div><div class="font-semibold mt-1">{{ evolutionStatus.generations || ((evolutionStatus.last_run || {}).generations) || 0 }}</div></div>
                 <div><div class="text-xs text-neutral-500">种群</div><div class="font-semibold mt-1">{{ evolutionStatus.population_size || ((evolutionStatus.last_run || {}).population_size) || 0 }}</div></div>
                 <div><div class="text-xs text-neutral-500">更新时间</div><div class="font-semibold mt-1">{{ shortTime(evolutionStatus.finished_at || evolutionStatus.updated_at || ((evolutionStatus.last_run || {}).updated_at)) }}</div></div>
+              </div>
+              <div class="px-4 pb-3">
+                <div class="flex items-center justify-between text-xs text-neutral-500">
+                  <span>{{ evolutionStatus.progress_message || '等待进化' }}</span>
+                  <span>{{ fixed(evolutionStatus.progress_pct || 0, 0) }}%</span>
+                </div>
+                <div class="mt-2 h-2 bg-neutral-100 overflow-hidden">
+                  <div class="h-full bg-red-600 transition-all" :style="{ width: Math.max(0, Math.min(100, Number(evolutionStatus.progress_pct || 0))) + '%' }"></div>
+                </div>
               </div>
               <div class="table-wrap overflow-auto max-h-[360px]">
                 <table class="w-full text-sm">
@@ -877,15 +912,21 @@
         <section v-if="activeTab === 'ops'" class="space-y-4">
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
+            <div class="p-4 pb-0 grid gap-3 md:grid-cols-3 2xl:grid-cols-[150px_150px_140px_1fr] text-sm">
+              <label><span class="block text-xs text-neutral-500 mb-1">补数开始</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label><span class="block text-xs text-neutral-500 mb-1">补数结束</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="2000" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <div class="text-xs text-neutral-500 flex items-end pb-2">系统启动、日K补齐、龙虎榜同步、策略复盘都会使用这个范围；不填开始则使用服务器已有数据最早日期。</div>
+            </div>
             <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-              <button @click="startSystem" :disabled="systemStarting" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ systemStarting ? '启动中' : '系统启动' }}</button>
-              <button @click="fetchNews" :disabled="newsFetching" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ newsFetching ? '抓取中' : '立即抓新闻' }}</button>
-              <button @click="analyzeAI" :disabled="aiAnalyzing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ aiAnalyzing ? '分析中' : '立即AI分析' }}</button>
-              <button @click="syncIntraday" :disabled="syncing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncing ? '同步中' : '同步分时行情' }}</button>
-              <button @click="fillKline" :disabled="fillingKline" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ fillingKline ? '补齐中' : '补齐缺失日K' }}</button>
-              <button @click="syncLhb" :disabled="syncingLhb" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncingLhb ? '拉取中' : '拉取龙虎榜' }}</button>
-              <button @click="runTradeCycle" :disabled="runningTrade" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ runningTrade ? '交易中' : '运行交易循环' }}</button>
-              <button @click="runStrategyReplay" :disabled="replayingStrategy" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ replayingStrategy ? '复盘中' : '运行策略复盘' }}</button>
+              <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '系统启动') }}</button>
+              <button @click="fetchNews" :disabled="newsFetching && !isJobRunning('news_fetch')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('news_fetch', newsFetching ? '抓取中' : '立即抓新闻') }}</button>
+              <button @click="analyzeAI" :disabled="aiAnalyzing && !isJobRunning('ai_analysis')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('ai_analysis', aiAnalyzing ? '分析中' : '立即AI分析') }}</button>
+              <button @click="syncIntraday" :disabled="syncing && !isJobRunning('market_sync')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('market_sync', syncing ? '同步中' : '同步分时行情') }}</button>
+              <button @click="fillKline" :disabled="fillingKline && !isJobRunning('kline_fill')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('kline_fill', fillingKline ? '补齐中' : '补齐缺失日K') }}</button>
+              <button @click="syncLhb" :disabled="syncingLhb && !isJobRunning('lhb_sync')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('lhb_sync', syncingLhb ? '拉取中' : '拉取龙虎榜') }}</button>
+              <button @click="runTradeCycle" :disabled="runningTrade && !isJobRunning('trade_cycle')" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ jobActionText('trade_cycle', runningTrade ? '交易中' : '运行交易循环') }}</button>
+              <button @click="runStrategyReplay" :disabled="replayingStrategy && !isJobRunning('strategy_replay')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('strategy_replay', replayingStrategy ? '复盘中' : '运行策略复盘') }}</button>
               <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
               <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
               <button @click="downloadDataPackage" :disabled="downloadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
@@ -997,6 +1038,7 @@
             { key: 'ops', label: '运维' },
           ],
           jobCards: [
+            { key: 'system_startup', label: '系统启动', desc: '自动补新闻、补日K、同步龙虎榜、重建模拟交易' },
             { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
             { key: 'market_sync', label: '分时行情', desc: '交易时段同步必赢数据' },
@@ -1032,6 +1074,7 @@
           autoRefresh: true,
           loading: false,
           timelineLoading: false,
+          backtestLoading: false,
           systemStarting: false,
           newsFetching: false,
           aiAnalyzing: false,
@@ -1049,6 +1092,7 @@
           strategySaving: false,
           fitting: false,
           evolving: false,
+          evolutionToggling: false,
           clientError: '',
           status: {},
           jobStatus: {},
@@ -1077,6 +1121,7 @@
           configSaving: false,
           configMessage: '',
           activeTimeline: {},
+          backtestResult: {},
           selectedDayDate: '',
           tradeMode: 'intraday',
           equityChart: null,
@@ -1087,7 +1132,7 @@
           logUpdatedAt: '',
           showPayloads: false,
           syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
-          dataFillForm: { start_date: '2026-03-01', end_date: '', max_codes: 300, force: false },
+          dataFillForm: { start_date: '', end_date: '', max_codes: 300, force: false },
           timelineForm: { start_date: '', end_date: '' },
           strategyForm: {},
           refreshTimer: null,
@@ -1130,6 +1175,16 @@
       },
       computed: {
         scheduler() { return this.jobStatus.scheduler || {}; },
+        runningJobs() { return this.jobStatus.running || {}; },
+        pausedJobs() { return this.jobStatus.paused_jobs || {}; },
+        dataStartDate() { return this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || ''; },
+        isEvolutionRunning() { return this.evolving || this.evolutionStatus.status === 'running'; },
+        isEvolutionPaused() { return this.evolutionStatus.status === 'paused' || Boolean(this.evolutionStatus.pause_requested); },
+        evolutionActionText() {
+          if (this.isEvolutionRunning) return '暂停';
+          if (this.isEvolutionPaused) return '恢复';
+          return '启动进化';
+        },
         authConfig() { return (this.configStatus.auth || {}); },
         deepseekConfig() { return (this.configStatus.deepseek || {}); },
         biyingConfig() { return (this.configStatus.biying || {}); },
@@ -1183,6 +1238,7 @@
           if (value === 'analysis') {
             if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
             if (!this.activeTimeline.start_date) this.loadTimeline(false);
+            if (!this.backtestResult.status) this.loadBacktest(false);
           }
           if (value === 'settings' && !Object.keys(this.configForm || {}).length) {
             this.loadRuntimeConfig(false);
@@ -1409,6 +1465,8 @@
         applyAdminSnapshot(snapshot) {
           this.status = snapshot.status_payload || this.status;
           this.jobStatus = snapshot.jobs || this.jobStatus;
+          if (!this.timelineForm.start_date && this.scheduler.data_backfill_start_date) this.timelineForm.start_date = this.scheduler.data_backfill_start_date;
+          if ((!this.dataFillForm.start_date || this.dataFillForm.start_date === '2026-03-01') && this.scheduler.data_backfill_start_date) this.dataFillForm.start_date = this.scheduler.data_backfill_start_date;
           this.biyingStatus = snapshot.biying || this.biyingStatus;
           this.lhbStatus = snapshot.lhb || ((snapshot.jobs || {}).lhb) || this.lhbStatus;
           this.aiUsage = snapshot.ai_usage || this.aiUsage;
@@ -1488,6 +1546,7 @@
           }
         },
         async startSystem() {
+          if (this.isJobRunning('system_startup') || this.isJobPaused('system_startup')) return this.pauseOrResumeJob('system_startup');
           this.systemStarting = true;
           this.clientError = '';
           try {
@@ -1496,9 +1555,11 @@
               news_hours: '24',
               news_pages: '8',
               ai_items: '20',
-              market_codes: '200',
+              market_codes: String(this.dataFillForm.max_codes || 200),
               notify: 'true',
             });
+            if (this.dataFillForm.start_date || this.dataStartDate) q.set('start_date', this.dataFillForm.start_date || this.dataStartDate);
+            if (this.dataFillForm.end_date || this.asOf) q.set('end_date', this.dataFillForm.end_date || this.asOf);
             this.adminResult = await this.api(`/api/admin/system/startup?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
@@ -1509,6 +1570,7 @@
           }
         },
         async fetchNews() {
+          if (this.isJobRunning('news_fetch') || this.isJobPaused('news_fetch')) return this.pauseOrResumeJob('news_fetch');
           this.newsFetching = true;
           try {
             await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20', { method: 'POST' });
@@ -1519,6 +1581,7 @@
           }
         },
         async analyzeAI() {
+          if (this.isJobRunning('ai_analysis') || this.isJobPaused('ai_analysis')) return this.pauseOrResumeJob('ai_analysis');
           this.aiAnalyzing = true;
           try {
             const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4' });
@@ -1530,6 +1593,7 @@
           }
         },
         async syncIntraday() {
+          if (this.isJobRunning('market_sync') || this.isJobPaused('market_sync')) return this.pauseOrResumeJob('market_sync');
           this.syncing = true;
           try {
             const q = new URLSearchParams({
@@ -1548,10 +1612,11 @@
           }
         },
         async fillKline() {
+          if (this.isJobRunning('kline_fill') || this.isJobPaused('kline_fill')) return this.pauseOrResumeJob('kline_fill');
           this.fillingKline = true;
           try {
             const q = new URLSearchParams({
-              start_date: this.dataFillForm.start_date || '2026-03-01',
+              start_date: this.dataFillForm.start_date || this.dataStartDate || '',
               end_date: this.dataFillForm.end_date || this.asOf || '',
               max_codes: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
@@ -1567,10 +1632,11 @@
           }
         },
         async syncLhb() {
+          if (this.isJobRunning('lhb_sync') || this.isJobPaused('lhb_sync')) return this.pauseOrResumeJob('lhb_sync');
           this.syncingLhb = true;
           try {
             const q = new URLSearchParams({
-              start_date: this.dataFillForm.start_date || '2026-03-01',
+              start_date: this.dataFillForm.start_date || this.dataStartDate || '',
               end_date: this.dataFillForm.end_date || this.asOf || '',
               max_stock_days: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
@@ -1586,6 +1652,7 @@
           }
         },
         async runTradeCycle() {
+          if (this.isJobRunning('trade_cycle') || this.isJobPaused('trade_cycle')) return this.pauseOrResumeJob('trade_cycle');
           this.runningTrade = true;
           try {
             const q = this.asOf ? `?date=${this.asOf}&notify=true` : '?notify=true';
@@ -1597,9 +1664,10 @@
           }
         },
         async runStrategyReplay() {
+          if (this.isJobRunning('strategy_replay') || this.isJobPaused('strategy_replay')) return this.pauseOrResumeJob('strategy_replay');
           this.replayingStrategy = true;
           try {
-            const q = new URLSearchParams({ start_date: '2026-03-01', mode: 'intraday' });
+            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday' });
             if (this.asOf) q.set('end_date', this.asOf);
             await this.api(`/api/jobs/strategy/replay?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
@@ -1763,6 +1831,7 @@
           this.fitting = true;
           try {
             const q = new URLSearchParams({ apply_best: String(Boolean(applyBest)) });
+            if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.asOf) q.set('as_of', this.asOf);
             this.fitResult = await this.api(`/api/quant/fit_strategy?${q.toString()}`, { method: 'POST' });
             if (applyBest) await this.refreshAll();
@@ -1771,14 +1840,35 @@
           }
         },
         async evolveStrategy() {
+          if (this.isEvolutionRunning) return this.pauseEvolution();
+          if (this.isEvolutionPaused) return this.resumeEvolution();
           this.evolving = true;
           try {
             const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false' });
+            if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.asOf) q.set('end_date', this.asOf);
             this.evolutionStatus = await this.api(`/api/quant/evolve_strategy?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
           } finally {
             this.evolving = false;
+          }
+        },
+        async pauseEvolution() {
+          this.evolutionToggling = true;
+          try {
+            this.evolutionStatus = await this.api('/api/quant/evolution/pause', { method: 'POST' });
+            await this.refreshAll();
+          } finally {
+            this.evolutionToggling = false;
+          }
+        },
+        async resumeEvolution() {
+          this.evolutionToggling = true;
+          try {
+            this.evolutionStatus = await this.api('/api/quant/evolution/resume', { method: 'POST' });
+            await this.refreshAll();
+          } finally {
+            this.evolutionToggling = false;
           }
         },
         async applyEvolutionModel(model) {
@@ -1798,10 +1888,28 @@
             this.activeTimeline = await this.api(`${endpoint}?${q.toString()}`);
             await nextTick();
             this.renderEquityChart();
+            this.loadBacktest(true);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
           } finally {
             this.timelineLoading = false;
+          }
+        },
+        async loadBacktest(quiet = false) {
+          this.backtestLoading = !quiet;
+          try {
+            const q = new URLSearchParams({
+              hold_days: String(Math.round(Number(this.strategyForm.max_hold_days || 3))),
+              top_n: String(Math.round(Number(this.strategyForm.top_n || 5))),
+              auto_fill: 'false',
+            });
+            if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
+            if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
+            this.backtestResult = await this.api(`/api/quant/backtest?${q.toString()}`);
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          } finally {
+            this.backtestLoading = false;
           }
         },
         renderEquityChart() {
@@ -1854,14 +1962,39 @@
         jobState(key) {
           return ((this.jobStatus.jobs || {})[key]) || {};
         },
+        isJobRunning(key) {
+          return Boolean((this.runningJobs || {})[key] || this.jobState(key).status === 'running');
+        },
+        isJobPaused(key) {
+          return Boolean((this.pausedJobs || {})[key] || this.jobState(key).status === 'paused');
+        },
+        jobProgress(key) {
+          const state = this.jobState(key);
+          if (this.isJobRunning(key) && !state.progress_pct) return 3;
+          if (this.isJobPaused(key)) return Number(state.progress_pct || 0);
+          return Math.max(0, Math.min(100, Number(state.progress_pct || (state.status === 'ok' ? 100 : 0))));
+        },
+        jobActionText(key, idleText) {
+          if (this.isJobRunning(key)) return '暂停';
+          if (this.isJobPaused(key)) return '恢复';
+          return idleText;
+        },
+        async pauseOrResumeJob(key) {
+          const action = this.isJobPaused(key) ? 'resume' : 'pause';
+          await this.api(`/api/jobs/${key}/${action}`, { method: 'POST' });
+          await this.refreshAll();
+          if (!this.liveConnected) await this.fetchLogs();
+        },
         jobSummary(key) {
           const result = this.jobState(key).last_result || {};
+          if (key === 'system_startup') return this.jobState(key).progress_message || `范围 ${result.start_date || '-'} 到 ${result.date || '-'}`;
           if (key === 'news_fetch') return `抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
           if (key === 'ai_analysis') return `选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
           if (key === 'market_sync') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，写入 ${result.rows_written || 0}`;
           if (key === 'kline_fill') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，新增 ${result.added_rows || 0}`;
           if (key === 'lhb_sync') return `股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}，新增 ${result.added_rows || 0}`;
           if (key === 'trade_cycle') return `交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
+          if (key === 'strategy_replay') return `收益 ${this.pct(result.return_pct)}，交易 ${result.trade_count || 0}，闭环 ${result.closed_trades || 0}`;
           return '-';
         },
         statusPillClass(status) {

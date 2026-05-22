@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from app.quant.access_audit import access_logs, record_access
 from app.quant.biying_sync import biying_minute_sync
 from app.quant.data_transfer import DataPackageError, clear_sample_quant_state, create_safe_data_package, import_data_package
-from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine
+from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine, safe_float
 from app.quant.evolution import strategy_evolution
 from app.quant.lhb_sync import lhb_status
 from app.quant.jobs import job_manager
@@ -31,6 +31,7 @@ from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
 from app.quant.security import (
     auth_status,
+    frontend_user_profile,
     frontend_user_summary,
     login,
     register_frontend_user,
@@ -39,6 +40,7 @@ from app.quant.security import (
     runtime_config_form,
     runtime_config_status,
     setup_auth,
+    update_frontend_user_profile,
     update_runtime_config,
     verify_token,
 )
@@ -164,6 +166,7 @@ async def api_auth_middleware(request: Request, call_next):
                     auth_payload = verify_token(token, "frontend")
                 except HTTPException:
                     auth_payload = None
+        request.state.auth_payload = auth_payload
         response = await call_next(request)
         status_code = response.status_code
         return response
@@ -202,6 +205,23 @@ def api_auth_login(payload: Dict[str, Any] = Body(default_factory=dict)):
 @app.post("/api/auth/register")
 def api_auth_register(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
     return register_frontend_user(payload, request)
+
+
+def _request_username(request: Request) -> str:
+    payload = getattr(request.state, "auth_payload", None)
+    if not isinstance(payload, dict):
+        payload = require_request_scope(request, "frontend")
+    return str(payload.get("sub") or "").strip()
+
+
+@app.get("/api/front/profile")
+def api_front_profile(request: Request):
+    return frontend_user_profile(_request_username(request))
+
+
+@app.post("/api/front/profile")
+def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return update_frontend_user_profile(_request_username(request), payload)
 
 
 @app.get("/api/config/status")
@@ -261,6 +281,126 @@ def _market_sentiment(news_payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+    items: list[Dict[str, Any]] = []
+    active = models_payload.get("active") if isinstance(models_payload.get("active"), dict) else {}
+    if active:
+        items.append({**active, "id": str(active.get("id") or "active")})
+    for item in models_payload.get("items") if isinstance(models_payload.get("items"), list) else []:
+        if isinstance(item, dict):
+            items.append(item)
+    seen = set()
+    unique = []
+    for item in items:
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        unique.append(item)
+    return unique
+
+
+def _frontend_profile_context(request: Request) -> Dict[str, Any]:
+    username = _request_username(request)
+    profile_payload = frontend_user_profile(username)
+    profile = profile_payload.get("profile") if isinstance(profile_payload.get("profile"), dict) else {}
+    models_payload = strategy_evolution.models()
+    model_items = _strategy_catalog_items(models_payload)
+    selected_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+    selected = next((item for item in model_items if str(item.get("id")) == selected_id), None)
+    if not selected and model_items:
+        selected = model_items[0]
+        selected_id = str(selected.get("id") or "active")
+        profile["strategy_model_id"] = selected_id
+    params = quant_engine.strategy_params((selected or {}).get("params") if isinstance((selected or {}).get("params"), dict) else {})
+    simulated_cash = max(10_000.0, min(10_000_000.0, safe_float(profile.get("simulated_cash"), params["account_initial_cash"])))
+    params["account_initial_cash"] = simulated_cash
+    max_positions = max(1.0, safe_float(params.get("max_positions"), 1.0))
+    params["paper_position_value"] = min(safe_float(params.get("paper_position_value"), simulated_cash), simulated_cash / max_positions)
+    profile["simulated_cash"] = round(simulated_cash, 2)
+    return {
+        "username": username,
+        "profile": profile,
+        "models_payload": models_payload,
+        "followed_model": selected or {},
+        "strategy_params": params,
+    }
+
+
+def _scale_row(row: Dict[str, Any], scale: float, keys: tuple[str, ...]) -> Dict[str, Any]:
+    item = dict(row)
+    for key in keys:
+        if key in item:
+            item[key] = round(safe_float(item.get(key), 0) * scale, 2)
+    return item
+
+
+def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    target_cash = safe_float(profile.get("simulated_cash"), 0)
+    account = account_payload.get("account") if isinstance(account_payload.get("account"), dict) else {}
+    base_initial = safe_float(account.get("total_asset"), 0) - safe_float(account.get("total_pnl"), 0)
+    if base_initial <= 0:
+        base_initial = safe_float(((account_payload.get("portfolio") or {}).get("strategy_params") or {}).get("account_initial_cash"), target_cash)
+    scale = target_cash / base_initial if base_initial > 0 and target_cash > 0 else 1.0
+    money_keys = (
+        "total_asset",
+        "cash",
+        "available_cash",
+        "frozen_cash",
+        "state_cash_gross",
+        "market_value",
+        "position_cost",
+        "unrealized_pnl",
+        "realized_pnl",
+        "total_pnl",
+        "total_fees",
+    )
+    position_money_keys = ("qty", "available_qty", "frozen_qty", "market_value", "cost_amount", "pnl_amount")
+    deal_money_keys = (
+        "qty",
+        "amount",
+        "commission",
+        "stamp_duty",
+        "transfer_fee",
+        "total_fee",
+        "net_amount",
+        "cost_amount",
+        "realized_pnl",
+    )
+    settlement_money_keys = (
+        "buy_amount",
+        "sell_amount",
+        "commission",
+        "stamp_duty",
+        "transfer_fee",
+        "total_fee",
+        "net_amount",
+        "realized_pnl",
+    )
+    next_payload = dict(account_payload)
+    next_account = _scale_row(account, scale, money_keys)
+    next_account["initial_cash"] = round(target_cash, 2)
+    next_account["simulated_cash"] = round(target_cash, 2)
+    next_account["total_pnl"] = round(safe_float(next_account.get("total_asset"), target_cash) - target_cash, 2)
+    next_account["return_pct"] = round(safe_float(next_account.get("total_pnl"), 0) / target_cash * 100, 3) if target_cash > 0 else 0.0
+    next_account["follow_model_id"] = str(profile.get("strategy_model_id") or "active")
+    next_account["follow_model_name"] = str((context.get("followed_model") or {}).get("name") or "当前运行策略")
+    next_payload["account"] = next_account
+    next_payload["positions"] = [_scale_row(item, scale, position_money_keys) for item in account_payload.get("positions", []) if isinstance(item, dict)]
+    next_payload["today_deals"] = [_scale_row(item, scale, deal_money_keys) for item in account_payload.get("today_deals", []) if isinstance(item, dict)]
+    next_payload["history_deals"] = [_scale_row(item, scale, deal_money_keys) for item in account_payload.get("history_deals", []) if isinstance(item, dict)]
+    next_payload["delivery_records"] = [_scale_row(item, scale, deal_money_keys) for item in account_payload.get("delivery_records", []) if isinstance(item, dict)]
+    next_payload["daily_settlements"] = [_scale_row(item, scale, settlement_money_keys) for item in account_payload.get("daily_settlements", []) if isinstance(item, dict)]
+    portfolio = account_payload.get("portfolio") if isinstance(account_payload.get("portfolio"), dict) else {}
+    next_portfolio = _scale_row(portfolio, scale, ("cash", "total_value"))
+    next_portfolio["strategy_params"] = context.get("strategy_params") or portfolio.get("strategy_params") or {}
+    next_payload["portfolio"] = next_portfolio
+    next_payload["frontend_profile"] = profile
+    next_payload["followed_model"] = context.get("followed_model") or {}
+    return next_payload
+
+
 @app.get("/api/front/public_snapshot")
 def frontend_public_snapshot(
     as_of: Optional[str] = Query(default=None),
@@ -279,22 +419,30 @@ def frontend_public_snapshot(
 
 @app.get("/api/front/snapshot")
 def frontend_snapshot(
+    request: Request,
     as_of: Optional[str] = Query(default=None),
     mobile: bool = Query(default=False),
 ):
     news_limit = 30 if mobile else 80
     top_n = 12 if mobile else 30
     news_payload = quant_engine.news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    context = _frontend_profile_context(request)
+    with quant_engine.temporary_strategy_params(context["strategy_params"]):
+        trading_account = quant_engine.trading_account(as_of=as_of, limit=500)
+        recommendations = quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n)
+        daily_plan = quant_engine.daily_plan(as_of=as_of, limit_days=120)
     return {
         "status": "ok",
         "status_payload": status(),
         "jobs": job_manager.status(),
         "logs": job_manager.logs(limit=12),
-        "trading_account": quant_engine.trading_account(as_of=as_of, limit=500),
+        "frontend_profile": context["profile"],
+        "followed_model": context["followed_model"],
+        "trading_account": _frontend_trading_account(trading_account, context),
         "news": news_payload,
-        "recommendations": quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n),
-        "daily_plan": quant_engine.daily_plan(as_of=as_of, limit_days=120),
-        "strategy_models": strategy_evolution.models(),
+        "recommendations": recommendations,
+        "daily_plan": daily_plan,
+        "strategy_models": context["models_payload"],
         "market_sentiment": _market_sentiment(news_payload),
     }
 
@@ -441,6 +589,16 @@ def quant_evolution_status():
     return strategy_evolution.status()
 
 
+@app.post("/api/quant/evolution/pause")
+def quant_pause_evolution():
+    return strategy_evolution.pause()
+
+
+@app.post("/api/quant/evolution/resume")
+def quant_resume_evolution():
+    return strategy_evolution.resume()
+
+
 @app.get("/api/quant/models")
 def quant_strategy_models():
     return strategy_evolution.models()
@@ -507,6 +665,16 @@ def jobs_logs(
     job: Optional[str] = Query(default=None),
 ):
     return job_manager.logs(limit=limit, level=level, job=job)
+
+
+@app.post("/api/jobs/{job_name}/pause")
+def jobs_pause(job_name: str):
+    return job_manager.pause_job(job_name)
+
+
+@app.post("/api/jobs/{job_name}/resume")
+def jobs_resume(job_name: str):
+    return job_manager.resume_job(job_name)
 
 
 @app.get("/api/logs/runtime")
@@ -581,51 +749,46 @@ def jobs_daily_run(
     return job_manager.run_trade_cycle(date=date, notify=notify)
 
 
-@app.post("/api/admin/system/startup")
-def admin_system_startup(
-    date: Optional[str] = Query(default=None),
-    news_hours: int = Query(default=24, ge=1, le=168),
-    news_pages: int = Query(default=8, ge=1, le=30),
-    ai_items: int = Query(default=20, ge=1, le=80),
-    market_codes: int = Query(default=200, ge=1, le=1000),
-    notify: bool = Query(default=True),
-):
-    target_date = str(date or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
-    payload = {
-        "date": target_date,
-        "news_hours": news_hours,
-        "news_pages": news_pages,
-        "ai_items": ai_items,
-        "market_codes": market_codes,
-        "notify": notify,
-    }
-    job_manager._append_log("info", "系统启动流程开始", job="system_startup", stage="start", payload=payload)
+def _run_system_startup_flow(
+    target_date: str,
+    replay_start_date: str,
+    news_hours: int,
+    news_pages: int,
+    ai_items: int,
+    market_codes: int,
+    notify: bool,
+) -> Dict[str, Any]:
     steps = []
 
+    job_manager.update_progress("system_startup", 8, "抓取新闻", {"step": "news_fetch"})
     news_result = job_manager.run_news_fetch(hours=news_hours, pages=news_pages, page_size=20)
     if news_result.get("status") == "ok":
         quant_engine.events(force=True)
     steps.append({"name": "新闻抓取", "job": "news_fetch", "result": news_result})
 
+    job_manager.update_progress("system_startup", 22, "AI 分析", {"step": "ai_analysis"})
     ai_result = job_manager.run_ai_analysis(as_of=target_date, max_items=ai_items, batch_size=4)
     steps.append({"name": "AI 分析", "job": "ai_analysis", "result": ai_result})
 
+    job_manager.update_progress("system_startup", 38, "补齐日K", {"step": "kline_fill", "start_date": replay_start_date, "end_date": target_date})
     kline_result = job_manager.run_kline_fill(
-        start_date="2026-03-01",
+        start_date=replay_start_date,
         end_date=target_date,
         max_codes=market_codes,
         force=False,
     )
     steps.append({"name": "日K补齐", "job": "kline_fill", "result": kline_result})
 
+    job_manager.update_progress("system_startup", 54, "同步龙虎榜", {"step": "lhb_sync", "start_date": replay_start_date, "end_date": target_date})
     lhb_result = job_manager.run_lhb_sync(
-        start_date="2026-03-01",
+        start_date=replay_start_date,
         end_date=target_date,
         max_stock_days=market_codes,
         force=False,
     )
     steps.append({"name": "龙虎榜同步", "job": "lhb_sync", "result": lhb_result})
 
+    job_manager.update_progress("system_startup", 68, "同步分时行情", {"step": "market_sync"})
     market_result = job_manager.run_market_sync(
         date=target_date,
         source="auto",
@@ -635,27 +798,60 @@ def admin_system_startup(
     )
     steps.append({"name": "行情同步", "job": "market_sync", "result": market_result})
 
+    job_manager.update_progress("system_startup", 82, "从数据起点重建模拟交易", {"step": "trade_cycle", "start_date": replay_start_date})
     trade_result = job_manager.run_trade_cycle(date=target_date, notify=notify)
     steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
 
-    replay_result = job_manager.run_strategy_replay(start_date="2026-03-01", end_date=target_date, mode="intraday")
+    job_manager.update_progress("system_startup", 94, "策略复盘", {"step": "strategy_replay", "start_date": replay_start_date})
+    replay_result = job_manager.run_strategy_replay(start_date=replay_start_date, end_date=target_date, mode="intraday")
     steps.append({"name": "策略复盘", "job": "strategy_replay", "result": replay_result})
 
     failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running"}]
-    result = {
+    return {
         "status": "partial" if failed else "ok",
         "message": "系统启动流程完成" if not failed else "系统启动流程完成，但有步骤未成功，请查看运行日志",
+        "start_date": replay_start_date,
         "date": target_date,
         "steps": steps,
     }
-    job_manager._append_log(
-        "warning" if failed else "info",
-        result["message"],
-        job="system_startup",
-        stage="finish",
-        payload=result,
+
+
+@app.post("/api/admin/system/startup")
+def admin_system_startup(
+    date: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    news_hours: int = Query(default=24, ge=1, le=168),
+    news_pages: int = Query(default=8, ge=1, le=30),
+    ai_items: int = Query(default=20, ge=1, le=80),
+    market_codes: int = Query(default=200, ge=1, le=1000),
+    notify: bool = Query(default=True),
+):
+    target_date = str(end_date or date or quant_engine.latest_event_date() or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
+    replay_start_date = str(start_date or quant_engine.first_data_date() or "2026-03-01").strip()
+    payload = {
+        "date": target_date,
+        "start_date": replay_start_date,
+        "end_date": target_date,
+        "news_hours": news_hours,
+        "news_pages": news_pages,
+        "ai_items": ai_items,
+        "market_codes": market_codes,
+        "notify": notify,
+    }
+    return job_manager.run_job(
+        "system_startup",
+        lambda: _run_system_startup_flow(
+            target_date=target_date,
+            replay_start_date=replay_start_date,
+            news_hours=news_hours,
+            news_pages=news_pages,
+            ai_items=ai_items,
+            market_codes=market_codes,
+            notify=notify,
+        ),
+        payload=payload,
     )
-    return result
 
 
 @app.post("/api/admin/backup")

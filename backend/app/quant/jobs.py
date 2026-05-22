@@ -107,6 +107,7 @@ class QuantJobManager:
             payload = {}
         payload.setdefault("scheduler", {})
         payload.setdefault("jobs", {})
+        payload.setdefault("paused_jobs", {})
         return payload
 
     def _save_state(self, state: Dict[str, Any]) -> None:
@@ -179,6 +180,8 @@ class QuantJobManager:
                 {
                     "name": name,
                     "status": "running",
+                    "progress_pct": 1,
+                    "progress_message": "任务已开始",
                     "last_started_at": _iso_now(),
                     "last_payload": payload,
                 }
@@ -203,6 +206,8 @@ class QuantJobManager:
                 {
                     "name": name,
                     "status": status,
+                    "progress_pct": 100,
+                    "progress_message": "任务失败" if error else "任务完成",
                     "last_finished_at": _iso_now(),
                     "duration_ms": round((time.time() - started) * 1000, 2),
                     "success_count": success_count,
@@ -228,8 +233,60 @@ class QuantJobManager:
             )
             return {"status": status, "job": current}
 
+    def update_progress(self, name: str, progress_pct: float, message: str = "", payload: Optional[Dict[str, Any]] = None) -> None:
+        with self._state_lock:
+            state = self._load_state()
+            jobs = state.setdefault("jobs", {})
+            current = jobs.setdefault(name, {"name": name})
+            current["status"] = "running"
+            current["progress_pct"] = max(0, min(100, round(float(progress_pct or 0), 2)))
+            current["progress_message"] = str(message or current.get("progress_message") or "")
+            if payload is not None:
+                current["progress_payload"] = _sanitize_for_log(payload)
+            current["progress_updated_at"] = _iso_now()
+            self._save_state(state)
+
+    def is_paused(self, name: str) -> bool:
+        state = self._load_state()
+        paused = state.get("paused_jobs") if isinstance(state.get("paused_jobs"), dict) else {}
+        return bool(paused.get(name))
+
+    def pause_job(self, name: str) -> Dict[str, Any]:
+        name = str(name or "").strip()
+        with self._state_lock:
+            state = self._load_state()
+            paused = state.setdefault("paused_jobs", {})
+            paused[name] = {"paused": True, "paused_at": _iso_now()}
+            jobs = state.setdefault("jobs", {})
+            current = jobs.setdefault(name, {"name": name})
+            if current.get("status") != "running":
+                current["status"] = "paused"
+            current["progress_message"] = "已暂停后续调度"
+            self._save_state(state)
+        self._append_log("warning", f"{_job_label(name)}已暂停后续调度", job=name, stage="pause")
+        return {"status": "ok", "job": name, "paused": True}
+
+    def resume_job(self, name: str) -> Dict[str, Any]:
+        name = str(name or "").strip()
+        with self._state_lock:
+            state = self._load_state()
+            paused = state.setdefault("paused_jobs", {})
+            paused.pop(name, None)
+            jobs = state.setdefault("jobs", {})
+            current = jobs.setdefault(name, {"name": name})
+            if current.get("status") == "paused":
+                current["status"] = "idle"
+            current["progress_message"] = "已恢复调度"
+            self._save_state(state)
+        self._append_log("info", f"{_job_label(name)}已恢复调度", job=name, stage="resume")
+        return {"status": "ok", "job": name, "paused": False}
+
     def run_job(self, name: str, fn: Callable[[], Dict[str, Any]], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
+        if self.is_paused(name):
+            message = f"{_job_label(name)}已暂停，跳过本次运行"
+            self._append_log("warning", message, job=name, stage="paused", payload=payload)
+            return {"status": "paused", "message": message}
         with self._lock:
             if self._running.get(name):
                 message = f"{_job_label(name)}正在运行，已跳过重复请求"
@@ -304,6 +361,9 @@ class QuantJobManager:
             payload=payload,
         )
 
+    def _default_backfill_start_date(self) -> str:
+        return str(os.getenv("DATA_BACKFILL_START_DATE") or os.getenv("STRATEGY_REPLAY_START_DATE") or quant_engine.first_data_date() or "2026-03-01").strip()
+
     def run_kline_fill(
         self,
         start_date: Optional[str] = None,
@@ -311,7 +371,7 @@ class QuantJobManager:
         max_codes: int = 300,
         force: bool = False,
     ) -> Dict[str, Any]:
-        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         max_codes = max(1, min(int(max_codes or 300), 2000))
         payload = {"start_date": start_date, "end_date": end_date, "max_codes": max_codes, "force": bool(force)}
@@ -334,7 +394,7 @@ class QuantJobManager:
         max_stock_days: int = 300,
         force: bool = False,
     ) -> Dict[str, Any]:
-        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         max_stock_days = max(1, min(int(max_stock_days or 300), 2000))
         payload = {"start_date": start_date, "end_date": end_date, "max_stock_days": max_stock_days, "force": bool(force)}
@@ -354,7 +414,9 @@ class QuantJobManager:
         payload = {"date": date, "notify": bool(notify)}
 
         def execute() -> Dict[str, Any]:
-            portfolio = quant_engine.run_paper_trading(as_of=date)
+            replay_start = self._default_backfill_start_date()
+            replay = quant_engine.rebuild_paper_from_replay(start_date=replay_start, end_date=date, mode="daily")
+            portfolio = replay.get("portfolio") if isinstance(replay.get("portfolio"), dict) else quant_engine.run_paper_trading(as_of=date)
             trades = portfolio.get("trades", []) if isinstance(portfolio.get("trades"), list) else []
             day_trades = [trade for trade in trades if isinstance(trade, dict) and str(trade.get("date") or "") == date]
             notification = trade_notifier.notify_trade_events(day_trades, as_of=date, source="paper_trading") if notify else {"status": "disabled", "sent": 0}
@@ -368,6 +430,8 @@ class QuantJobManager:
                 "cash": portfolio.get("cash", 0),
                 "positions": len(portfolio.get("positions", []) or []),
                 "total_value": portfolio.get("total_value", 0),
+                "replay_start_date": replay_start,
+                "replay": replay.get("timeline", {}),
             }
 
         return self.run_job("trade_cycle", execute, payload=payload)
@@ -378,7 +442,7 @@ class QuantJobManager:
         end_date: Optional[str] = None,
         mode: str = "intraday",
     ) -> Dict[str, Any]:
-        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         mode = str(mode or os.getenv("STRATEGY_REPLAY_MODE") or "intraday").strip().lower()
         if mode not in {"daily", "intraday"}:
@@ -471,6 +535,15 @@ class QuantJobManager:
     def _strategy_replay_interval_seconds(self) -> int:
         return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
 
+    def _kline_fill_interval_seconds(self) -> int:
+        return _env_int("KLINE_FILL_INTERVAL_SECONDS", 6 * 3600)
+
+    def _lhb_sync_interval_seconds(self) -> int:
+        return _env_int("LHB_SYNC_INTERVAL_SECONDS", 12 * 3600)
+
+    def _auto_backfill_max_codes(self) -> int:
+        return max(1, min(_env_int("DATA_BACKFILL_MAX_CODES", 500), 2000))
+
     def _is_trading_day(self, now: Optional[datetime] = None) -> bool:
         now = now or _now_cn()
         date = now.strftime("%Y-%m-%d")
@@ -493,6 +566,8 @@ class QuantJobManager:
         assert self._stop_event is not None
         next_news_fetch = 0.0
         next_ai_analysis = time.time() + 30
+        next_kline_fill = time.time() + 5
+        next_lhb_sync = time.time() + 20
         next_market_sync = time.time() + 40
         next_trade_cycle = time.time() + 50
         next_strategy_replay = time.time() + 70
@@ -507,6 +582,26 @@ class QuantJobManager:
             if now_ts >= next_ai_analysis:
                 await asyncio.to_thread(self.run_ai_analysis, None, 8, 4)
                 next_ai_analysis = time.time() + self._ai_interval_seconds()
+                ran_task = True
+            if now_ts >= next_kline_fill:
+                await asyncio.to_thread(
+                    self.run_kline_fill,
+                    self._default_backfill_start_date(),
+                    os.getenv("DATA_BACKFILL_END_DATE") or None,
+                    self._auto_backfill_max_codes(),
+                    False,
+                )
+                next_kline_fill = time.time() + self._kline_fill_interval_seconds()
+                ran_task = True
+            if now_ts >= next_lhb_sync:
+                await asyncio.to_thread(
+                    self.run_lhb_sync,
+                    self._default_backfill_start_date(),
+                    os.getenv("DATA_BACKFILL_END_DATE") or None,
+                    self._auto_backfill_max_codes(),
+                    False,
+                )
+                next_lhb_sync = time.time() + self._lhb_sync_interval_seconds()
                 ran_task = True
             if now_ts >= next_market_sync:
                 if self._is_market_open(now_cn):
@@ -556,11 +651,18 @@ class QuantJobManager:
                     "ai_interval_seconds": self._ai_interval_seconds(),
                     "next_market_sync_at": datetime.fromtimestamp(next_market_sync, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "market_interval_seconds": self._market_interval_seconds(),
+                    "next_kline_fill_at": datetime.fromtimestamp(next_kline_fill, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    "kline_fill_interval_seconds": self._kline_fill_interval_seconds(),
+                    "next_lhb_sync_at": datetime.fromtimestamp(next_lhb_sync, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    "lhb_sync_interval_seconds": self._lhb_sync_interval_seconds(),
+                    "data_backfill_start_date": self._default_backfill_start_date(),
+                    "data_backfill_end_date": os.getenv("DATA_BACKFILL_END_DATE") or "",
+                    "data_backfill_max_codes": self._auto_backfill_max_codes(),
                     "next_trade_cycle_at": datetime.fromtimestamp(next_trade_cycle, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "trade_interval_seconds": self._trade_interval_seconds(),
                     "next_strategy_replay_at": datetime.fromtimestamp(next_strategy_replay, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
-                    "strategy_replay_start_date": os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01",
+                    "strategy_replay_start_date": self._default_backfill_start_date(),
                     "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", True),
                 }
                 self._save_state(state)

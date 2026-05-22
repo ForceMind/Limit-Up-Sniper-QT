@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>A股量化交易终端</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>涨停狙击手</title>
   <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <style>
     [v-cloak] { display: none; }
-    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; max-width: 100%; overflow-x: hidden; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; max-width: 100%; overflow-x: hidden; touch-action: pan-y; }
     body { letter-spacing: 0; max-width: 100%; overflow-x: hidden; }
     input, button { max-width: 100%; }
     *, *::before, *::after { box-sizing: border-box; }
@@ -133,13 +133,13 @@
 </head>
 <body class="bg-[#eef1f5] text-neutral-900 min-h-screen">
   <div id="app" v-cloak class="min-h-screen">
-    <div v-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登录状态...</div>
+    <div v-if="!authReady" class="min-h-screen flex items-center justify-center bg-[#eef1f5] text-sm text-neutral-500">正在检查登陆状态...</div>
     <template v-else>
     <div v-if="auth.visible" class="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4">
       <form @submit.prevent="auth.mode === 'register' ? registerFrontend() : loginFrontend()" class="w-full max-w-sm bg-white border border-neutral-300 p-5 space-y-4 shadow-xl">
         <div>
-          <h1 class="text-xl font-semibold">{{ auth.mode === 'register' ? '注册前台用户' : '前台登录' }}</h1>
-          <p class="mt-1 text-sm text-neutral-500">输入用户名和密码即可使用前台。概览和新闻无需登录。</p>
+          <h1 class="text-xl font-semibold">{{ auth.mode === 'register' ? '注册用户' : '登陆' }}</h1>
+          <p class="mt-1 text-sm text-neutral-500">输入用户名和密码即可使用。概览和新闻无需登陆。</p>
         </div>
         <label class="block text-sm">
           <span class="block text-xs text-neutral-500 mb-1">用户名</span>
@@ -150,9 +150,9 @@
           <input v-model="auth.password" type="password" autocomplete="current-password" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
         </label>
         <div v-if="auth.error" class="text-sm text-red-700">{{ auth.error }}</div>
-        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '处理中' : (auth.mode === 'register' ? '注册并登录' : '登录前台') }}</button>
+        <button type="submit" :disabled="auth.loading" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ auth.loading ? '处理中' : (auth.mode === 'register' ? '注册并登陆' : '登陆') }}</button>
         <div class="grid grid-cols-2 gap-2 text-sm">
-          <button type="button" @click="auth.mode = auth.mode === 'register' ? 'login' : 'register'; auth.error = ''" class="h-9 border border-neutral-300 bg-white">{{ auth.mode === 'register' ? '已有账号登录' : '注册新用户' }}</button>
+          <button type="button" @click="auth.mode = auth.mode === 'register' ? 'login' : 'register'; auth.error = ''" class="h-9 border border-neutral-300 bg-white">{{ auth.mode === 'register' ? '已有账号登陆' : '注册新用户' }}</button>
           <button type="button" @click="auth.visible = false" class="h-9 border border-neutral-300 bg-white">先看概览</button>
         </div>
       </form>
@@ -166,7 +166,7 @@
         </div>
         <div class="flex items-center gap-2">
           <button v-if="isLoggedIn" @click="logout" class="account-select">退出</button>
-          <button v-else @click="openAuth('login')" class="account-select">登录/注册</button>
+          <button v-else @click="openAuth('login')" class="account-select">登陆/注册</button>
         </div>
       </div>
 
@@ -176,9 +176,10 @@
           <div>
             <div class="label">总资产(元)</div>
             <div class="big">{{ money(account.total_asset) }}</div>
+            <div class="fine">模拟资金 {{ money(userProfile.simulated_cash) }}</div>
           </div>
           <div class="text-right">
-            <div class="label">今日收益 〉</div>
+            <div class="label">跟随 {{ followedModelName }}</div>
             <div class="value">{{ signedMoney(account.total_pnl) }} ({{ signedPct(account.return_pct) }})</div>
           </div>
         </div>
@@ -444,6 +445,17 @@
             </div>
             <span class="mobile-link">共 {{ strategyItems.length }}</span>
           </div>
+          <div class="p-4 border-b border-neutral-100 bg-neutral-50">
+            <div class="grid grid-cols-[1fr_auto] gap-2 items-end">
+              <label class="text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">我的模拟资金</span>
+                <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="10000" class="w-full h-10 px-3 border border-neutral-300 bg-white outline-none focus:border-neutral-900">
+              </label>
+              <button @click="saveProfile()" :disabled="profileSaving" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存' }}</button>
+            </div>
+            <div class="mt-2 text-xs text-neutral-500">当前跟随：{{ followedModelName }}</div>
+            <div v-if="profileMessage" class="mt-2 text-xs text-emerald-700">{{ profileMessage }}</div>
+          </div>
           <article v-for="model in strategyItems" :key="'m-model-' + model.id" class="signal-row">
             <div class="row-main">
               <div>
@@ -465,7 +477,9 @@
               <div>
                 <div class="score-buy" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</div>
                 <div class="score-sell">{{ pct(model.win_rate) }}</div>
-                <div class="score-sell mt-2">{{ model.closed_trades || 0 }} 笔</div>
+                <button @click="followStrategy(model)" :disabled="profileSaving" class="score-sell mt-2 border border-neutral-300 px-2 py-1 bg-white">
+                  {{ isFollowing(model) ? '跟随中' : '跟随' }}
+                </button>
               </div>
             </div>
           </article>
@@ -522,7 +536,7 @@
     <header class="desktop-shell page-header bg-[#151922] text-white border-b border-black px-4 py-3">
       <div class="max-w-[1760px] mx-auto flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <h1 class="page-title text-xl font-semibold">A股量化交易终端</h1>
+          <h1 class="page-title text-xl font-semibold">涨停狙击手</h1>
           <div class="text-xs text-neutral-300 mt-1">模拟账户、持仓、成交、交割单和每日买入计划</div>
         </div>
         <div class="header-actions flex flex-wrap items-center gap-2">
@@ -532,7 +546,7 @@
             {{ loading ? '刷新中' : '刷新' }}
           </button>
           <button v-if="isLoggedIn" @click="logout" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">退出</button>
-          <button v-else @click="openAuth('login')" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">登录/注册</button>
+          <button v-else @click="openAuth('login')" class="h-9 px-3 border border-neutral-500 bg-[#202633] text-sm">登陆/注册</button>
         </div>
       </div>
     </header>
@@ -619,6 +633,35 @@
         当前交易日为 {{ asOf }}，本地新闻/AI事件最新到 {{ dataDate }}。今日推荐会沿用截至当前交易日可见的最新事件，直到同步到新的新闻和行情数据。
       </section>
 
+      <section v-if="isLoggedIn" class="mobile-page bg-white border border-neutral-300 p-4" :class="{ 'active-mobile': mobileView === 'strategy' }">
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_220px_180px] gap-3 items-end">
+          <div>
+            <h2 class="font-semibold">我的跟随设置</h2>
+            <div class="text-xs text-neutral-500 mt-1">每个账号单独保存模拟资金和跟随策略，保存后买入信号会按所选策略参数刷新。</div>
+          </div>
+          <label class="text-sm">
+            <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
+            <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="10000" class="w-full h-9 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+          </label>
+          <button @click="saveProfile()" :disabled="profileSaving" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存设置' }}</button>
+        </div>
+        <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div class="border border-neutral-200 p-3">
+            <div class="text-xs text-neutral-500">当前跟随</div>
+            <div class="font-semibold mt-1">{{ followedModelName }}</div>
+          </div>
+          <div class="border border-neutral-200 p-3">
+            <div class="text-xs text-neutral-500">模拟资金</div>
+            <div class="font-semibold mt-1">{{ money(userProfile.simulated_cash) }}</div>
+          </div>
+          <div class="border border-neutral-200 p-3">
+            <div class="text-xs text-neutral-500">可选策略</div>
+            <div class="font-semibold mt-1">{{ strategyItems.length }} 个</div>
+          </div>
+        </div>
+        <div v-if="profileMessage" class="mt-3 text-sm text-emerald-700">{{ profileMessage }}</div>
+      </section>
+
       <section class="mobile-page terminal-panel" :class="{ 'active-mobile': mobileView === 'overview' }">
         <div class="px-4 py-3 border-b border-neutral-300 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -676,6 +719,7 @@
                 <th class="text-right px-3 py-2">交易</th>
                 <th class="text-right px-3 py-2">买入阈值</th>
                 <th class="text-right px-3 py-2">单票资金</th>
+                <th class="text-right px-3 py-2">跟随</th>
               </tr>
             </thead>
             <tbody>
@@ -691,9 +735,12 @@
                 <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
                 <td class="px-3 py-2 text-right">{{ fixed((model.params || {}).buy_threshold) }}</td>
                 <td class="px-3 py-2 text-right">{{ money((model.params || {}).paper_position_value) }}</td>
+                <td class="px-3 py-2 text-right">
+                  <button @click="followStrategy(model)" :disabled="profileSaving" class="h-8 px-3 border text-xs disabled:opacity-50" :class="isFollowing(model) ? 'border-red-600 bg-red-50 text-red-700' : 'border-neutral-300 bg-white text-neutral-800'">{{ isFollowing(model) ? '跟随中' : '跟随' }}</button>
+                </td>
               </tr>
               <tr v-if="!strategyItems.length">
-                <td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化策略模型，请在后台启动遗传进化。</td>
+                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无进化策略模型，请在后台启动遗传进化。</td>
               </tr>
             </tbody>
           </table>
@@ -749,9 +796,9 @@
       </section>
 
       <section v-if="!isLoggedIn" class="bg-white border border-neutral-300 p-5 text-sm">
-        <div class="font-semibold">登录后查看交易数据</div>
-        <div class="mt-1 text-neutral-500">买入计划、持仓、成交、交割单和策略模型需要前台账号。</div>
-        <button @click="openAuth('login')" class="mt-3 h-9 px-3 bg-neutral-900 text-white">登录/注册</button>
+        <div class="font-semibold">登陆后查看交易数据</div>
+        <div class="mt-1 text-neutral-500">买入计划、持仓、成交、交割单和策略模型需要账号。</div>
+        <button @click="openAuth('login')" class="mt-3 h-9 px-3 bg-neutral-900 text-white">登陆/注册</button>
       </section>
 
       <section v-if="isLoggedIn" class="mobile-page trade-grid grid grid-cols-1 2xl:grid-cols-[1.1fr_1fr] gap-4" :class="{ 'active-mobile': mobileView === 'buy' || mobileView === 'positions' }">
@@ -1144,6 +1191,11 @@
           jobLogs: {},
           recommendations: {},
           strategyModels: {},
+          userProfile: { simulated_cash: 200000, strategy_model_id: 'active' },
+          profileForm: { simulated_cash: 200000, strategy_model_id: 'active' },
+          followedModel: {},
+          profileSaving: false,
+          profileMessage: '',
           marketSentiment: {},
           newsFeed: {},
           syncResult: {},
@@ -1156,7 +1208,7 @@
       },
       computed: {
         isLoggedIn() { return Boolean(this.auth.token); },
-        displayUser() { return this.isLoggedIn ? (this.auth.username || '已登录') : '游客'; },
+        displayUser() { return this.isLoggedIn ? (this.auth.username || '已登陆') : '游客'; },
         marketMood() { return this.marketSentiment || {}; },
         account() { return this.accountView.account || {}; },
         scheduler() { return this.jobStatus.scheduler || {}; },
@@ -1217,7 +1269,23 @@
           return window.innerWidth <= 767 ? items.slice(0, mobileLimit) : items;
         },
         historyDays() { return this.plan.history_days || []; },
-        strategyItems() { return this.strategyModels.items || []; },
+        strategyItems() {
+          const items = [];
+          if (this.strategyModels.active) items.push({ ...this.strategyModels.active, id: this.strategyModels.active.id || 'active', rank: '当前' });
+          for (const item of (this.strategyModels.items || [])) items.push(item);
+          const seen = new Set();
+          return items.filter(item => {
+            const id = String((item || {}).id || '');
+            if (!id || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          });
+        },
+        followedModelName() {
+          const id = String(this.userProfile.strategy_model_id || 'active');
+          const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
+          return model.name || model.id || '当前运行策略';
+        },
         summary() { return this.plan.timeline_summary || {}; },
         rules() {
           return {
@@ -1333,6 +1401,38 @@
           if (!this.isPublicView(this.mobileView)) this.mobileView = 'overview';
           this.loadAll();
         },
+        isFollowing(model) {
+          return String((model || {}).id || '') === String(this.userProfile.strategy_model_id || 'active');
+        },
+        async followStrategy(model) {
+          if (!model || !model.id) return;
+          this.profileForm.strategy_model_id = model.id;
+          await this.saveProfile(model.id);
+        },
+        async saveProfile(modelId = null) {
+          if (!this.isLoggedIn) return this.openAuth('login');
+          this.profileSaving = true;
+          this.profileMessage = '';
+          try {
+            const payload = {
+              simulated_cash: Number(this.profileForm.simulated_cash || this.userProfile.simulated_cash || 200000),
+              strategy_model_id: String(modelId || this.profileForm.strategy_model_id || this.userProfile.strategy_model_id || 'active'),
+            };
+            const result = await this.api('/api/front/profile', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+            this.userProfile = { ...this.userProfile, ...(result.profile || {}) };
+            this.profileForm = { ...this.profileForm, ...this.userProfile };
+            this.profileMessage = '已保存';
+            await this.loadAll();
+          } catch (err) {
+            this.profileMessage = String(err.message || err);
+          } finally {
+            this.profileSaving = false;
+          }
+        },
         async loadAll() {
           this.loading = true;
           try {
@@ -1348,6 +1448,9 @@
             this.newsFeed = snapshot.news || {};
             this.recommendations = snapshot.recommendations || {};
             this.strategyModels = snapshot.strategy_models || {};
+            this.userProfile = { ...this.userProfile, ...(snapshot.frontend_profile || {}) };
+            this.profileForm = { ...this.profileForm, ...this.userProfile };
+            this.followedModel = snapshot.followed_model || {};
             this.marketSentiment = snapshot.market_sentiment || {};
             this.plan = snapshot.daily_plan || {};
             if (!this.asOf) this.asOf = this.accountView.as_of || this.plan.as_of || this.asOf;
@@ -1357,6 +1460,10 @@
         },
         async loadMarketData(quiet = false) {
           try {
+            if (this.isLoggedIn) {
+              await this.loadAll();
+              return;
+            }
             const date = this.asOf || '';
             const accountQuery = date ? `?as_of=${date}&limit=500` : '?limit=500';
             const account = await this.api(`/api/quant/trading_account${accountQuery}`);
@@ -1378,6 +1485,10 @@
         },
         async loadPlan(quiet = false) {
           try {
+            if (this.isLoggedIn) {
+              await this.loadAll();
+              return;
+            }
             const date = this.asOf || '';
             const planQuery = date ? `?as_of=${date}&limit_days=120` : '?limit_days=120';
             const plan = await this.api(`/api/quant/daily_plan${planQuery}`);
@@ -1389,6 +1500,10 @@
         },
         async loadRecommendations(quiet = false) {
           try {
+            if (this.isLoggedIn) {
+              await this.loadAll();
+              return;
+            }
             const q = new URLSearchParams({ lookback_days: '2', top_n: window.innerWidth <= 767 ? '12' : '30' });
             if (this.asOf) q.set('as_of', this.asOf);
             this.recommendations = await this.api(`/api/quant/recommendations?${q.toString()}`);
