@@ -9,6 +9,7 @@ from app.quant.engine import KLINE_DAY_DIR, digits6, read_json, safe_float, writ
 
 
 KLINE_FIELDS = ["date", "open", "close", "high", "low", "volume", "amount", "pct_chg", "turnover"]
+MAX_DAILY_SYNC_CODES = 5000
 
 
 def _normalize_date(value: Optional[str]) -> str:
@@ -38,6 +39,11 @@ def _date_range_weekdays(start_date: str, end_date: str) -> int:
             days += 1
         current += timedelta(days=1)
     return days
+
+
+def _available_end_date(end_date: str) -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+    return min(_normalize_date(end_date) or today, today)
 
 
 def _first_value(row: Dict[str, Any], keys: Sequence[str], default: Any = None) -> Any:
@@ -212,21 +218,24 @@ def sync_daily_kline(
         return {"status": "error", "code": code, "source": "biying", "message": "\u80a1\u7968\u4ee3\u7801\u6216\u65e5\u671f\u65e0\u6548"}
     if end_date < start_date:
         start_date, end_date = end_date, start_date
+    fetch_end_date = _available_end_date(end_date)
 
     cached = _read_cached_rows(code)
-    if not force and not _needs_fetch(cached, start_date, end_date):
+    if not force and not _needs_fetch(cached, start_date, fetch_end_date):
         return {
             "status": "skipped",
             "code": code,
             "source": "biying",
             "message": "\u65e5K\u5df2\u8986\u76d6\u76ee\u6807\u533a\u95f4",
+            "requested_end_date": end_date,
+            "end_date": fetch_end_date,
             "rows_total": len(cached),
             "added_rows": 0,
             "updated_rows": 0,
         }
 
     try:
-        fetched_rows = _fetch_biying_daily(code, start_date=start_date, end_date=end_date, timeout=timeout)
+        fetched_rows = _fetch_biying_daily(code, start_date=start_date, end_date=fetch_end_date, timeout=timeout)
     except Exception as exc:
         return {
             "status": "failed",
@@ -265,7 +274,8 @@ def sync_daily_kline(
         "code": code,
         "source": "biying",
         "start_date": start_date,
-        "end_date": end_date,
+        "end_date": fetch_end_date,
+        "requested_end_date": end_date,
         "fetched_rows": len(fetched_rows),
         "rows_total": len(rows),
         "added_rows": max(0, len(merged) - before),
@@ -288,7 +298,7 @@ def sync_daily_for_codes(
         if clean and clean not in seen:
             seen.add(clean)
             selected.append(clean)
-        if len(selected) >= max(1, min(int(max_codes or 300), 2000)):
+        if len(selected) >= max(1, min(int(max_codes or 300), MAX_DAILY_SYNC_CODES)):
             break
 
     results: List[Dict[str, Any]] = []

@@ -36,6 +36,7 @@ usage() {
   qt restart                 重启服务
   qt stop                    停止服务
   qt status                  查看服务状态、Git 版本、认证状态
+  qt admin-path              查看或生成后台入口路径
   qt logs                    查看实时日志
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
@@ -160,6 +161,7 @@ cmd_status() {
 
   section "$(zh '\xe8\xb4\xa6\xe5\x8f\xb7\xe7\x8a\xb6\xe6\x80\x81')"
   run_auth_tool status || true
+  print_admin_entry_path
 
   section "$(zh '\xe6\x9c\x8d\xe5\x8a\xa1\xe7\x8a\xb6\xe6\x80\x81')"
   if systemd_unit_exists; then
@@ -375,6 +377,7 @@ cmd_panel() {
 12) 版本和模块验证
 13) GitHub 上传前安全扫描
 14) 部署环境检查
+15) 查看后台入口路径
 0) 退出
 
 EOF
@@ -403,6 +406,7 @@ EOF
       12) panel_run "$(zh '\xe7\x89\x88\xe6\x9c\xac\xe5\x92\x8c\xe6\xa8\xa1\xe5\x9d\x97\xe9\xaa\x8c\xe8\xaf\x81')" bash "$SCRIPT_DIR/qt.sh" version ;;
       13) panel_run "$(zh '\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')" bash "$SCRIPT_DIR/qt.sh" scan ;;
       14) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      15) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
       0|q|Q)
         echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
@@ -458,6 +462,11 @@ case "$cmd" in
     ;;
   status|ps)
     cmd_status
+    ;;
+  admin-path|admin-entry)
+    require_project_root
+    section "后台入口"
+    print_admin_entry_path
     ;;
   version|verify)
     cmd_version

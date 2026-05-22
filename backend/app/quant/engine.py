@@ -1210,7 +1210,7 @@ class QuantEngine:
                 key=lambda item: (item[1].impact_score, item[1].date, item[1].timestamp),
                 reverse=True,
             )
-        ][: max(1, min(int(max_codes or 300), 2000))]
+        ][: max(1, min(int(max_codes or 300), 5000))]
 
         from app.quant.market_data import sync_daily_for_codes
 

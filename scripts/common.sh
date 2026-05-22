@@ -214,6 +214,26 @@ check_python_bin() {
   fi
 }
 
+admin_entry_path_local() {
+  local py
+  py="$(check_python_bin)"
+  [[ -n "$py" ]] || return 1
+  PYTHONPATH="$ROOT_DIR/backend" "$py" - <<'PY'
+from app.quant.security import ensure_admin_entry_path
+print(ensure_admin_entry_path())
+PY
+}
+
+print_admin_entry_path() {
+  local admin_path
+  admin_path="$(admin_entry_path_local 2>/dev/null || true)"
+  if [[ -n "$admin_path" ]]; then
+    echo "后台入口路径：$admin_path"
+  else
+    warn "暂时无法读取后台入口路径；请确认依赖已安装并且 backend/data 可写。"
+  fi
+}
+
 backend_feature_modules() {
   cat <<'EOF'
 version	version	GET:/api/version

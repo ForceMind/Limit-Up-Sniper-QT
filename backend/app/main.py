@@ -31,6 +31,7 @@ from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
 from app.quant.security import (
     auth_status,
+    ensure_admin_entry_path,
     frontend_user_profile,
     frontend_user_summary,
     login,
@@ -1180,7 +1181,7 @@ def quant_data_coverage(
 def data_kline_fill(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
-    max_codes: int = Query(default=300, ge=1, le=2000),
+    max_codes: int = Query(default=300, ge=1, le=5000),
     force: bool = Query(default=False),
 ):
     return job_manager.run_kline_fill(
@@ -1218,7 +1219,7 @@ def data_lhb_sync(
 def biying_sync_intraday(
     date: Optional[str] = Query(default=None),
     source: str = Query(default="events"),
-    max_codes: int = Query(default=200, ge=1, le=2000),
+    max_codes: int = Query(default=200, ge=1, le=5000),
     codes: Optional[str] = Query(default=None),
     force: bool = Query(default=False),
     include_latest: bool = Query(default=True),
@@ -1328,14 +1329,19 @@ def index_html():
     return index()
 
 
-@app.get("/admin", include_in_schema=False)
-def admin_index():
+def _admin_index_response():
     admin_file = FRONTEND_DIR / "admin" / "index.html"
     if admin_file.exists():
         return FileResponse(admin_file)
     return JSONResponse({"status": "ok", "message": "frontend/admin/index.html not found"})
 
 
-@app.get("/admin/index.html", include_in_schema=False)
-def admin_index_html():
-    return admin_index()
+@app.get("/{full_path:path}", include_in_schema=False)
+def configured_static_entry(full_path: str):
+    request_path = "/" + str(full_path or "").strip("/")
+    if request_path in {"/api", "/static"} or request_path.startswith(("/api/", "/static/")):
+        raise HTTPException(status_code=404, detail="Not Found")
+    admin_entry = ensure_admin_entry_path().rstrip("/")
+    if request_path in {admin_entry, f"{admin_entry}/index.html"}:
+        return _admin_index_response()
+    raise HTTPException(status_code=404, detail="Not Found")

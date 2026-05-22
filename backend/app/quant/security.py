@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import time
 from datetime import datetime
@@ -23,6 +24,8 @@ DEFAULT_FRONTEND_PROFILE = {
     "simulated_cash": DEFAULT_FRONTEND_SIMULATED_CASH,
     "strategy_model_id": "active",
 }
+DEFAULT_ADMIN_ENTRY_PREFIX = "/admin-"
+ADMIN_ENTRY_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9_-]{5,63}$")
 
 
 def _now_iso() -> str:
@@ -448,6 +451,43 @@ def _bool_value(value: Any) -> bool:
     return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def normalize_admin_entry_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="admin entry path is required")
+    if not path.startswith("/"):
+        path = "/" + path
+    path = path.rstrip("/") or "/"
+    lowered = path.lower()
+    if lowered in {"/admin", "/api", "/static", "/index.html"} or lowered.startswith(("/api/", "/static/")):
+        raise HTTPException(status_code=400, detail="admin entry path conflicts with a reserved route")
+    if "/" in path[1:]:
+        raise HTTPException(status_code=400, detail="admin entry path must be a single path segment")
+    if not ADMIN_ENTRY_PATH_PATTERN.match(path):
+        raise HTTPException(status_code=400, detail="admin entry path must be 6-64 letters, numbers, '-' or '_'")
+    return path
+
+
+def _generate_admin_entry_path() -> str:
+    return DEFAULT_ADMIN_ENTRY_PREFIX + secrets.token_hex(4)
+
+
+def ensure_admin_entry_path() -> str:
+    cfg = _read_config()
+    security_cfg = dict(cfg.get("security_config") if isinstance(cfg.get("security_config"), dict) else {})
+    raw_path = security_cfg.get("admin_entry_path") or cfg.get("admin_entry_path")
+    try:
+        path = normalize_admin_entry_path(raw_path)
+    except HTTPException:
+        path = _generate_admin_entry_path()
+    if security_cfg.get("admin_entry_path") != path:
+        security_cfg["admin_entry_path"] = path
+        cfg["security_config"] = security_cfg
+        cfg["updated_at"] = _now_iso()
+        _save_config(cfg)
+    return path
+
+
 def _source(env_value: Optional[str], config_value: Any) -> str:
     if env_value is not None and str(env_value).strip():
         return "env"
@@ -463,6 +503,8 @@ def runtime_config_status() -> Dict[str, Any]:
     default_ai = ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {}
     data_cfg = cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {}
     email_cfg = cfg.get("email_config") if isinstance(cfg.get("email_config"), dict) else {}
+    security_cfg = cfg.get("security_config") if isinstance(cfg.get("security_config"), dict) else {}
+    admin_entry = ensure_admin_entry_path()
 
     deepseek_env = _first_env("DEEPSEEK_API_KEY")
     deepseek_key = deepseek_env or str(api_keys.get("deepseek") or "").strip()
@@ -491,6 +533,10 @@ def runtime_config_status() -> Dict[str, Any]:
         "config_exists": CONFIG_FILE.exists(),
         "config_file": str(CONFIG_FILE),
         "auth": auth_status(),
+        "security": {
+            "admin_entry_path": admin_entry,
+            "admin_entry_source": "config" if security_cfg.get("admin_entry_path") else "generated",
+        },
         "deepseek": {
             "configured": bool(deepseek_key),
             "api_key_masked": _mask_secret(deepseek_key),
@@ -528,9 +574,11 @@ def runtime_config_form() -> Dict[str, Any]:
     ai_cfg = cfg.get("ai_cost_config") if isinstance(cfg.get("ai_cost_config"), dict) else {}
     default_ai = ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {}
     data_cfg = cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {}
+    admin_entry = ensure_admin_entry_path()
     return {
         "status": "ok",
         "form": {
+            "admin_entry_path": admin_entry,
             "deepseek_api_key": "",
             "deepseek_model": _first_env("DEEPSEEK_MODEL") or str(default_ai.get("model") or DEFAULT_AI_MODEL),
             "biying_enabled": _env_bool("BIYING_ENABLED", bool(data_cfg.get("biying_enabled"))),
@@ -561,6 +609,10 @@ def update_runtime_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     ai_cfg = dict(cfg.get("ai_cost_config") if isinstance(cfg.get("ai_cost_config"), dict) else {})
     default_ai = dict(ai_cfg.get("default") if isinstance(ai_cfg.get("default"), dict) else {})
     data_cfg = dict(cfg.get("data_provider_config") if isinstance(cfg.get("data_provider_config"), dict) else {})
+    security_cfg = dict(cfg.get("security_config") if isinstance(cfg.get("security_config"), dict) else {})
+
+    if "admin_entry_path" in payload:
+        security_cfg["admin_entry_path"] = normalize_admin_entry_path(payload.get("admin_entry_path"))
 
     if str(payload.get("deepseek_api_key") or "").strip():
         api_keys["deepseek"] = str(payload.get("deepseek_api_key") or "").strip()
@@ -596,6 +648,7 @@ def update_runtime_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg["api_keys"] = api_keys
     cfg["ai_cost_config"] = ai_cfg
     cfg["data_provider_config"] = data_cfg
+    cfg["security_config"] = security_cfg
     cfg["email_config"] = email_cfg
     cfg["updated_at"] = _now_iso()
     _save_config(cfg)

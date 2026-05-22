@@ -36,6 +36,9 @@ fi
 
 mkdir -p "$ROOT_DIR/backend/data" "$BACKUP_ROOT"
 
+section "后台入口"
+print_admin_entry_path
+
 if refresh_systemd_service; then
   if [[ "$(id -u)" -eq 0 ]]; then
     systemctl restart "$SERVICE_NAME"

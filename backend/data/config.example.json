@@ -22,5 +22,8 @@
     "biying_license_key": "",
     "biying_endpoint": "https://api.biyingapi.com",
     "biying_minute_limit": 3000
+  },
+  "security_config": {
+    "admin_entry_path": ""
   }
 }
