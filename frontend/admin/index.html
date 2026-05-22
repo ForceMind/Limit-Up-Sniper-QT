@@ -180,7 +180,7 @@
         </header>
 
         <section v-if="activeTab === 'overview'" class="space-y-4">
-          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
+          <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-10 gap-3">
             <div class="metric">
               <div class="text-xs text-neutral-500">分析日期</div>
               <div class="mt-2 text-lg font-semibold">{{ dashboard.as_of || asOf || '-' }}</div>
@@ -549,6 +549,24 @@
             <div class="metric"><div class="text-xs text-neutral-500">降级</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.fallback_records || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">错误</div><div class="mt-2 text-lg font-semibold text-red-600">{{ aiUsage.error_records || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">必赢缓存</div><div class="mt-2 text-lg font-semibold">{{ minuteCacheCount }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">龙虎榜</div><div class="mt-2 text-lg font-semibold">{{ ((coverage.summary || {}).lhb_rows) || ((lhbStatus || {}).rows) || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">最新龙虎榜</div><div class="mt-2 text-sm font-semibold">{{ ((coverage.summary || {}).latest_lhb_date) || ((lhbStatus || {}).latest_date) || '-' }}</div></div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">数据管理</div>
+            <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-[150px_150px_130px_110px_auto] text-sm">
+              <label><span class="block text-xs text-neutral-500 mb-1">开始日期</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label><span class="block text-xs text-neutral-500 mb-1">结束日期</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="2000" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label class="flex items-end gap-2 h-[57px]"><input v-model="dataFillForm.force" type="checkbox" class="accent-neutral-900 mb-3"><span class="mb-2 text-sm">强制刷新</span></label>
+              <div class="flex flex-wrap items-end gap-2">
+                <button @click="fillKline" :disabled="fillingKline" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ fillingKline ? '补齐中' : '补齐缺失日K' }}</button>
+                <button @click="syncLhb" :disabled="syncingLhb" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ syncingLhb ? '拉取中' : '拉取龙虎榜席位' }}</button>
+                <button @click="fetchNews" :disabled="newsFetching" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ newsFetching ? '抓取中' : '补抓新闻' }}</button>
+              </div>
+            </div>
+            <pre v-if="dataManageResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(dataManageResult) }}</pre>
           </div>
 
           <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
@@ -864,6 +882,8 @@
               <button @click="fetchNews" :disabled="newsFetching" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ newsFetching ? '抓取中' : '立即抓新闻' }}</button>
               <button @click="analyzeAI" :disabled="aiAnalyzing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ aiAnalyzing ? '分析中' : '立即AI分析' }}</button>
               <button @click="syncIntraday" :disabled="syncing" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncing ? '同步中' : '同步分时行情' }}</button>
+              <button @click="fillKline" :disabled="fillingKline" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ fillingKline ? '补齐中' : '补齐缺失日K' }}</button>
+              <button @click="syncLhb" :disabled="syncingLhb" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ syncingLhb ? '拉取中' : '拉取龙虎榜' }}</button>
               <button @click="runTradeCycle" :disabled="runningTrade" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ runningTrade ? '交易中' : '运行交易循环' }}</button>
               <button @click="runStrategyReplay" :disabled="replayingStrategy" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ replayingStrategy ? '复盘中' : '运行策略复盘' }}</button>
               <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
@@ -980,6 +1000,8 @@
             { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
             { key: 'market_sync', label: '分时行情', desc: '交易时段同步必赢数据' },
+            { key: 'kline_fill', label: '日K补齐', desc: '回测前补齐缺失K线' },
+            { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
             { key: 'strategy_replay', label: '策略复盘', desc: '从3月1日滚动验证' },
           ],
@@ -1014,6 +1036,8 @@
           newsFetching: false,
           aiAnalyzing: false,
           syncing: false,
+          fillingKline: false,
+          syncingLhb: false,
           runningTrade: false,
           replayingStrategy: false,
           testingEmail: false,
@@ -1033,6 +1057,7 @@
           tradingAccount: {},
           newsFeed: {},
           biyingStatus: {},
+          lhbStatus: {},
           coverage: {},
           aiUsage: {},
           aiFailures: {},
@@ -1044,6 +1069,7 @@
           frontendUsers: {},
           fitResult: {},
           syncResult: {},
+          dataManageResult: {},
           adminResult: {},
           configStatus: {},
           configForm: {},
@@ -1061,6 +1087,7 @@
           logUpdatedAt: '',
           showPayloads: false,
           syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
+          dataFillForm: { start_date: '2026-03-01', end_date: '', max_codes: 300, force: false },
           timelineForm: { start_date: '', end_date: '' },
           strategyForm: {},
           refreshTimer: null,
@@ -1120,7 +1147,9 @@
         recommendations() { return (this.dashboard.recommendations || {}).items || []; },
         buyList() {
           const planned = this.dailyPlan.buy_list || [];
-          return planned.length ? planned : this.recommendations.filter(item => String(item.action || '').includes('买入'));
+          const sample = item => ['600001', '600002'].includes(String((item || {}).code || '').trim()) || JSON.stringify(item || {}).includes('样例');
+          return (planned.length ? planned : this.recommendations.filter(item => String(item.action || '').includes('买入')))
+            .filter(item => !sample(item));
         },
         latestEvents() { return (this.dashboard.recommendations || {}).latest_events || []; },
         latestNews() { return this.newsFeed.items || []; },
@@ -1381,6 +1410,7 @@
           this.status = snapshot.status_payload || this.status;
           this.jobStatus = snapshot.jobs || this.jobStatus;
           this.biyingStatus = snapshot.biying || this.biyingStatus;
+          this.lhbStatus = snapshot.lhb || ((snapshot.jobs || {}).lhb) || this.lhbStatus;
           this.aiUsage = snapshot.ai_usage || this.aiUsage;
           this.notificationStatus = snapshot.notification_status || this.notificationStatus;
           this.evolutionStatus = snapshot.evolution_status || this.evolutionStatus;
@@ -1395,6 +1425,7 @@
           this.aiRecords = snapshot.ai_records || this.aiRecords;
           const dashboard = this.dashboard || {};
           this.syncForm.date = this.asOf || dashboard.as_of || this.syncForm.date;
+          this.dataFillForm.end_date = this.asOf || dashboard.as_of || this.dataFillForm.end_date;
           this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
           this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
           if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
@@ -1514,6 +1545,44 @@
             if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.syncing = false;
+          }
+        },
+        async fillKline() {
+          this.fillingKline = true;
+          try {
+            const q = new URLSearchParams({
+              start_date: this.dataFillForm.start_date || '2026-03-01',
+              end_date: this.dataFillForm.end_date || this.asOf || '',
+              max_codes: String(this.dataFillForm.max_codes || 300),
+              force: String(Boolean(this.dataFillForm.force)),
+            });
+            const result = await this.api(`/api/data/kline/fill?${q.toString()}`, { method: 'POST' });
+            this.dataManageResult = (result.job || {}).last_result || result;
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.fillingKline = false;
+          }
+        },
+        async syncLhb() {
+          this.syncingLhb = true;
+          try {
+            const q = new URLSearchParams({
+              start_date: this.dataFillForm.start_date || '2026-03-01',
+              end_date: this.dataFillForm.end_date || this.asOf || '',
+              max_stock_days: String(this.dataFillForm.max_codes || 300),
+              force: String(Boolean(this.dataFillForm.force)),
+            });
+            const result = await this.api(`/api/data/lhb/sync?${q.toString()}`, { method: 'POST' });
+            this.dataManageResult = (result.job || {}).last_result || result;
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.syncingLhb = false;
           }
         },
         async runTradeCycle() {
@@ -1790,6 +1859,8 @@
           if (key === 'news_fetch') return `抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
           if (key === 'ai_analysis') return `选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
           if (key === 'market_sync') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，写入 ${result.rows_written || 0}`;
+          if (key === 'kline_fill') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，新增 ${result.added_rows || 0}`;
+          if (key === 'lhb_sync') return `股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}，新增 ${result.added_rows || 0}`;
           if (key === 'trade_cycle') return `交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
           return '-';
         },
@@ -1847,6 +1918,8 @@
             news_fetch: '新闻抓取',
             ai_analysis: 'AI 分析',
             market_sync: '行情同步',
+            kline_fill: '日K补齐',
+            lhb_sync: '龙虎榜同步',
             trade_cycle: '交易循环',
             strategy_replay: '策略复盘',
             system_startup: '系统启动',

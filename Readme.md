@@ -109,7 +109,7 @@ cp .env.example .env
 
 首次部署后先访问 `/admin`，后台会要求初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
-如果部署后仍看到样例数据，通常是还没有在后台“配置与安全”里填写 DeepSeek、必赢、邮件等服务器本地配置，也没有触发真实数据同步。配置完成后进入“运维”，点击“系统启动”，系统会按顺序执行新闻抓取、AI 分析、行情同步和交易循环。
+如果部署后仍看到样例数据，通常是还没有在后台“配置与安全”里填写 DeepSeek、必赢、邮件等服务器本地配置，也没有触发真实数据同步。配置完成后进入“运维”，点击“系统启动”，系统会按顺序执行新闻抓取、AI 分析、日K补齐、龙虎榜同步、行情同步、交易循环和策略复盘。
 
 检查服务器是否已经保存从 3 月开始的新闻和行情：
 
@@ -135,9 +135,11 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 /admin -> 运维 -> 上传合并数据
 ```
 
-迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
+迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、龙虎榜、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
 
-如果服务器以前跑过样例数据，上传后持仓仍显示“样例算力”，到后台 `运维` 点击 `清理样例持仓`，再运行 `立即AI分析` / `运行交易循环`。
+如果服务器以前跑过样例数据，上传后持仓仍显示“样例算力”，到后台 `运维` 点击 `清理样例持仓`。候选、计划和账户接口也会过滤样例代码，防止样例重新出现在今日买入候选里。
+
+后台 `数据与AI -> 数据管理` 可以补齐缺失日K、补抓新闻、拉取龙虎榜席位。回测接口默认会先按有新闻事件的股票补齐日K；日K只走必盈历史行情接口，必须先在后台或环境变量配置必盈授权。补齐失败会进入任务结果的 `errors`，不会直接中断整轮回测。
 
 Windows 本机也可以用根目录脚本作为备用：
 
@@ -169,7 +171,7 @@ Windows 本机也可以用根目录脚本作为备用：
 
 - 状态与任务：`GET /api/status`、`GET /api/jobs/status`、`GET /api/jobs/logs`
 - 新闻与 AI：`GET /api/quant/news`、`POST /api/jobs/news/fetch`、`POST /api/jobs/ai/analyze`、`GET /api/ai/records`
-- 行情数据：`POST /api/jobs/market/sync`、`GET /api/data/biying/status`、`GET /api/data/coverage`
+- 行情数据：`POST /api/jobs/market/sync`、`POST /api/data/kline/fill`、`POST /api/data/lhb/sync`、`GET /api/data/biying/status`、`GET /api/data/coverage`
 - 量化结果：`GET /api/quant/daily_plan`、`GET /api/quant/recommendations`、`GET /api/quant/timeline`、`GET /api/quant/intraday_timeline`
 - 账户回放：`GET /api/quant/trading_account`、`POST /api/jobs/trading/run`、`POST /api/quant/backtest`
 - 参数进化：`GET /api/quant/strategy_params`、`POST /api/quant/fit_strategy`、`POST /api/quant/evolve_strategy`
@@ -225,6 +227,8 @@ bash qt.sh restart
 bash qt.sh logs
 bash qt.sh backup
 bash qt.sh restore <backup-file>
+bash qt.sh fill-kline
+bash qt.sh sync-lhb
 bash qt.sh scan
 ```
 
@@ -243,9 +247,11 @@ qt doctor
 qt update
 qt restart
 qt logs
+qt fill-kline
+qt sync-lhb
 ```
 
-直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、日志、备份、恢复、安全扫描和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
+直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、日志、备份、恢复、补齐日K、拉取龙虎榜、安全扫描和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
 
 详细部署说明见 [docs/SERVER_DEPLOY.md](docs/SERVER_DEPLOY.md)。
 

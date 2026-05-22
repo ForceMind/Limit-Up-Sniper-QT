@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
 from app.quant.engine import DATA_DIR, quant_engine, read_json, write_json
+from app.quant.lhb_sync import lhb_status, sync_lhb
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
 
@@ -25,6 +26,8 @@ JOB_LABELS = {
     "news_fetch": "新闻抓取",
     "ai_analysis": "AI 分析",
     "market_sync": "行情同步",
+    "kline_fill": "日K补齐",
+    "lhb_sync": "龙虎榜同步",
     "trade_cycle": "交易循环",
     "strategy_replay": "策略复盘",
     "system_startup": "系统启动",
@@ -118,6 +121,7 @@ class QuantJobManager:
         state["news_fetcher"] = news_fetcher.status()
         state["ai_analyzer"] = ai_analyzer.status()
         state["biying"] = biying_minute_sync.status()
+        state["lhb"] = lhb_status()
         return {"status": "ok", **state}
 
     def _append_log(
@@ -300,6 +304,51 @@ class QuantJobManager:
             payload=payload,
         )
 
+    def run_kline_fill(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        max_codes: int = 300,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        max_codes = max(1, min(int(max_codes or 300), 2000))
+        payload = {"start_date": start_date, "end_date": end_date, "max_codes": max_codes, "force": bool(force)}
+        return self.run_job(
+            "kline_fill",
+            lambda: quant_engine.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
+                max_codes=max_codes,
+                force=force,
+            ),
+            payload=payload,
+        )
+
+    def run_lhb_sync(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        max_stock_days: int = 300,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        start_date = str(start_date or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
+        end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        max_stock_days = max(1, min(int(max_stock_days or 300), 2000))
+        payload = {"start_date": start_date, "end_date": end_date, "max_stock_days": max_stock_days, "force": bool(force)}
+        return self.run_job(
+            "lhb_sync",
+            lambda: sync_lhb(
+                start_date=start_date,
+                end_date=end_date,
+                max_stock_days=max_stock_days,
+                force=force,
+            ),
+            payload=payload,
+        )
+
     def run_trade_cycle(self, date: Optional[str] = None, notify: bool = True) -> Dict[str, Any]:
         date = str(date or _now_cn().strftime("%Y-%m-%d")).strip()
         payload = {"date": date, "notify": bool(notify)}
@@ -337,6 +386,13 @@ class QuantJobManager:
         payload = {"start_date": start_date, "end_date": end_date, "mode": mode}
 
         def execute() -> Dict[str, Any]:
+            fill_result = quant_engine.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
+                max_codes=500,
+                force=False,
+            )
             if mode == "daily":
                 result = quant_engine.walk_forward(start_date=start_date, end_date=end_date)
             else:
@@ -362,6 +418,7 @@ class QuantJobManager:
                 "trade_count": len(trades),
                 "latest_day": days[-1] if days else {},
                 "generated_at": _iso_now(),
+                "data_fill": fill_result,
             }
 
         return self.run_job("strategy_replay", execute, payload=payload)

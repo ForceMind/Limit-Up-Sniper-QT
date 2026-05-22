@@ -1210,7 +1210,9 @@
         },
         buyList() {
           const planned = this.plan.buy_list || [];
-          const items = planned.length ? planned : ((this.recommendations.items || []).filter(item => String(item.action || '').includes('买入')));
+          const sample = item => ['600001', '600002'].includes(String((item || {}).code || '').trim()) || JSON.stringify(item || {}).includes('样例');
+          const items = (planned.length ? planned : ((this.recommendations.items || []).filter(item => String(item.action || '').includes('买入'))))
+            .filter(item => !sample(item));
           const mobileLimit = Math.max(3, Number(this.rules.top_n || 5));
           return window.innerWidth <= 767 ? items.slice(0, mobileLimit) : items;
         },

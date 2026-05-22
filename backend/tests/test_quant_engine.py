@@ -32,6 +32,10 @@ def test_quant_backtest_returns_metrics():
     assert result["trades"] >= 0
     assert "score_buckets" in result
     assert "58-65" in result["score_buckets"]
+    assert "performance" in result
+    assert "sharpe_ratio" in result["performance"]
+    assert "data_diagnostics" in result
+    assert result["data_diagnostics"]["event_count"] >= 0
 
 
 def test_quant_walk_forward_is_chronological():
@@ -41,6 +45,8 @@ def test_quant_walk_forward_is_chronological():
     dates = [day["date"] for day in result["days"]]
     assert dates == sorted(dates)
     assert result["final_value"] >= 0
+    assert "performance" in result
+    assert "profit_factor" in result["performance"]
     for trade in result["trades"]:
         if trade["side"] == "BUY":
             assert trade["signal_date"] < trade["date"]

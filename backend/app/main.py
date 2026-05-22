@@ -24,6 +24,7 @@ from app.quant.biying_sync import biying_minute_sync
 from app.quant.data_transfer import DataPackageError, clear_sample_quant_state, create_safe_data_package, import_data_package
 from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine
 from app.quant.evolution import strategy_evolution
+from app.quant.lhb_sync import lhb_status
 from app.quant.jobs import job_manager
 from app.quant.monitoring import ai_failures, ai_records_feed, ai_usage_summary, data_coverage
 from app.quant.news_fetcher import news_fetcher
@@ -105,8 +106,10 @@ def _refresh_quant_caches() -> None:
             value.clear()
     if hasattr(quant_engine, "_cache_source_key"):
         setattr(quant_engine, "_cache_source_key", "")
+    if hasattr(quant_engine, "_events_cache_key"):
+        setattr(quant_engine, "_events_cache_key", "")
     try:
-        quant_engine.clear_intraday_cache()
+        quant_engine.clear_market_cache()
     except Exception:
         pass
 
@@ -303,6 +306,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None)):
         "status_payload": status(),
         "jobs": job_manager.status(),
         "biying": biying_minute_sync.status(),
+        "lhb": lhb_status(),
         "ai_usage": ai_usage_summary(),
         "notification_status": trade_notifier.status(),
         "evolution_status": strategy_evolution.status(),
@@ -606,6 +610,22 @@ def admin_system_startup(
     ai_result = job_manager.run_ai_analysis(as_of=target_date, max_items=ai_items, batch_size=4)
     steps.append({"name": "AI 分析", "job": "ai_analysis", "result": ai_result})
 
+    kline_result = job_manager.run_kline_fill(
+        start_date="2026-03-01",
+        end_date=target_date,
+        max_codes=market_codes,
+        force=False,
+    )
+    steps.append({"name": "日K补齐", "job": "kline_fill", "result": kline_result})
+
+    lhb_result = job_manager.run_lhb_sync(
+        start_date="2026-03-01",
+        end_date=target_date,
+        max_stock_days=market_codes,
+        force=False,
+    )
+    steps.append({"name": "龙虎榜同步", "job": "lhb_sync", "result": lhb_result})
+
     market_result = job_manager.run_market_sync(
         date=target_date,
         source="auto",
@@ -762,6 +782,7 @@ def quant_timeline(
     max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
+    auto_fill: bool = Query(default=True),
 ):
     return quant_engine.walk_forward(
         start_date=start_date,
@@ -770,6 +791,7 @@ def quant_timeline(
         max_positions=max_positions,
         hold_days=hold_days,
         top_n=top_n,
+        auto_fill=auto_fill,
     )
 
 
@@ -782,6 +804,7 @@ def quant_intraday_timeline(
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
     use_daily_fallback: bool = Query(default=True),
+    auto_fill: bool = Query(default=True),
 ):
     return quant_engine.walk_forward_intraday(
         start_date=start_date,
@@ -791,6 +814,7 @@ def quant_intraday_timeline(
         hold_days=hold_days,
         top_n=top_n,
         use_daily_fallback=use_daily_fallback,
+        auto_fill=auto_fill,
     )
 
 
@@ -805,6 +829,44 @@ def quant_data_coverage(
     top_n: int = Query(default=80, ge=1, le=300),
 ):
     return data_coverage(as_of=as_of, top_n=top_n)
+
+
+@app.post("/api/data/kline/fill")
+def data_kline_fill(
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    max_codes: int = Query(default=300, ge=1, le=2000),
+    force: bool = Query(default=False),
+):
+    return job_manager.run_kline_fill(
+        start_date=start_date,
+        end_date=end_date,
+        max_codes=max_codes,
+        force=force,
+    )
+
+
+@app.get("/api/data/lhb/status")
+def data_lhb_status():
+    return lhb_status()
+
+
+@app.post("/api/data/lhb/sync")
+def data_lhb_sync(
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    max_stock_days: int = Query(default=300, ge=1, le=2000),
+    force: bool = Query(default=False),
+):
+    result = job_manager.run_lhb_sync(
+        start_date=start_date,
+        end_date=end_date,
+        max_stock_days=max_stock_days,
+        force=force,
+    )
+    if result.get("status") == "ok":
+        quant_engine.events(force=True)
+    return result
 
 
 @app.post("/api/data/biying/sync_intraday")
@@ -850,15 +912,21 @@ def quant_backtest(
     as_of: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    initial_cash: Optional[float] = Query(default=None, gt=0),
+    max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: int = Query(default=3, ge=1, le=20),
     top_n: int = Query(default=5, ge=1, le=20),
+    auto_fill: bool = Query(default=True),
 ):
     return quant_engine.backtest(
         as_of=as_of,
         start_date=start_date,
         end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
         hold_days=hold_days,
         top_n=top_n,
+        auto_fill=auto_fill,
     )
 
 

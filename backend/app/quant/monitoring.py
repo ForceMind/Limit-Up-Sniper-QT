@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
-from app.quant.engine import KLINE_DAY_DIR, KLINE_MIN_DIR, digits6, quant_engine
+from app.quant.engine import KLINE_DAY_DIR, KLINE_MIN_DIR, contains_sample_marker, digits6, quant_engine
 from app.quant.news_fetcher import news_fetcher
 
 
@@ -42,7 +42,7 @@ def _target_codes(as_of: str, top_n: int) -> List[Dict[str, Any]]:
 
     def add(code: Any, source: str, score: float = 0.0) -> None:
         clean = digits6(code)
-        if not clean or clean in seen or not quant_engine.universe.is_tradeable_a_share(clean):
+        if not clean or clean in seen or contains_sample_marker({"code": clean}) or not quant_engine.universe.is_tradeable_a_share(clean):
             return
         seen.add(clean)
         rows.append(
@@ -82,10 +82,11 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
     target_rows = []
     for target in targets:
         code = target["code"]
-        daily_path = KLINE_DAY_DIR / f"{code}.json"
         minute_path = KLINE_MIN_DIR / f"{code}_{as_of}.csv"
-        daily_ok = daily_path.exists()
-        minute_ok = minute_path.exists()
+        daily_rows = [row for row in quant_engine.load_kline(code) if str(row.get("date") or "") <= as_of]
+        minute_rows = quant_engine.load_intraday_bars(code, as_of)
+        daily_ok = bool(daily_rows)
+        minute_ok = bool(minute_rows)
         if daily_ok:
             daily_covered += 1
         if minute_ok:
@@ -95,7 +96,7 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
                 **target,
                 "daily_kline": daily_ok,
                 "minute_kline": minute_ok,
-                "minute_rows": _count_csv_rows(minute_path) if minute_ok else 0,
+                "minute_rows": len(minute_rows) if minute_rows else (_count_csv_rows(minute_path) if minute_path.exists() else 0),
             }
         )
 
@@ -105,6 +106,8 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
     day_files = list(KLINE_DAY_DIR.glob("*.json")) if KLINE_DAY_DIR.exists() else []
     minute_files = list(KLINE_MIN_DIR.glob("*.csv")) if KLINE_MIN_DIR.exists() else []
     events = quant_engine.events()
+    lhb_rows = quant_engine.load_lhb_records(limit=200000)
+    lhb_dates = sorted({row.get("trade_date", "") for row in lhb_rows if row.get("trade_date")}, reverse=True)
     event_dates: Dict[str, int] = {}
     for event in events:
         event_dates[event.date] = event_dates.get(event.date, 0) + 1
@@ -120,6 +123,9 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
             "day_kline_files": len(day_files),
             "minute_kline_files": len(minute_files),
             "target_count": len(targets),
+            "lhb_rows": len(lhb_rows),
+            "lhb_stock_count": len({row.get("stock_code") for row in lhb_rows}),
+            "latest_lhb_date": lhb_dates[0] if lhb_dates else "",
         },
         "daily_coverage": {
             "covered": daily_covered,
@@ -140,6 +146,12 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
         },
         "ai": ai_state,
         "biying": biying_minute_sync.status(),
+        "lhb": {
+            "rows": len(lhb_rows),
+            "stock_count": len({row.get("stock_code") for row in lhb_rows}),
+            "latest_date": lhb_dates[0] if lhb_dates else "",
+            "recent_dates": lhb_dates[:20],
+        },
         "targets": target_rows,
     }
 

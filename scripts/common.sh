@@ -163,7 +163,7 @@ print_backend_route_help() {
   echo "请在服务器执行下面命令确认实际运行路径："
   echo "  systemctl show ${SERVICE_NAME} -p MainPID -p ExecStart -p WorkingDirectory"
   echo "  ps -ef | grep uvicorn | grep -v grep"
-  echo "  curl -s http://127.0.0.1:${PORT}/openapi.json | grep clear_sample_state"
+  echo "  curl -s http://127.0.0.1:${PORT}/openapi.json | grep -E 'clear_sample_state|kline/fill|lhb/sync'"
 }
 
 wait_for_api_ready() {
@@ -193,14 +193,16 @@ check_backend_feature_routes() {
     return 1
   fi
 
-  if grep -q '"/api/admin/data/clear_sample_state"' "$openapi_file"; then
+  if grep -q '"/api/admin/data/clear_sample_state"' "$openapi_file" \
+    && grep -q '"/api/data/kline/fill"' "$openapi_file" \
+    && grep -q '"/api/data/lhb/sync"' "$openapi_file"; then
     rm -f "$openapi_file"
-    success "当前运行中的后端已包含：清理样例持仓接口"
+    success "当前运行中的后端已包含：清理样例、补齐日K、龙虎榜同步接口"
     return 0
   fi
 
   rm -f "$openapi_file"
-  error "当前运行中的后端路由表没有清理样例持仓接口"
+  error "当前运行中的后端路由表缺少清理样例、补齐日K或龙虎榜同步接口"
   print_backend_route_help
   return 1
 }

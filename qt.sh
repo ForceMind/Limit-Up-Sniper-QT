@@ -26,6 +26,8 @@ usage() {
   restore <tar.gz>            从备份恢复 backend/data
   auth                        账号密码管理
   clear-sample | sample       清理样例持仓
+  fill-kline | kline          补齐有新闻事件股票的日K数据
+  sync-lhb   | lhb            拉取龙虎榜席位数据
   scan   | security           GitHub 上传前安全扫描
   doctor | check              部署环境检查
 

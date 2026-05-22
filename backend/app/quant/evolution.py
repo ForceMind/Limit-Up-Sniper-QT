@@ -112,6 +112,7 @@ class StrategyEvolution:
                         "best_objective": evaluated[0]["objective"],
                         "best_return_pct": evaluated[0]["return_pct"],
                         "best_drawdown_pct": evaluated[0]["max_drawdown_pct"],
+                        "best_sharpe_ratio": evaluated[0].get("sharpe_ratio", 0),
                         "best_win_rate": evaluated[0]["win_rate"],
                         "population": len(evaluated),
                     }
@@ -185,6 +186,8 @@ class StrategyEvolution:
                     "objective": item.get("objective", 0),
                     "return_pct": item.get("return_pct", 0),
                     "max_drawdown_pct": item.get("max_drawdown_pct", 0),
+                    "sharpe_ratio": item.get("sharpe_ratio", 0),
+                    "profit_factor": item.get("profit_factor", 0),
                     "win_rate": item.get("win_rate", 0),
                     "closed_trades": item.get("closed_trades", 0),
                     "params": params,
@@ -215,12 +218,25 @@ class StrategyEvolution:
         max_drawdown_pct = safe_float(result.get("max_drawdown_pct"), 0)
         win_rate = safe_float(result.get("win_rate"), 0)
         closed_trades = safe_float(result.get("closed_trades"), 0)
-        trade_penalty = 8.0 if closed_trades < 5 else 0.0
-        objective = return_pct - max_drawdown_pct * 0.8 + win_rate * 0.04 - trade_penalty
+        performance = result.get("performance") if isinstance(result.get("performance"), dict) else {}
+        sharpe_ratio = safe_float(performance.get("sharpe_ratio"), 0)
+        profit_factor = safe_float(performance.get("profit_factor"), 0)
+        trade_penalty = 10.0 if closed_trades < 5 else 0.0
+        objective = (
+            return_pct
+            - abs(max_drawdown_pct) * 0.85
+            + sharpe_ratio * 3.2
+            + min(max(profit_factor, 0), 4) * 1.2
+            + win_rate * 0.03
+            + min(closed_trades, 60) * 0.02
+            - trade_penalty
+        )
         return {
             "objective": round(objective, 4),
             "return_pct": round(return_pct, 4),
             "max_drawdown_pct": round(max_drawdown_pct, 4),
+            "sharpe_ratio": round(sharpe_ratio, 4),
+            "profit_factor": round(profit_factor, 4),
             "win_rate": round(win_rate, 4),
             "closed_trades": int(closed_trades),
             "params": params,

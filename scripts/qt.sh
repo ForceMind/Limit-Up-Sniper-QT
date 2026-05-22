@@ -30,6 +30,8 @@ usage() {
   qt restore <tar.gz>        从备份恢复 backend/data
   qt auth                    账号密码管理
   qt clear-sample            清理样例持仓
+  qt fill-kline              补齐有新闻事件股票的日K数据
+  qt sync-lhb                拉取龙虎榜席位数据
   qt scan                    GitHub 上传前安全扫描
   qt doctor                  部署环境检查
   qt help                    显示帮助
@@ -82,6 +84,21 @@ run_auth_tool() {
     "$PYTHON_BIN" "$auth_tool" "$@"
   else
     die "找不到 Python，无法管理账号密码"
+  fi
+}
+
+run_python_tool() {
+  local title="$1"
+  local tool="$2"
+  shift 2
+  [[ -f "$tool" ]] || die "找不到工具：$tool"
+  section "$title"
+  if [[ -x "$(venv_python)" ]]; then
+    PYTHONPATH="$ROOT_DIR/backend" "$(venv_python)" "$tool" "$@"
+  elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$tool" "$@"
+  else
+    die "找不到 Python，无法执行$title"
   fi
 }
 
@@ -334,8 +351,10 @@ cmd_panel() {
 7) 恢复数据
 8) 账号密码管理
 9) 清理样例持仓
-10) GitHub 上传前安全扫描
-11) 部署环境检查
+10) 补齐缺失日K
+11) 拉取龙虎榜席位
+12) GitHub 上传前安全扫描
+13) 部署环境检查
 0) 退出
 
 EOF
@@ -359,8 +378,10 @@ EOF
         ;;
       8) cmd_auth ;;
       9) panel_run "清理样例持仓" bash "$SCRIPT_DIR/qt.sh" clear-sample ;;
-      10) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
-      11) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      10) panel_run "补齐缺失日K" bash "$SCRIPT_DIR/qt.sh" fill-kline ;;
+      11) panel_run "拉取龙虎榜席位" bash "$SCRIPT_DIR/qt.sh" sync-lhb ;;
+      12) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
+      13) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       0|q|Q)
         echo "已退出运维面板"
         exit 0
@@ -385,6 +406,16 @@ cmd_clear_sample_state() {
   else
     die "找不到 Python，无法清理样例持仓"
   fi
+}
+
+cmd_fill_kline() {
+  require_project_root
+  run_python_tool "补齐缺失日K" "$ROOT_DIR/scripts/fill_kline.py" "$@"
+}
+
+cmd_sync_lhb() {
+  require_project_root
+  run_python_tool "拉取龙虎榜席位" "$ROOT_DIR/scripts/sync_lhb.py" "$@"
 }
 
 cmd="${1:-panel}"
@@ -422,6 +453,12 @@ case "$cmd" in
     ;;
   clear-sample|clean-sample|sample)
     cmd_clear_sample_state
+    ;;
+  fill-kline|kline|daily-kline)
+    cmd_fill_kline "${@:2}"
+    ;;
+  sync-lhb|lhb|lhb-sync)
+    cmd_sync_lhb "${@:2}"
     ;;
   scan|security)
     section "GitHub 上传前安全扫描"

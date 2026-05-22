@@ -7,11 +7,12 @@ import json
 import math
 import os
 import re
+import sqlite3
 import statistics
 import threading
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,10 +28,14 @@ def _configured_data_dir() -> Path:
 
 
 DATA_DIR = _configured_data_dir()
+QUANT_DB_FILE = DATA_DIR / "quant_data.sqlite3"
 KLINE_DAY_DIR = DATA_DIR / "kline_day_cache"
 KLINE_MIN_DIR = DATA_DIR / "kline_cache"
 STATE_FILE = DATA_DIR / "quant_state.json"
 EVENTS_CACHE_FILE = DATA_DIR / "quant_events_cache.json"
+LHB_HISTORY_FILE = DATA_DIR / "lhb_history.csv"
+SAMPLE_CODES = {"600001", "600002"}
+SAMPLE_MARKERS = ("样例", "Fixture", "样例算力", "样例电力")
 DEFAULT_AI_MODEL = "deepseek-v4-flash"
 DEFAULT_BROKER_FEE_PARAMS = {
     "commission_rate": 0.00025,
@@ -93,6 +98,22 @@ def digits6(value: Any) -> str:
     if len(text) > 6:
         text = text[-6:]
     return text if len(text) == 6 else ""
+
+
+def is_sample_code(value: Any) -> bool:
+    return digits6(value) in SAMPLE_CODES
+
+
+def contains_sample_marker(value: Any) -> bool:
+    if isinstance(value, dict):
+        if is_sample_code(value.get("code") or value.get("stock_code")):
+            return True
+        return any(contains_sample_marker(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_sample_marker(item) for item in value)
+    if isinstance(value, str):
+        return any(marker in value for marker in SAMPLE_MARKERS)
+    return False
 
 
 def parse_time(value: Any) -> Optional[datetime]:
@@ -198,6 +219,7 @@ class StockUniverse:
             name = str(raw_name or "").strip()
             if code and name:
                 self.code_to_name[code] = name
+        self._load_names_from_sqlite()
         self.name_to_code = {
             name: code
             for code, name in self.code_to_name.items()
@@ -210,6 +232,32 @@ class StockUniverse:
         )
         escaped_names = [re.escape(name) for name, _ in self._name_patterns if len(name) >= 2]
         self._name_regex = re.compile("|".join(escaped_names)) if escaped_names else None
+
+    def _load_names_from_sqlite(self) -> None:
+        if not QUANT_DB_FILE.exists():
+            return
+        queries = [
+            "SELECT code, name FROM news_events WHERE code IS NOT NULL AND name IS NOT NULL",
+            "SELECT stock_code AS code, stock_name AS name FROM lhb_records WHERE stock_code IS NOT NULL AND stock_name IS NOT NULL",
+            "SELECT code, name FROM market_pool_items WHERE code IS NOT NULL AND name IS NOT NULL",
+            "SELECT code, name FROM watchlist_items WHERE code IS NOT NULL AND name IS NOT NULL",
+        ]
+        try:
+            conn = sqlite3.connect(QUANT_DB_FILE)
+            try:
+                for query in queries:
+                    try:
+                        for raw_code, raw_name in conn.execute(query):
+                            code = digits6(raw_code)
+                            name = str(raw_name or "").strip()
+                            if code and name and code not in self.code_to_name:
+                                self.code_to_name[code] = name
+                    except sqlite3.Error:
+                        continue
+            finally:
+                conn.close()
+        except Exception:
+            return
 
     def normalize_code(self, code: Any = "", name: Any = "") -> str:
         normalized = digits6(code)
@@ -328,7 +376,27 @@ class QuantEngine:
         self._intraday_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         self._thread_local = threading.local()
 
+    def _sqlite_rows(self, query: str, params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
+        if not QUANT_DB_FILE.exists():
+            return []
+        try:
+            conn = sqlite3.connect(QUANT_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            try:
+                return [dict(row) for row in conn.execute(query, params).fetchall()]
+            finally:
+                conn.close()
+        except Exception:
+            return []
+
     def clear_intraday_cache(self) -> None:
+        self._intraday_cache.clear()
+
+    def clear_market_cache(self) -> None:
+        self._kline_cache.clear()
+        self._kline_row_map_cache.clear()
+        self._future_return_cache.clear()
+        self._correlation_cache.clear()
         self._intraday_cache.clear()
 
     def _source_mtime_key(self) -> str:
@@ -336,6 +404,8 @@ class QuantEngine:
             DATA_DIR / "news_history.json",
             DATA_DIR / "news_analysis_records.json",
             DATA_DIR / "biying_stock_list.json",
+            LHB_HISTORY_FILE,
+            QUANT_DB_FILE,
         ]
         parts = []
         for path in files:
@@ -347,11 +417,128 @@ class QuantEngine:
 
     def load_news_history(self) -> List[Dict[str, Any]]:
         payload = read_json(DATA_DIR / "news_history.json", [])
-        return payload if isinstance(payload, list) else []
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+
+        def add(item: Dict[str, Any]) -> None:
+            if not isinstance(item, dict):
+                return
+            key = str(item.get("id") or item.get("url") or item.get("timestamp") or item.get("text") or "")
+            if key and key in seen:
+                return
+            if key:
+                seen.add(key)
+            rows.append(item)
+
+        if isinstance(payload, list):
+            for item in payload:
+                add(item)
+
+        db_rows = self._sqlite_rows(
+            """
+            SELECT id, date, timestamp, time_str, source, url, text, raw_json
+            FROM news_raw
+            ORDER BY COALESCE(timestamp, 0) DESC, date DESC
+            LIMIT 50000
+            """
+        )
+        for row in db_rows:
+            raw_payload: Dict[str, Any] = {}
+            try:
+                raw = json.loads(str(row.get("raw_json") or "{}"))
+                raw_payload = raw if isinstance(raw, dict) else {}
+            except Exception:
+                raw_payload = {}
+            item = {**raw_payload}
+            item.update(
+                {
+                    "id": str(row.get("id") or raw_payload.get("id") or short_hash(str(row.get("text") or ""))),
+                    "date": str(row.get("date") or raw_payload.get("date") or "")[:10],
+                    "timestamp": int(safe_float(row.get("timestamp"), safe_float(raw_payload.get("timestamp"), 0))),
+                    "time_str": str(row.get("time_str") or raw_payload.get("time_str") or ""),
+                    "source": str(row.get("source") or raw_payload.get("source") or ""),
+                    "url": str(row.get("url") or raw_payload.get("url") or ""),
+                    "text": str(row.get("text") or raw_payload.get("text") or ""),
+                }
+            )
+            add(item)
+        return rows
 
     def load_analysis_records(self) -> List[Dict[str, Any]]:
         payload = read_json(DATA_DIR / "news_analysis_records.json", [])
         return payload if isinstance(payload, list) else []
+
+    def load_lhb_records(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 10000,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 10000), 200000))
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+
+        def add(row: Dict[str, Any]) -> None:
+            if not isinstance(row, dict):
+                return
+            date = str(row.get("trade_date") or row.get("date") or "").strip()[:10]
+            code = digits6(row.get("stock_code") or row.get("code"))
+            if not date or not code or is_sample_code(code):
+                return
+            if start_date and date < start_date:
+                return
+            if end_date and date > end_date:
+                return
+            item = {
+                "trade_date": date,
+                "stock_code": code,
+                "stock_name": str(row.get("stock_name") or row.get("name") or self.universe.name(code)).strip(),
+                "buyer_seat_name": str(row.get("buyer_seat_name") or row.get("seat_name") or "").strip(),
+                "buy_amount": safe_float(row.get("buy_amount"), 0),
+                "sell_amount": safe_float(row.get("sell_amount"), 0),
+                "hot_money": str(row.get("hot_money") or "").strip(),
+            }
+            key = (
+                item["trade_date"],
+                item["stock_code"],
+                item["buyer_seat_name"],
+                round(item["buy_amount"], 2),
+                round(item["sell_amount"], 2),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            rows.append(item)
+
+        db_rows = self._sqlite_rows(
+            """
+            SELECT trade_date, stock_code, stock_name, buyer_seat_name, buy_amount, sell_amount, hot_money
+            FROM lhb_records
+            WHERE (? = '' OR trade_date >= ?) AND (? = '' OR trade_date <= ?)
+            ORDER BY trade_date DESC, stock_code, buy_amount DESC
+            LIMIT ?
+            """,
+            (start_date or "", start_date or "", end_date or "", end_date or "", limit),
+        )
+        for row in db_rows:
+            add(row)
+
+        if LHB_HISTORY_FILE.exists():
+            for encoding in ("utf-8-sig", "gb18030"):
+                before_count = len(rows)
+                try:
+                    with LHB_HISTORY_FILE.open("r", encoding=encoding, newline="") as handle:
+                        reader = csv.DictReader(handle)
+                        for row in reader:
+                            add(row)
+                    break
+                except UnicodeDecodeError:
+                    rows = rows[:before_count]
+                    continue
+                except Exception:
+                    break
+        rows.sort(key=lambda item: (item["trade_date"], item["stock_code"], item["buy_amount"]), reverse=True)
+        return rows[:limit]
 
     def load_kline(self, code: str) -> List[Dict[str, Any]]:
         code = digits6(code)
@@ -360,19 +547,18 @@ class QuantEngine:
         cached = self._kline_cache.get(code)
         if cached is not None:
             return cached
-        payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
-        rows = payload if isinstance(payload, list) else []
         clean_rows = []
-        for row in rows:
+
+        def add_row(row: Dict[str, Any]) -> None:
             if not isinstance(row, dict):
-                continue
+                return
             date = str(row.get("date") or "").strip()[:10]
             if not date:
-                continue
+                return
             close = safe_float(row.get("close"), 0)
             open_price = safe_float(row.get("open"), close)
             if close <= 0:
-                continue
+                return
             clean_rows.append(
                 {
                     "date": date,
@@ -381,11 +567,29 @@ class QuantEngine:
                     "high": safe_float(row.get("high"), close),
                     "low": safe_float(row.get("low"), close),
                     "volume": safe_float(row.get("volume"), 0),
+                    "amount": safe_float(row.get("amount"), 0),
                 }
             )
-        clean_rows.sort(key=lambda item: item["date"])
-        self._kline_cache[code] = clean_rows
-        return clean_rows
+
+        for row in self._sqlite_rows(
+            """
+            SELECT date, open, close, high, low, volume, amount
+            FROM market_daily_bars
+            WHERE code = ?
+            ORDER BY date
+            """,
+            (code,),
+        ):
+            add_row(row)
+
+        payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
+        rows = payload if isinstance(payload, list) else []
+        for row in rows:
+            add_row(row)
+        by_date = {row["date"]: row for row in clean_rows}
+        merged_rows = [by_date[key] for key in sorted(by_date.keys())]
+        self._kline_cache[code] = merged_rows
+        return merged_rows
 
     def load_intraday_bars(self, code: str, date: str) -> List[Dict[str, Any]]:
         code = digits6(code)
@@ -398,49 +602,68 @@ class QuantEngine:
             self._intraday_cache[cache_key] = []
             return []
         path = KLINE_MIN_DIR / f"{code}_{date}.csv"
-        if not path.exists():
-            self._intraday_cache[cache_key] = []
-            return []
         bars: List[Dict[str, Any]] = []
-        try:
-            with path.open("r", encoding="utf-8-sig", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    dt = parse_time(row.get("time"))
-                    if not dt:
-                        continue
-                    open_price = safe_float(row.get("open"), 0)
-                    close_price = safe_float(row.get("close"), 0)
-                    if open_price <= 0 or close_price <= 0:
-                        continue
-                    bars.append(
-                        {
-                            "time": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "date": dt.strftime("%Y-%m-%d"),
-                            "dt": dt,
-                            "open": open_price,
-                            "close": close_price,
-                            "high": safe_float(row.get("high"), max(open_price, close_price)),
-                            "low": safe_float(row.get("low"), min(open_price, close_price)),
-                            "volume": safe_float(row.get("volume"), 0),
-                            "amount": safe_float(row.get("amount"), 0),
-                        }
-                    )
-        except Exception:
-            bars = []
-        bars.sort(key=lambda item: item["dt"])
+
+        def add_bar(row: Dict[str, Any]) -> None:
+            dt = parse_time(row.get("time"))
+            if not dt:
+                return
+            open_price = safe_float(row.get("open"), 0)
+            close_price = safe_float(row.get("close"), 0)
+            if open_price <= 0 or close_price <= 0:
+                return
+            bars.append(
+                {
+                    "time": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "dt": dt,
+                    "open": open_price,
+                    "close": close_price,
+                    "high": safe_float(row.get("high"), max(open_price, close_price)),
+                    "low": safe_float(row.get("low"), min(open_price, close_price)),
+                    "volume": safe_float(row.get("volume"), 0),
+                    "amount": safe_float(row.get("amount"), 0),
+                }
+            )
+
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8-sig", newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        add_bar(row)
+            except Exception:
+                bars = []
+
+        for row in self._sqlite_rows(
+            """
+            SELECT time, date, open, close, high, low, volume, amount
+            FROM market_minute_bars
+            WHERE code = ? AND date = ?
+            ORDER BY time
+            """,
+            (code, date),
+        ):
+            add_bar(row)
+
+        by_time = {row["time"]: row for row in bars}
+        bars = [by_time[key] for key in sorted(by_time.keys())]
         self._intraday_cache[cache_key] = bars
         return bars
 
     def _available_intraday_dates(self) -> Dict[str, set]:
         out: Dict[str, set] = {}
-        if not KLINE_MIN_DIR.exists():
-            return out
-        for path in KLINE_MIN_DIR.glob("*.csv"):
-            match = re.match(r"^(\d{6})_(\d{4}-\d{2}-\d{2})\.csv$", path.name)
-            if not match:
-                continue
-            out.setdefault(match.group(2), set()).add(match.group(1))
+        if KLINE_MIN_DIR.exists():
+            for path in KLINE_MIN_DIR.glob("*.csv"):
+                match = re.match(r"^(\d{6})_(\d{4}-\d{2}-\d{2})\.csv$", path.name)
+                if not match:
+                    continue
+                out.setdefault(match.group(2), set()).add(match.group(1))
+        for row in self._sqlite_rows("SELECT DISTINCT date, code FROM market_minute_bars WHERE date IS NOT NULL AND code IS NOT NULL"):
+            date = str(row.get("date") or "").strip()[:10]
+            code = digits6(row.get("code"))
+            if date and code:
+                out.setdefault(date, set()).add(code)
         return out
 
     def _first_intraday_bar(self, code: str, date: str) -> Optional[Dict[str, Any]]:
@@ -571,6 +794,133 @@ class QuantEngine:
                 )
         return events
 
+    def _events_from_sqlite(self, limit: int = 200000) -> List[NewsEvent]:
+        rows = self._sqlite_rows(
+            """
+            SELECT event_id, date, timestamp, source, text, code, name, industry, event_type,
+                   sentiment, impact_score, ai_score, reason
+            FROM news_events
+            WHERE code IS NOT NULL AND date IS NOT NULL
+            ORDER BY date DESC, COALESCE(timestamp, 0) DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit or 200000), 500000)),),
+        )
+        events: List[NewsEvent] = []
+        for row in rows:
+            code = digits6(row.get("code"))
+            date = str(row.get("date") or "").strip()[:10]
+            if not code or not date or not self.universe.is_tradeable_a_share(code):
+                continue
+            timestamp = int(safe_float(row.get("timestamp"), 0))
+            if timestamp <= 0:
+                dt = parse_time(date) or datetime.now()
+                timestamp = int(dt.timestamp())
+            event = NewsEvent(
+                event_id=str(row.get("event_id") or short_hash(f"sqlite:{date}:{code}:{row.get('text') or row.get('reason') or ''}")),
+                date=date,
+                timestamp=timestamp,
+                source=str(row.get("source") or "sqlite"),
+                text=str(row.get("text") or row.get("reason") or "")[:700],
+                code=code,
+                name=self.universe.name(code, row.get("name")),
+                industry=str(row.get("industry") or ""),
+                event_type=str(row.get("event_type") or ""),
+                sentiment=safe_float(row.get("sentiment"), 0),
+                impact_score=clamp(safe_float(row.get("impact_score"), 50)),
+                ai_score=safe_float(row.get("ai_score"), 0),
+                reason=str(row.get("reason") or row.get("text") or "")[:240],
+            )
+            if not self._is_sample_event(event):
+                events.append(event)
+        return events
+
+    def _is_sample_event(self, event: NewsEvent) -> bool:
+        if is_sample_code(event.code):
+            return True
+        return contains_sample_marker(
+            {
+                "name": event.name,
+                "industry": event.industry,
+                "event_type": event.event_type,
+                "text": event.text,
+                "reason": event.reason,
+            }
+        )
+
+    def _events_from_lhb(self, days: int = 120) -> List[NewsEvent]:
+        records = self.load_lhb_records(limit=200000)
+        if not records:
+            return []
+        dates = sorted({str(row.get("trade_date") or "") for row in records if row.get("trade_date")})
+        allowed_dates = set(dates[-max(1, days) :])
+        grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for row in records:
+            date = str(row.get("trade_date") or "")
+            code = digits6(row.get("stock_code"))
+            if not date or date not in allowed_dates or not code or not self.universe.is_tradeable_a_share(code):
+                continue
+            bucket = grouped.setdefault(
+                (date, code),
+                {
+                    "date": date,
+                    "code": code,
+                    "name": row.get("stock_name") or self.universe.name(code),
+                    "buy_amount": 0.0,
+                    "sell_amount": 0.0,
+                    "seats": [],
+                    "hot_money": set(),
+                },
+            )
+            buy_amount = safe_float(row.get("buy_amount"), 0)
+            sell_amount = safe_float(row.get("sell_amount"), 0)
+            seat = str(row.get("buyer_seat_name") or "").strip()
+            hot = str(row.get("hot_money") or "").strip()
+            bucket["buy_amount"] += buy_amount
+            bucket["sell_amount"] += sell_amount
+            if seat:
+                bucket["seats"].append({"seat": seat, "buy_amount": buy_amount, "sell_amount": sell_amount, "hot_money": hot})
+            if hot:
+                bucket["hot_money"].add(hot)
+
+        events: List[NewsEvent] = []
+        for (date, code), bucket in grouped.items():
+            seats = sorted(bucket["seats"], key=lambda item: safe_float(item.get("buy_amount"), 0), reverse=True)
+            top_seats = [str(item.get("seat") or "") for item in seats[:3] if item.get("seat")]
+            buy_amount = safe_float(bucket.get("buy_amount"), 0)
+            sell_amount = safe_float(bucket.get("sell_amount"), 0)
+            net_amount = buy_amount - sell_amount
+            gross_amount = max(1.0, buy_amount + sell_amount)
+            sentiment = clamp((net_amount / gross_amount) * 1.35, -1.0, 1.0)
+            hot_labels = sorted(str(item) for item in bucket.get("hot_money", set()) if item)
+            hot_boost = 5.0 if hot_labels else 0.0
+            impact = clamp(52 + sentiment * 18 + min(abs(net_amount) / 10_000_000, 18) + hot_boost)
+            seat_text = "、".join(top_seats[:3]) if top_seats else "席位未披露"
+            hot_text = f"；活跃席位标签：{'、'.join(hot_labels[:3])}" if hot_labels else ""
+            reason = (
+                f"龙虎榜净买入{net_amount / 10000:.1f}万，买入{buy_amount / 10000:.1f}万，"
+                f"卖出{sell_amount / 10000:.1f}万；主要席位：{seat_text}{hot_text}"
+            )
+            dt = parse_time(date) or datetime.now()
+            events.append(
+                NewsEvent(
+                    event_id=short_hash(f"lhb:{date}:{code}:{round(net_amount, 2)}:{seat_text}"),
+                    date=date,
+                    timestamp=int(dt.timestamp()),
+                    source="龙虎榜",
+                    text=reason,
+                    code=code,
+                    name=str(bucket.get("name") or self.universe.name(code)),
+                    industry="龙虎榜席位",
+                    event_type="龙虎榜席位",
+                    sentiment=sentiment,
+                    impact_score=impact,
+                    ai_score=0.0,
+                    reason=reason,
+                )
+            )
+        return events
+
     def events(self, force: bool = False) -> List[NewsEvent]:
         key = self._source_mtime_key()
         if not force and key == self._events_cache_key and self._events_cache:
@@ -583,16 +933,21 @@ class QuantEngine:
                     if not isinstance(item, dict):
                         continue
                     try:
-                        cached_events.append(NewsEvent(**item))
+                        event = NewsEvent(**item)
                     except Exception:
                         continue
+                    if self._is_sample_event(event):
+                        continue
+                    cached_events.append(event)
                 if cached_events:
                     self._events_cache_key = key
                     self._events_cache = cached_events
                     return list(cached_events)
         seen = set()
         events: List[NewsEvent] = []
-        for event in self._events_from_records() + self._events_from_raw_news(days=90):
+        for event in self._events_from_sqlite() + self._events_from_records() + self._events_from_raw_news(days=90) + self._events_from_lhb(days=120):
+            if self._is_sample_event(event):
+                continue
             dedupe = (event.date, event.code, short_hash(event.text[:120] + event.reason[:80]))
             if dedupe in seen:
                 continue
@@ -694,8 +1049,9 @@ class QuantEngine:
                     [event for event in self.events() if event.date == data_date],
                     key=lambda event: (event.timestamp, event.impact_score),
                     reverse=True,
-                )[:limit]
-            ]
+                )
+                if not self._is_sample_event(event)
+            ][:limit]
 
         return {
             "status": "ok",
@@ -777,6 +1133,67 @@ class QuantEngine:
             self._future_return_cache.clear()
         self._future_return_cache[cache_key] = payload
         return dict(payload)
+
+    def ensure_daily_kline_for_events(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        hold_days: int = 3,
+        max_codes: int = 300,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        events = self.events()
+        if start_date:
+            events = [event for event in events if event.date >= start_date]
+        if end_date:
+            events = [event for event in events if event.date <= end_date]
+        events = [event for event in events if self.universe.is_tradeable_a_share(event.code) and not self._is_sample_event(event)]
+        if not events:
+            return {
+                "status": "ok",
+                "message": "没有可用于补齐K线的新闻事件",
+                "requested": 0,
+                "fetched": 0,
+                "added_rows": 0,
+                "updated_rows": 0,
+            }
+        start = start_date or min(event.date for event in events)
+        end = end_date or max(event.date for event in events)
+        try:
+            end_dt = datetime.strptime(end[:10], "%Y-%m-%d") + timedelta(days=max(3, int(hold_days or 3) * 3))
+            fetch_end = end_dt.strftime("%Y-%m-%d")
+        except Exception:
+            fetch_end = end
+
+        best_by_code: Dict[str, NewsEvent] = {}
+        for event in events:
+            old = best_by_code.get(event.code)
+            if old is None or (event.date, event.impact_score, event.timestamp) > (old.date, old.impact_score, old.timestamp):
+                best_by_code[event.code] = event
+        ranked_codes = [
+            code
+            for code, _event in sorted(
+                best_by_code.items(),
+                key=lambda item: (item[1].impact_score, item[1].date, item[1].timestamp),
+                reverse=True,
+            )
+        ][: max(1, min(int(max_codes or 300), 2000))]
+
+        from app.quant.market_data import sync_daily_for_codes
+
+        result = sync_daily_for_codes(
+            ranked_codes,
+            start_date=start,
+            end_date=fetch_end,
+            max_codes=max_codes,
+            force=force,
+        )
+        if result.get("fetched") or result.get("added_rows") or result.get("updated_rows"):
+            self.clear_market_cache()
+        result["event_start_date"] = start
+        result["event_end_date"] = end
+        result["fetch_end_date"] = fetch_end
+        return result
 
     def technical_profile(self, code: str, as_of: Optional[str] = None) -> Dict[str, Any]:
         rows = self.load_kline(code)
@@ -864,6 +1281,8 @@ class QuantEngine:
         by_type: Dict[str, List[float]] = {}
         all_returns: List[float] = []
         for event in self.events():
+            if self._is_sample_event(event):
+                continue
             if event.date >= as_of:
                 continue
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
@@ -915,6 +1334,14 @@ class QuantEngine:
         default_cash = payload["strategy_params"]["account_initial_cash"]
         positions = payload.get("positions") if isinstance(payload.get("positions"), list) else []
         trades = payload.get("trades") if isinstance(payload.get("trades"), list) else []
+        filtered_positions = [pos for pos in positions if not contains_sample_marker(pos)]
+        filtered_trades = [trade for trade in trades if not contains_sample_marker(trade)]
+        if len(filtered_positions) != len(positions) or len(filtered_trades) != len(trades):
+            payload["positions"] = filtered_positions
+            payload["trades"] = filtered_trades
+            positions = filtered_positions
+            trades = filtered_trades
+            payload["sample_state_filtered_at"] = datetime.now().isoformat(timespec="seconds")
         legacy_initial_cash = 1_000_000.0
         stored_initial_cash = safe_float(payload.get("initial_cash"), 0)
         stored_cash = safe_float(payload.get("cash"), 0)
@@ -1192,6 +1619,8 @@ class QuantEngine:
         selected = [event for event in self.events() if event.date in selected_dates and event.date <= as_of]
         grouped: Dict[str, Dict[str, Any]] = {}
         for event in selected:
+            if self._is_sample_event(event):
+                continue
             if not self.universe.is_tradeable_a_share(event.code):
                 continue
             grouped.setdefault(event.code, {"events": []})["events"].append(event)
@@ -1229,7 +1658,7 @@ class QuantEngine:
                 }
             )
         items.sort(key=lambda item: (item["buy_score"], -item["sell_score"], item["impact_score"]), reverse=True)
-        latest_events = [event.compact() for event in selected[:60]]
+        latest_events = [event.compact() for event in selected if not self._is_sample_event(event)][:60]
         return {
             "as_of": as_of,
             "lookback_days": lookback_days,
@@ -1271,6 +1700,103 @@ class QuantEngine:
                 return date
         return ""
 
+    def _performance_metrics(
+        self,
+        equity_curve: List[Dict[str, Any]],
+        trades: List[Dict[str, Any]],
+        initial_cash: float,
+        final_value: float,
+    ) -> Dict[str, Any]:
+        initial_cash = max(1.0, safe_float(initial_cash, 1.0))
+        final_value = max(0.0, safe_float(final_value, initial_cash))
+        values = [safe_float(point.get("total_value"), 0) for point in equity_curve if safe_float(point.get("total_value"), 0) > 0]
+        daily_returns = []
+        previous = initial_cash
+        for value in values:
+            daily_returns.append((value / previous - 1.0) if previous > 0 else 0.0)
+            previous = value
+
+        total_return_pct = (final_value / initial_cash - 1.0) * 100
+        trading_days = len(values)
+        annualized_return_pct = ((final_value / initial_cash) ** (252 / trading_days) - 1.0) * 100 if trading_days > 0 and final_value > 0 else 0.0
+        volatility_pct = statistics.stdev(daily_returns) * math.sqrt(252) * 100 if len(daily_returns) >= 2 else 0.0
+        sharpe_ratio = (
+            statistics.mean(daily_returns) / statistics.stdev(daily_returns) * math.sqrt(252)
+            if len(daily_returns) >= 2 and statistics.stdev(daily_returns) > 0
+            else 0.0
+        )
+
+        peak = initial_cash
+        max_drawdown = 0.0
+        drawdown_start = ""
+        drawdown_end = ""
+        current_peak_date = ""
+        for point in equity_curve:
+            date = str(point.get("date") or "")
+            value = safe_float(point.get("total_value"), initial_cash)
+            if value >= peak:
+                peak = value
+                current_peak_date = date
+            drawdown = value / peak - 1.0 if peak > 0 else 0.0
+            if drawdown < max_drawdown:
+                max_drawdown = drawdown
+                drawdown_start = current_peak_date
+                drawdown_end = date
+
+        sell_trades = [trade for trade in trades if str(trade.get("side") or "").upper() == "SELL"]
+        buy_trades = [trade for trade in trades if str(trade.get("side") or "").upper() == "BUY"]
+        sell_returns = [safe_float(trade.get("pnl_pct"), 0) for trade in sell_trades]
+        wins = [ret for ret in sell_returns if ret > 0]
+        losses = [ret for ret in sell_returns if ret <= 0]
+        gross_profit = sum(max(0.0, safe_float(trade.get("net_amount"), 0) - safe_float(trade.get("amount"), 0)) for trade in sell_trades)
+        if gross_profit <= 0:
+            gross_profit = sum(ret for ret in wins)
+        gross_loss = abs(sum(min(0.0, ret) for ret in losses))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
+        max_consecutive_losses = 0
+        current_losses = 0
+        for ret in sell_returns:
+            if ret <= 0:
+                current_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, current_losses)
+            else:
+                current_losses = 0
+
+        total_fees = sum(safe_float(trade.get("total_fee"), 0) for trade in trades)
+        turnover_amount = sum(safe_float(trade.get("amount"), 0) for trade in trades)
+        exposure_days = sum(1 for point in equity_curve if safe_float(point.get("position_count"), 0) > 0)
+        avg_position_count = statistics.mean(safe_float(point.get("position_count"), 0) for point in equity_curve) if equity_curve else 0.0
+
+        return {
+            "trading_days": trading_days,
+            "total_return_pct": round(total_return_pct, 3),
+            "annualized_return_pct": round(annualized_return_pct, 3),
+            "volatility_pct": round(volatility_pct, 3),
+            "sharpe_ratio": round(sharpe_ratio, 4),
+            "max_drawdown_pct": round(max_drawdown * 100, 3),
+            "max_drawdown_start": drawdown_start,
+            "max_drawdown_end": drawdown_end,
+            "exposure_pct": round(exposure_days / trading_days * 100, 2) if trading_days else 0.0,
+            "avg_position_count": round(avg_position_count, 3),
+            "buy_trades": len(buy_trades),
+            "sell_trades": len(sell_trades),
+            "closed_trades": len(sell_trades),
+            "win_rate": round(len(wins) / len(sell_returns) * 100, 2) if sell_returns else 0.0,
+            "avg_trade_return_pct": round(statistics.mean(sell_returns), 3) if sell_returns else 0.0,
+            "median_trade_return_pct": round(statistics.median(sell_returns), 3) if sell_returns else 0.0,
+            "avg_win_pct": round(statistics.mean(wins), 3) if wins else 0.0,
+            "avg_loss_pct": round(statistics.mean(losses), 3) if losses else 0.0,
+            "best_trade_pct": round(max(sell_returns), 3) if sell_returns else 0.0,
+            "worst_trade_pct": round(min(sell_returns), 3) if sell_returns else 0.0,
+            "profit_factor": round(profit_factor, 4),
+            "expectancy_pct": round(statistics.mean(sell_returns), 3) if sell_returns else 0.0,
+            "max_consecutive_losses": max_consecutive_losses,
+            "total_fees": round(total_fees, 2),
+            "turnover_amount": round(turnover_amount, 2),
+            "turnover_ratio": round(turnover_amount / initial_cash, 4),
+        }
+
     def walk_forward(
         self,
         start_date: Optional[str] = None,
@@ -1279,6 +1805,7 @@ class QuantEngine:
         max_positions: Optional[int] = None,
         hold_days: Optional[int] = None,
         top_n: Optional[int] = None,
+        auto_fill: bool = False,
     ) -> Dict[str, Any]:
         params = self.strategy_params()
         initial_cash = max(1.0, safe_float(initial_cash, params["account_initial_cash"]))
@@ -1286,6 +1813,7 @@ class QuantEngine:
         hold_days = int(hold_days or params["max_hold_days"])
         top_n = int(top_n or params["top_n"])
         all_events = self.events()
+        all_events = [event for event in all_events if not self._is_sample_event(event)]
         if end_date:
             all_events = [event for event in all_events if event.date <= end_date]
         if start_date:
@@ -1304,6 +1832,15 @@ class QuantEngine:
 
         start_date = start_date or min(event.date for event in all_events)
         end_date = end_date or max(event.date for event in all_events)
+        auto_fill_result: Dict[str, Any] = {}
+        if auto_fill:
+            auto_fill_result = self.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=hold_days,
+                max_codes=500,
+                force=False,
+            )
         codes = sorted({event.code for event in all_events})
         trading_dates = [
             date
@@ -1335,6 +1872,8 @@ class QuantEngine:
         prev_total = float(initial_cash)
         historical_outcomes = []
         for event in self.events():
+            if self._is_sample_event(event):
+                continue
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
             if not realized:
                 continue
@@ -1478,6 +2017,12 @@ class QuantEngine:
                 slots_left = max(1, max_positions - len(positions))
                 allocation = min(cash / slots_left, float(initial_cash) / max_positions)
                 qty = math.floor(allocation / open_price / 100) * 100
+                while qty > 0:
+                    gross_amount = qty * open_price
+                    fees = self._broker_fees("BUY", gross_amount)
+                    if gross_amount + fees["total_fee"] <= cash:
+                        break
+                    qty -= 100
                 if qty <= 0:
                     day_missed.append(
                         {
@@ -1494,7 +2039,9 @@ class QuantEngine:
                         }
                     )
                     continue
-                cash -= qty * open_price
+                gross_amount = qty * open_price
+                fees = self._broker_fees("BUY", gross_amount)
+                cash -= gross_amount + fees["total_fee"]
                 position = {
                     "code": order["code"],
                     "name": order["name"],
@@ -1502,6 +2049,7 @@ class QuantEngine:
                     "entry_date": current_date,
                     "signal_date": order.get("signal_date", ""),
                     "entry_price": round(open_price, 3),
+                    "entry_cost": round(gross_amount + fees["total_fee"], 2),
                     "buy_score": order.get("buy_score", 0),
                     "reason": order.get("reason", ""),
                     "hold_days": 0,
@@ -1515,6 +2063,11 @@ class QuantEngine:
                     "name": order["name"],
                     "qty": qty,
                     "price": round(open_price, 3),
+                    "amount": round(gross_amount, 2),
+                    "commission": fees["commission"],
+                    "stamp_duty": fees["stamp_duty"],
+                    "transfer_fee": fees["transfer_fee"],
+                    "total_fee": fees["total_fee"],
                     "score": order.get("buy_score", 0),
                     "signal_date": order.get("signal_date", ""),
                     "reason": order.get("reason", ""),
@@ -1545,7 +2098,13 @@ class QuantEngine:
                     or safe_float(rec.get("sell_score"), 0) >= params["sell_score_threshold"]
                 )
                 if should_sell:
-                    cash += safe_float(pos.get("qty"), 0) * close_price
+                    qty = safe_float(pos.get("qty"), 0)
+                    gross_amount = qty * close_price
+                    fees = self._broker_fees("SELL", gross_amount)
+                    net_amount = gross_amount - fees["total_fee"]
+                    entry_cost = safe_float(pos.get("entry_cost"), qty * entry_price)
+                    pnl_pct = (net_amount / entry_cost - 1) * 100 if entry_cost > 0 else pnl_pct
+                    cash += net_amount
                     reason = "持仓到期"
                     if pnl_pct <= params["stop_loss_pct"]:
                         reason = "止损"
@@ -1560,6 +2119,12 @@ class QuantEngine:
                         "name": pos["name"],
                         "qty": pos["qty"],
                         "price": round(close_price, 3),
+                        "amount": round(gross_amount, 2),
+                        "commission": fees["commission"],
+                        "stamp_duty": fees["stamp_duty"],
+                        "transfer_fee": fees["transfer_fee"],
+                        "total_fee": fees["total_fee"],
+                        "net_amount": round(net_amount, 2),
                         "pnl_pct": round(pnl_pct, 3),
                         "reason": reason,
                     }
@@ -1661,6 +2226,7 @@ class QuantEngine:
             value = safe_float(point.get("total_value"), initial_cash)
             peak = max(peak, value)
             max_drawdown = min(max_drawdown, value / peak - 1)
+        performance = self._performance_metrics(equity_curve, trades, float(initial_cash), final_value)
         return {
             "start_date": start_date,
             "end_date": end_date,
@@ -1668,12 +2234,19 @@ class QuantEngine:
             "final_value": round(final_value, 2),
             "return_pct": round((final_value / float(initial_cash) - 1) * 100, 3),
             "max_drawdown_pct": round(max_drawdown * 100, 3),
+            "annualized_return_pct": performance["annualized_return_pct"],
+            "sharpe_ratio": performance["sharpe_ratio"],
+            "profit_factor": performance["profit_factor"],
+            "total_fees": performance["total_fees"],
+            "exposure_pct": performance["exposure_pct"],
             "closed_trades": len(closed_sells),
             "win_rate": round(win_rate, 2),
+            "performance": performance,
             "strategy_params": params,
             "trades": trades,
             "days": days,
             "equity_curve": equity_curve,
+            "auto_fill": auto_fill_result,
         }
 
     def _intraday_exit(
@@ -1722,6 +2295,7 @@ class QuantEngine:
         hold_days: Optional[int] = None,
         top_n: Optional[int] = None,
         use_daily_fallback: bool = True,
+        auto_fill: bool = False,
     ) -> Dict[str, Any]:
         params = self.strategy_params()
         initial_cash = max(1.0, safe_float(initial_cash, params["account_initial_cash"]))
@@ -1729,6 +2303,7 @@ class QuantEngine:
         hold_days = int(hold_days or params["max_hold_days"])
         top_n = int(top_n or params["top_n"])
         all_events = self.events()
+        all_events = [event for event in all_events if not self._is_sample_event(event)]
         if end_date:
             all_events = [event for event in all_events if event.date <= end_date]
         if start_date:
@@ -1748,6 +2323,15 @@ class QuantEngine:
 
         start_date = start_date or min(event.date for event in all_events)
         end_date = end_date or max(event.date for event in all_events)
+        auto_fill_result: Dict[str, Any] = {}
+        if auto_fill:
+            auto_fill_result = self.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=hold_days,
+                max_codes=500,
+                force=False,
+            )
         codes = sorted({event.code for event in all_events})
         trading_dates = [
             date
@@ -1774,6 +2358,8 @@ class QuantEngine:
 
         historical_outcomes = []
         for event in self.events():
+            if self._is_sample_event(event):
+                continue
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
             if not realized:
                 continue
@@ -2144,6 +2730,7 @@ class QuantEngine:
             max_drawdown = min(max_drawdown, value / peak - 1)
         intraday_trade_count = sum(1 for trade in trades if str(trade.get("mode", "")).startswith("intraday_5m"))
         fallback_trade_count = len(trades) - intraday_trade_count
+        performance = self._performance_metrics(equity_curve, trades, float(initial_cash), final_value)
         return {
             "mode": "intraday_5m",
             "daily_fallback": bool(use_daily_fallback),
@@ -2153,15 +2740,22 @@ class QuantEngine:
             "final_value": round(final_value, 2),
             "return_pct": round((final_value / float(initial_cash) - 1) * 100, 3),
             "max_drawdown_pct": round(max_drawdown * 100, 3),
+            "annualized_return_pct": performance["annualized_return_pct"],
+            "sharpe_ratio": performance["sharpe_ratio"],
+            "profit_factor": performance["profit_factor"],
+            "total_fees": performance["total_fees"],
+            "exposure_pct": performance["exposure_pct"],
             "closed_trades": len(closed_sells),
             "win_rate": round(win_rate, 2),
             "intraday_available_dates": sorted(intraday_dates.keys()),
             "intraday_trade_count": intraday_trade_count,
             "fallback_trade_count": fallback_trade_count,
+            "performance": performance,
             "strategy_params": params,
             "trades": trades,
             "days": days,
             "equity_curve": equity_curve,
+            "auto_fill": auto_fill_result,
         }
 
     def _backtest_event_score(self, events: List[NewsEvent]) -> float:
@@ -2173,19 +2767,88 @@ class QuantEngine:
             score += (ai_score - 5) * 3
         return clamp(score)
 
+    def _backtest_data_diagnostics(
+        self,
+        start_date: Optional[str],
+        end_date: Optional[str],
+        hold_days: int,
+    ) -> Dict[str, Any]:
+        events = [
+            event
+            for event in self.events()
+            if not self._is_sample_event(event)
+            and (not start_date or event.date >= start_date)
+            and (not end_date or event.date <= end_date)
+            and self.universe.is_tradeable_a_share(event.code)
+        ]
+        codes = sorted({event.code for event in events})
+        missing_daily = []
+        insufficient_forward = []
+        covered = 0
+        for code in codes:
+            rows = self.load_kline(code)
+            if not rows:
+                missing_daily.append(code)
+                continue
+            event_dates = [event.date for event in events if event.code == code]
+            has_forward = False
+            for event_date in event_dates[:20]:
+                if self.future_return(code, event_date, hold_days=hold_days):
+                    has_forward = True
+                    break
+            if has_forward:
+                covered += 1
+            else:
+                insufficient_forward.append(code)
+        warnings = []
+        if not events:
+            warnings.append("no_events_in_range")
+        if missing_daily:
+            warnings.append("missing_daily_kline")
+        if insufficient_forward:
+            warnings.append("insufficient_forward_kline")
+        return {
+            "event_count": len(events),
+            "event_stock_count": len(codes),
+            "daily_kline_covered_stock_count": covered,
+            "missing_daily_kline_count": len(missing_daily),
+            "insufficient_forward_kline_count": len(insufficient_forward),
+            "missing_daily_kline_codes": missing_daily[:50],
+            "insufficient_forward_kline_codes": insufficient_forward[:50],
+            "warnings": warnings,
+            "sqlite_enabled": QUANT_DB_FILE.exists(),
+            "sqlite_file": str(QUANT_DB_FILE),
+        }
+
     def backtest(
         self,
         as_of: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        initial_cash: Optional[float] = None,
+        max_positions: Optional[int] = None,
         hold_days: int = 3,
         top_n: int = 5,
+        auto_fill: bool = False,
     ) -> Dict[str, Any]:
         as_of = as_of or self.latest_event_date()
         end_date = end_date or as_of
+        hold_days = max(1, min(int(hold_days or 3), 60))
+        top_n = max(1, min(int(top_n or 5), 50))
+        auto_fill_result: Dict[str, Any] = {}
+        if auto_fill:
+            auto_fill_result = self.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=hold_days,
+                max_codes=max(50, int(top_n or 5) * 40),
+                force=False,
+            )
         groups: Dict[Tuple[str, str], List[NewsEvent]] = {}
         for event in self.events():
             if event.date >= end_date:
+                continue
+            if self._is_sample_event(event):
                 continue
             if start_date and event.date < start_date:
                 continue
@@ -2241,13 +2904,47 @@ class QuantEngine:
             else:
                 buckets["80-100"].append(ret)
 
+        timeline = self.walk_forward(
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=hold_days,
+            top_n=top_n,
+            auto_fill=False,
+        )
+        diagnostics = self._backtest_data_diagnostics(start_date=start_date, end_date=end_date, hold_days=hold_days)
+        timeline_trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
+        timeline_performance = timeline.get("performance") if isinstance(timeline.get("performance"), dict) else {}
+        status = "ok" if (trades or timeline_trades or diagnostics.get("event_count", 0) > 0) else "no_data"
+        message = "backtest completed"
+        if status == "no_data":
+            message = "no events or market data available for the requested range"
+        elif not timeline_trades:
+            message = "events were found, but no closed strategy trades were generated; check thresholds and K-line coverage"
+
         return {
+            "status": status,
+            "message": message,
             "as_of": as_of,
             "start_date": start_date,
             "end_date": end_date,
             "hold_days": hold_days,
             "top_n": top_n,
             "trades": len(trades),
+            "event_outcome_trades": len(trades),
+            "timeline_trade_count": len(timeline_trades),
+            "closed_trades": int(timeline.get("closed_trades") or 0),
+            "initial_cash": timeline.get("initial_cash"),
+            "final_value": timeline.get("final_value"),
+            "return_pct": timeline.get("return_pct", 0.0),
+            "annualized_return_pct": timeline.get("annualized_return_pct", timeline_performance.get("annualized_return_pct", 0.0)),
+            "sharpe_ratio": timeline.get("sharpe_ratio", timeline_performance.get("sharpe_ratio", 0.0)),
+            "profit_factor": timeline.get("profit_factor", timeline_performance.get("profit_factor", 0.0)),
+            "total_fees": timeline.get("total_fees", timeline_performance.get("total_fees", 0.0)),
+            "exposure_pct": timeline.get("exposure_pct", timeline_performance.get("exposure_pct", 0.0)),
+            "timeline_win_rate": timeline.get("win_rate", 0.0),
+            "timeline_max_drawdown_pct": timeline.get("max_drawdown_pct", 0.0),
             "avg_return_pct": round(statistics.mean(returns), 3) if returns else 0.0,
             "median_return_pct": round(statistics.median(returns), 3) if returns else 0.0,
             "win_rate": round(sum(1 for ret in returns if ret > 0) / len(returns) * 100, 2) if returns else 0.0,
@@ -2255,6 +2952,13 @@ class QuantEngine:
             "max_drawdown_pct": round(max_drawdown * 100, 3),
             "score_buckets": {key: self._aggregate_stats(val) for key, val in buckets.items()},
             "recent_trades": trades[-80:],
+            "trade_records": timeline_trades[-500:],
+            "days": timeline.get("days", [])[-260:] if isinstance(timeline.get("days"), list) else [],
+            "equity_curve": timeline.get("equity_curve", []),
+            "performance": timeline_performance,
+            "strategy_params": timeline.get("strategy_params", self.strategy_params()),
+            "data_diagnostics": diagnostics,
+            "auto_fill": auto_fill_result,
         }
 
     def paper_portfolio(self, as_of: Optional[str] = None) -> Dict[str, Any]:
@@ -2269,6 +2973,8 @@ class QuantEngine:
             if not isinstance(pos, dict):
                 continue
             code = digits6(pos.get("code"))
+            if is_sample_code(code) or contains_sample_marker(pos):
+                continue
             price_row = self.latest_price(code, as_of=as_of)
             if not price_row:
                 updated_positions.append(pos)
@@ -2332,7 +3038,7 @@ class QuantEngine:
         state = self._load_state()
         portfolio = self.paper_portfolio(as_of=as_of)
         raw_trades = state.get("trades") if isinstance(state.get("trades"), list) else []
-        raw_trades = [trade for trade in raw_trades if isinstance(trade, dict)]
+        raw_trades = [trade for trade in raw_trades if isinstance(trade, dict) and not contains_sample_marker(trade)]
         visible_trades = [trade for trade in raw_trades if not as_of or str(trade.get("date", "")) <= as_of]
 
         lots_by_code: Dict[str, List[Dict[str, Any]]] = {}
@@ -2600,6 +3306,8 @@ class QuantEngine:
 
         for pos in positions:
             code = digits6(pos.get("code"))
+            if is_sample_code(code) or contains_sample_marker(pos):
+                continue
             price_row = self.latest_price(code, as_of=as_of)
             if not code or not price_row:
                 next_positions.append(pos)
@@ -2639,7 +3347,10 @@ class QuantEngine:
         buy_candidates = [
             item
             for item in recommendations.get("items", [])
-            if item["action"] == "买入候选" and item["code"] not in held and safe_float(item.get("buy_score"), 0) >= params["buy_threshold"]
+            if item["action"] == "买入候选"
+            and item["code"] not in held
+            and not contains_sample_marker(item)
+            and safe_float(item.get("buy_score"), 0) >= params["buy_threshold"]
         ][:slots]
         for item in buy_candidates:
             price_row = self.latest_price(item["code"], as_of=as_of)
@@ -2764,13 +3475,27 @@ class QuantEngine:
             drawdown = abs(safe_float(timeline.get("max_drawdown_pct"), 0))
             win_rate = safe_float(timeline.get("win_rate"), 0)
             closed_trades = safe_float(timeline.get("closed_trades"), 0)
-            objective = return_pct - drawdown * 0.35 + win_rate * 0.02 + min(closed_trades, 30) * 0.015
+            performance = timeline.get("performance") if isinstance(timeline.get("performance"), dict) else {}
+            sharpe_ratio = safe_float(performance.get("sharpe_ratio"), 0)
+            profit_factor = safe_float(performance.get("profit_factor"), 0)
+            trade_penalty = 10.0 if closed_trades < 5 else 0.0
+            objective = (
+                return_pct
+                - drawdown * 0.75
+                + sharpe_ratio * 3.0
+                + min(max(profit_factor, 0), 4) * 1.2
+                + win_rate * 0.025
+                + min(closed_trades, 50) * 0.02
+                - trade_penalty
+            )
             results.append(
                 {
                     "name": item["name"],
                     "objective": round(objective, 4),
                     "return_pct": round(return_pct, 3),
                     "max_drawdown_pct": round(safe_float(timeline.get("max_drawdown_pct"), 0), 3),
+                    "sharpe_ratio": round(sharpe_ratio, 4),
+                    "profit_factor": round(profit_factor, 4),
                     "win_rate": round(win_rate, 2),
                     "closed_trades": int(closed_trades),
                     "params": item["params"],
@@ -2820,6 +3545,7 @@ class QuantEngine:
             item
             for item in recommendations.get("items", [])
             if item.get("action") == "买入候选"
+            and not contains_sample_marker(item)
         ]
         timeline = self.walk_forward(start_date=start_date, end_date=as_of)
         trades = timeline.get("trades", [])
@@ -3007,6 +3733,7 @@ class QuantEngine:
                 "event_count": len(events),
                 "stock_count": len(self.universe.code_to_name),
                 "kline_stock_count": len(list(KLINE_DAY_DIR.glob("*.json"))) if KLINE_DAY_DIR.exists() else 0,
+                "lhb_record_count": len(self.load_lhb_records(limit=200000)),
             },
             "recommendations": recs,
             "backtest": backtest,
