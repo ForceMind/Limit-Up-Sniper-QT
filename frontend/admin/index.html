@@ -153,6 +153,10 @@
             <span class="text-neutral-500">AI模型</span>
             <span class="font-semibold truncate max-w-[110px]">{{ status.ai_model || '-' }}</span>
           </div>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-neutral-500">版本</span>
+            <span class="font-semibold truncate max-w-[110px]">v{{ appVersion }}</span>
+          </div>
           <a href="/" class="block h-9 leading-9 text-center border border-neutral-300 bg-white text-sm hover:bg-neutral-50">前台买入列表</a>
           <button @click="logout" class="block w-full h-9 border border-neutral-300 bg-white text-sm hover:bg-neutral-50">退出后台</button>
         </div>
@@ -605,7 +609,7 @@
             <div class="metric"><div class="text-xs text-neutral-500">Token</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.total_tokens || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">降级</div><div class="mt-2 text-lg font-semibold">{{ aiUsage.fallback_records || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">错误</div><div class="mt-2 text-lg font-semibold text-red-600">{{ aiUsage.error_records || 0 }}</div></div>
-            <div class="metric"><div class="text-xs text-neutral-500">必赢缓存</div><div class="mt-2 text-lg font-semibold">{{ minuteCacheCount }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">必盈缓存</div><div class="mt-2 text-lg font-semibold">{{ minuteCacheCount }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">龙虎榜</div><div class="mt-2 text-lg font-semibold">{{ ((coverage.summary || {}).lhb_rows) || ((lhbStatus || {}).rows) || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">最新龙虎榜</div><div class="mt-2 text-sm font-semibold">{{ ((coverage.summary || {}).latest_lhb_date) || ((lhbStatus || {}).latest_date) || '-' }}</div></div>
           </div>
@@ -1035,7 +1039,7 @@
                 <div><div class="text-xs text-neutral-500">邮件配置</div><div class="font-semibold mt-1">{{ notificationStatus.configured ? '完整' : '不完整' }}</div></div>
                 <div><div class="text-xs text-neutral-500">收件人</div><div class="font-semibold mt-1 truncate">{{ notificationStatus.recipient || '-' }}</div></div>
                 <div><div class="text-xs text-neutral-500">已通知</div><div class="font-semibold mt-1">{{ notificationStatus.notified_trades || 0 }}</div></div>
-                <div><div class="text-xs text-neutral-500">必赢状态</div><div class="font-semibold mt-1">{{ biyingStatus.status || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">必盈状态</div><div class="font-semibold mt-1">{{ biyingStatus.status || '-' }}</div></div>
                 <div><div class="text-xs text-neutral-500">缓存日期</div><div class="font-semibold mt-1">{{ Object.keys(biyingStatus.cache_dates || {}).length }}</div></div>
                 <div><div class="text-xs text-neutral-500">新闻总数</div><div class="font-semibold mt-1">{{ (jobStatus.news_fetcher || {}).history_count || 0 }}</div></div>
                 <div><div class="text-xs text-neutral-500">AI已分析</div><div class="font-semibold mt-1">{{ (jobStatus.ai_analyzer || {}).analyzed_news || 0 }}</div></div>
@@ -1119,7 +1123,7 @@
             { key: 'system_startup', label: '系统启动', desc: '自动补新闻、补日K、同步龙虎榜、重建模拟交易' },
             { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
-            { key: 'market_sync', label: '分时行情', desc: '交易时段同步必赢数据' },
+            { key: 'market_sync', label: '分时行情', desc: '交易时段同步必盈数据' },
             { key: 'kline_fill', label: '日K补齐', desc: '回测前补齐缺失K线' },
             { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
@@ -1258,6 +1262,7 @@
         runningJobs() { return this.jobStatus.running || {}; },
         pausedJobs() { return this.jobStatus.paused_jobs || {}; },
         dataStartDate() { return this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || ''; },
+        appVersion() { return this.status.frontend_version || this.status.version || '0.0.0'; },
         isEvolutionRunning() { return this.evolving || this.evolutionStatus.status === 'running'; },
         isEvolutionPaused() { return this.evolutionStatus.status === 'paused' || Boolean(this.evolutionStatus.pause_requested); },
         evolutionActionText() {

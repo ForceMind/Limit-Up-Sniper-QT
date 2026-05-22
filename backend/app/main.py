@@ -50,6 +50,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
 PROJECT_ROOT = BASE_DIR.parent
 BACKUP_DIR = PROJECT_ROOT / "backups"
+VERSION_FILE = PROJECT_ROOT / "VERSION"
+
+
+def _app_version() -> str:
+    try:
+        version = VERSION_FILE.read_text(encoding="utf-8").strip()
+        return version or "0.0.0"
+    except Exception:
+        return os.getenv("QT_APP_VERSION", "0.0.0")
+
+
+APP_VERSION = _app_version()
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -129,7 +141,38 @@ def _log_key(item: Dict[str, Any]) -> str:
         for key in ("ts", "job", "stage", "level", "message")
     )
 
-app = FastAPI(title="A-Share Quant Agent System", version="0.1.0")
+
+def _git_ref() -> Dict[str, str]:
+    if not (PROJECT_ROOT / ".git").exists():
+        return {"branch": "", "commit": "", "ref": ""}
+    try:
+        branch = subprocess.check_output(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        commit = subprocess.check_output(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        ref = f"{branch}@{commit}" if branch or commit else ""
+        return {"branch": branch, "commit": commit, "ref": ref}
+    except Exception:
+        return {"branch": "", "commit": "", "ref": ""}
+
+
+def app_version_payload() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "app": "涨停狙击手",
+        "version": APP_VERSION,
+        "backend_version": APP_VERSION,
+        "frontend_version": APP_VERSION,
+        "git": _git_ref(),
+    }
+
+app = FastAPI(title="Limit Up Sniper Quant System", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -185,6 +228,11 @@ async def startup_jobs():
 @app.on_event("shutdown")
 async def shutdown_jobs():
     await job_manager.stop()
+
+
+@app.get("/api/version")
+def api_version():
+    return app_version_payload()
 
 
 @app.get("/api/auth/status")
@@ -249,6 +297,10 @@ def status():
     return {
         "status": "ok",
         "system": "quant",
+        "app": "涨停狙击手",
+        "version": APP_VERSION,
+        "backend_version": APP_VERSION,
+        "frontend_version": APP_VERSION,
         "data_dir": str(DATA_DIR),
         "current_date": now_cn.strftime("%Y-%m-%d"),
         "current_time": now_cn.isoformat(timespec="seconds"),

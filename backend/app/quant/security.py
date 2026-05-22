@@ -389,6 +389,8 @@ def required_scope_for_api(path: str, method: str) -> Optional[str]:
         return None
     if not path.startswith("/api/"):
         return None
+    if path == "/api/version":
+        return None
     if str(method).upper() == "GET" and (
         path == "/api/front/public_snapshot"
         or path.startswith("/api/quant/news")

@@ -22,6 +22,7 @@ usage() {
 直接命令：
   qt install                 首次部署：安装依赖并注册 systemd 服务
   qt update                  一键更新：备份数据、拉取代码、更新依赖、重启服务
+  qt version                 查看前后端版本并验证模块接口
   qt restart                 重启服务
   qt stop                    停止服务
   qt status                  查看服务状态、Git 版本、认证状态
@@ -138,6 +139,7 @@ cmd_status() {
   echo "项目目录：$ROOT_DIR"
   echo "服务名称：$SERVICE_NAME"
   echo "监听地址：$HOST:$PORT"
+  echo "应用版本：$(local_app_version)"
   echo "数据目录：$ROOT_DIR/backend/data"
   echo "Git 版本：$(git_ref)"
   if [[ -f "$ROOT_DIR/.env" ]]; then
@@ -167,7 +169,7 @@ cmd_status() {
     if curl -fsS --max-time 5 "$(api_url)"; then
       echo
       success "API 可访问：$(api_url)"
-      check_backend_feature_routes || true
+      verify_running_backend || true
     else
       echo
       warn "API 暂不可访问：$(api_url)"
@@ -175,6 +177,13 @@ cmd_status() {
   else
     warn "未安装 curl，跳过 API 检查"
   fi
+}
+
+cmd_version() {
+  require_project_root
+  echo "本地应用版本：$(local_app_version)"
+  echo "Git 版本：$(git_ref)"
+  verify_running_backend
 }
 
 cmd_doctor() {
@@ -353,8 +362,9 @@ cmd_panel() {
 9) 清理样例持仓
 10) 补齐缺失日K
 11) 拉取龙虎榜席位
-12) GitHub 上传前安全扫描
-13) 部署环境检查
+12) 版本和模块验证
+13) GitHub 上传前安全扫描
+14) 部署环境检查
 0) 退出
 
 EOF
@@ -380,8 +390,9 @@ EOF
       9) panel_run "清理样例持仓" bash "$SCRIPT_DIR/qt.sh" clear-sample ;;
       10) panel_run "补齐缺失日K" bash "$SCRIPT_DIR/qt.sh" fill-kline ;;
       11) panel_run "拉取龙虎榜席位" bash "$SCRIPT_DIR/qt.sh" sync-lhb ;;
-      12) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
-      13) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      12) panel_run "版本和模块验证" bash "$SCRIPT_DIR/qt.sh" version ;;
+      13) panel_run "安全扫描" bash "$SCRIPT_DIR/qt.sh" scan ;;
+      14) panel_run "部署环境检查" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       0|q|Q)
         echo "已退出运维面板"
         exit 0
@@ -437,6 +448,9 @@ case "$cmd" in
     ;;
   status|ps)
     cmd_status
+    ;;
+  version|verify)
+    cmd_version
     ;;
   logs|log)
     cmd_logs
