@@ -655,6 +655,7 @@ def _active_strategy_model() -> Dict[str, Any]:
         "reusable": True,
         "description": "后台任务正在使用的全局参数，会驱动系统运行账户；策略库模型是训练/回测后保存的参数组合。",
         "params": quant_engine.strategy_params(),
+        "strategy_source": quant_engine.strategy_source(),
     }
 
 
@@ -1197,6 +1198,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
             "status": "ok",
             "as_of": as_of,
             "strategy_params": quant_engine.strategy_params(),
+            "strategy_source": quant_engine.strategy_source(),
             "timeline": {},
         }
         return {
@@ -1329,6 +1331,7 @@ def quant_strategy_params():
     return {
         "status": "ok",
         "strategy_params": quant_engine.strategy_params(),
+        "strategy_source": quant_engine.strategy_source(),
         "model_weights": quant_engine.model_weights(),
     }
 
@@ -1406,7 +1409,33 @@ def quant_strategy_model_backtest(
 
 @app.post("/api/quant/model/apply")
 def quant_apply_strategy_model(model_id: str = Query(...)):
-    return strategy_evolution.apply_model(model_id)
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    model = next((item for item in _strategy_catalog_items(models_payload) if str(item.get("id") or "") == str(model_id)), None)
+    if not model:
+        raise HTTPException(status_code=404, detail="strategy model not found")
+    params = model.get("params") if isinstance(model.get("params"), dict) else {}
+    source_type = "capital_preset" if model.get("is_capital_preset") else "strategy_model"
+    result = quant_engine.update_strategy_params(
+        params,
+        source={
+            "type": source_type,
+            "model_id": str(model.get("id") or ""),
+            "name": str(model.get("name") or model.get("id") or ""),
+            "description": "来自资金档策略应用。" if source_type == "capital_preset" else "来自策略库模型应用。",
+            "objective": model.get("objective"),
+            "return_pct": model.get("return_pct"),
+            "max_drawdown_pct": model.get("max_drawdown_pct"),
+            "win_rate": model.get("win_rate"),
+        },
+    )
+    if source_type == "strategy_model":
+        strategy_evolution.mark_applied_model(model)
+    return {
+        "status": "ok",
+        "model": model,
+        "strategy_params": result.get("strategy_params"),
+        "strategy_source": result.get("strategy_source"),
+    }
 
 
 @app.post("/api/quant/evolve_strategy")

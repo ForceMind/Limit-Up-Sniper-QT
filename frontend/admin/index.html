@@ -746,7 +746,12 @@
         <section v-if="activeTab === 'strategy'" class="space-y-4">
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
-              <div class="font-semibold">策略参数</div>
+              <div>
+                <div class="font-semibold">系统运行策略参数</div>
+                <div class="text-xs text-neutral-500 mt-1">
+                  当前来源：{{ systemStrategySource.name || '默认系统参数' }} · {{ systemStrategySource.description || '后台任务当前使用的全局参数' }}
+                </div>
+              </div>
               <div class="flex gap-2">
                 <button @click="saveStrategy" :disabled="strategySaving" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategySaving ? '保存中' : '保存参数' }}</button>
                 <button @click="resetStrategy" class="h-8 px-3 border border-neutral-300 bg-white text-sm">恢复默认</button>
@@ -790,7 +795,7 @@
               <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div class="font-semibold">策略库：回测后的可复用模型</div>
-                <div class="text-xs text-neutral-500 mt-1">每个模型都可以查看该参数组合跑出的成交、交割单和资金流水。</div>
+                <div class="text-xs text-neutral-500 mt-1">每个模型都可以查看该参数组合跑出的成交、交割单和资金流水；点击“应用为系统运行策略”后，后台模拟交易才会使用它。</div>
               </div>
                 <button @click="evolveStrategy" :disabled="evolutionToggling" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolutionActionText }}</button>
               </div>
@@ -825,7 +830,7 @@
                       <td class="px-3 py-2 text-right">
                         <button @click="loadStrategyBacktest(model)" :disabled="strategyBacktestLoading" class="h-8 px-3 border border-neutral-300 bg-white text-xs disabled:opacity-50">查看交割单</button>
                       </td>
-                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">应用</button></td>
+                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">应用为系统运行策略</button></td>
                     </tr>
                     <tr v-if="!evolutionModels.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
                   </tbody>
@@ -1657,6 +1662,7 @@
         securityConfig() { return (this.configStatus.security || {}); },
         debugConfig() { return this.securityConfig.debug_api || {}; },
         data() { return this.dashboard.data || {}; },
+        systemStrategySource() { return this.dashboard.strategy_source || ((this.strategyModels.active || {}).strategy_source) || {}; },
         newsCount() { return this.data.news_count || ((this.jobStatus.news_fetcher || {}).history_count) || 0; },
         aiRecordCount() { return this.data.ai_record_count || ((this.jobStatus.ai_analyzer || {}).records) || 0; },
         eventCount() { return this.data.event_count || 0; },
@@ -2720,9 +2726,11 @@
         },
         async applyEvolutionModel(model) {
           if (!model || !model.id) return;
+          if (!window.confirm(`确认把「${model.name || model.id}」应用为系统运行策略？后台模拟交易和系统运行账户会改用这组参数。`)) return;
           const q = new URLSearchParams({ model_id: model.id });
           const result = await this.api(`/api/quant/model/apply?${q.toString()}`, { method: 'POST' });
           this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
+          this.dashboard.strategy_source = result.strategy_source || this.dashboard.strategy_source || {};
           await this.refreshAll();
         },
         async loadStrategyBacktest(model) {

@@ -886,21 +886,42 @@ class StrategyEvolution:
         finally:
             conn.close()
 
-    def apply_model(self, model_id: str) -> Dict[str, Any]:
+    def mark_applied_model(self, model: Dict[str, Any]) -> Dict[str, Any]:
         payload = self.status()
+        payload["applied_model"] = {
+            "id": model.get("id"),
+            "name": model.get("name"),
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._write_state(payload)
+        return payload["applied_model"]
+
+    def apply_model(self, model_id: str) -> Dict[str, Any]:
         models = self.models(include_records=False).get("items", [])
         for model in models:
             if str(model.get("id")) != str(model_id):
                 continue
             params = model.get("params") if isinstance(model.get("params"), dict) else {}
-            result = quant_engine.update_strategy_params(params)
-            payload["applied_model"] = {
-                "id": model.get("id"),
-                "name": model.get("name"),
-                "applied_at": datetime.now().isoformat(timespec="seconds"),
+            result = quant_engine.update_strategy_params(
+                params,
+                source={
+                    "type": "strategy_model",
+                    "model_id": str(model.get("id") or ""),
+                    "name": str(model.get("name") or model.get("id") or ""),
+                    "description": "来自策略库模型应用。",
+                    "objective": model.get("objective"),
+                    "return_pct": model.get("return_pct"),
+                    "max_drawdown_pct": model.get("max_drawdown_pct"),
+                    "win_rate": model.get("win_rate"),
+                },
+            )
+            self.mark_applied_model(model)
+            return {
+                "status": "ok",
+                "model": model,
+                "strategy_params": result.get("strategy_params"),
+                "strategy_source": result.get("strategy_source"),
             }
-            self._write_state(payload)
-            return {"status": "ok", "model": model, "strategy_params": result.get("strategy_params")}
         return {"status": "not_found", "message": "model not found"}
 
     def run(
@@ -1042,7 +1063,19 @@ class StrategyEvolution:
 
             applied = False
             if apply_best and models:
-                quant_engine.update_strategy_params(models[0]["params"])
+                quant_engine.update_strategy_params(
+                    models[0]["params"],
+                    source={
+                        "type": "strategy_model",
+                        "model_id": str(models[0].get("id") or ""),
+                        "name": str(models[0].get("name") or models[0].get("id") or ""),
+                        "description": "来自策略进化完成后自动应用最佳模型。",
+                        "objective": models[0].get("objective"),
+                        "return_pct": models[0].get("return_pct"),
+                        "max_drawdown_pct": models[0].get("max_drawdown_pct"),
+                        "win_rate": models[0].get("win_rate"),
+                    },
+                )
                 applied = True
 
             result = {

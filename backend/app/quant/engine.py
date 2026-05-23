@@ -1646,6 +1646,17 @@ class QuantEngine:
             merged.update(overrides)
         return self._normalize_strategy_params(merged)
 
+    def strategy_source(self) -> Dict[str, Any]:
+        state = self._load_state()
+        source = state.get("strategy_source") if isinstance(state.get("strategy_source"), dict) else {}
+        if not source:
+            source = {
+                "type": "default",
+                "name": "默认系统参数",
+                "description": "来自代码默认参数或早期 quant_state.json 兼容状态。",
+            }
+        return dict(source)
+
     @contextlib.contextmanager
     def temporary_strategy_params(self, params: Dict[str, Any]):
         old = getattr(self._thread_local, "strategy_params_override", None)
@@ -1661,7 +1672,7 @@ class QuantEngine:
             else:
                 self._thread_local.strategy_params_override = old
 
-    def update_strategy_params(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+    def update_strategy_params(self, updates: Dict[str, Any], source: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         state = self._load_state()
         old_initial_cash = safe_float(state.get("initial_cash"), DEFAULT_STRATEGY_PARAMS["account_initial_cash"])
         old_cash = safe_float(state.get("cash"), old_initial_cash)
@@ -1678,8 +1689,25 @@ class QuantEngine:
             "risk": params["risk_weight"],
         }
         state["strategy_updated_at"] = datetime.now().isoformat(timespec="seconds")
+        if isinstance(source, dict) and source:
+            state["strategy_source"] = {
+                **source,
+                "updated_at": state["strategy_updated_at"],
+            }
+        else:
+            state["strategy_source"] = {
+                "type": "manual",
+                "name": "后台手动参数",
+                "description": "来自后台策略参数保存。",
+                "updated_at": state["strategy_updated_at"],
+            }
         self._save_state(state)
-        return {"status": "ok", "strategy_params": params, "updated_at": state["strategy_updated_at"]}
+        return {
+            "status": "ok",
+            "strategy_params": params,
+            "strategy_source": state["strategy_source"],
+            "updated_at": state["strategy_updated_at"],
+        }
 
     def reset_strategy_params(self) -> Dict[str, Any]:
         state = self._load_state()
@@ -1696,8 +1724,19 @@ class QuantEngine:
             "risk": params["risk_weight"],
         }
         state["strategy_updated_at"] = datetime.now().isoformat(timespec="seconds")
+        state["strategy_source"] = {
+            "type": "default",
+            "name": "默认系统参数",
+            "description": "后台恢复默认参数。",
+            "updated_at": state["strategy_updated_at"],
+        }
         self._save_state(state)
-        return {"status": "ok", "strategy_params": params, "updated_at": state["strategy_updated_at"]}
+        return {
+            "status": "ok",
+            "strategy_params": params,
+            "strategy_source": state["strategy_source"],
+            "updated_at": state["strategy_updated_at"],
+        }
 
     def model_weights(self) -> Dict[str, float]:
         params = self.strategy_params()
@@ -4215,7 +4254,15 @@ class QuantEngine:
         best = results[0] if results else {"params": base}
         applied = False
         if apply_best and best.get("params"):
-            self.update_strategy_params(best["params"])
+            self.update_strategy_params(
+                best["params"],
+                source={
+                    "type": "fit_strategy",
+                    "name": f"参数拟合：{best.get('name', '最佳方案')}",
+                    "description": "来自后台参数拟合并应用。",
+                    "model_id": "",
+                },
+            )
             applied = True
             state = self._load_state()
             state["last_fit"] = {
