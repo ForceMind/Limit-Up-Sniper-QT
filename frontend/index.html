@@ -1522,7 +1522,13 @@
             this.followedModel = result.followed_model || this.followedModel;
             if (result.strategy_models) this.strategyModels = result.strategy_models;
             this.profileMessage = `已保存，当前跟随：${this.followedModelName}`;
+            this.accountView = {};
+            this.recommendations = {};
+            this.plan = {};
             await this.loadAll();
+            await this.loadMarketData(true);
+            if (['overview', 'buy'].includes(this.mobileView)) await this.loadRecommendations(true);
+            if (this.mobileView === 'buy') await this.loadPlan(true);
           } catch (err) {
             this.profileMessage = String(err.message || err);
           } finally {

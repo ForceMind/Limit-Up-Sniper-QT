@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -88,6 +89,8 @@ def _app_version() -> str:
 
 
 APP_VERSION = _app_version()
+_FRONTEND_ACCOUNT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_FRONTEND_ACCOUNT_CACHE_TTL = 300
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -762,6 +765,110 @@ def _scale_model_trades_for_cash(model: Dict[str, Any], target_cash: float) -> l
     return scaled
 
 
+def _frontend_account_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    cached = _FRONTEND_ACCOUNT_CACHE.get(key)
+    if not cached:
+        return None
+    ts, payload = cached
+    if time.time() - ts > _FRONTEND_ACCOUNT_CACHE_TTL:
+        _FRONTEND_ACCOUNT_CACHE.pop(key, None)
+        return None
+    return dict(payload)
+
+
+def _frontend_account_cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if len(_FRONTEND_ACCOUNT_CACHE) > 64:
+        oldest = sorted(_FRONTEND_ACCOUNT_CACHE.items(), key=lambda item: item[1][0])[:16]
+        for old_key, _item in oldest:
+            _FRONTEND_ACCOUNT_CACHE.pop(old_key, None)
+    _FRONTEND_ACCOUNT_CACHE[key] = (time.time(), dict(payload))
+    return payload
+
+
+def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
+    latest = str(quant_engine.latest_event_date() or "").strip()
+    requested = str(as_of or "").strip()
+    if requested and latest and requested > latest:
+        return latest
+    return requested or latest or None
+
+
+def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int) -> Dict[str, Any]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+    params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
+    target_cash = safe_float(params.get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
+    effective_as_of = _frontend_account_as_of(as_of)
+
+    if followed_id != "active":
+        model = _frontend_full_model(followed_id)
+        raw_records = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
+        if raw_records:
+            trade_records = _scale_model_trades_for_cash(model, target_cash)
+            account = quant_engine.account_from_trades(
+                trade_records,
+                initial_cash=target_cash,
+                as_of=effective_as_of,
+                limit=limit,
+            )
+            account["strategy_account_source"] = "model_records"
+            return account
+
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "model_id": followed_id,
+                    "as_of": effective_as_of,
+                    "limit": limit,
+                    "cash": round(target_cash, 2),
+                    "params": params,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_key = f"front-account:{fingerprint}"
+        cached = _frontend_account_cache_get(cache_key)
+        if cached:
+            cached["strategy_account_cache"] = "hit"
+            return cached
+        with quant_engine.temporary_strategy_params(params):
+            timeline = quant_engine.walk_forward(
+                start_date=quant_engine.first_data_date(),
+                end_date=effective_as_of,
+                initial_cash=target_cash,
+                max_positions=int(params.get("max_positions", 5)),
+                hold_days=int(params.get("max_hold_days", 3)),
+                top_n=int(params.get("top_n", 5)),
+                auto_fill=False,
+            )
+            trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
+            account = quant_engine.account_from_trades(
+                trades,
+                initial_cash=target_cash,
+                as_of=effective_as_of or timeline.get("end_date"),
+                limit=limit,
+            )
+        account["strategy_account_source"] = "strategy_replay"
+        account["strategy_account_cache"] = "miss"
+        account["strategy_timeline_summary"] = {
+            "mode": timeline.get("mode", "daily"),
+            "start_date": timeline.get("start_date"),
+            "end_date": timeline.get("end_date"),
+            "trade_count": len(trades),
+            "closed_trades": timeline.get("closed_trades", 0),
+            "return_pct": timeline.get("return_pct", 0),
+            "max_drawdown_pct": timeline.get("max_drawdown_pct", 0),
+        }
+        return _frontend_account_cache_set(cache_key, account)
+
+    with quant_engine.temporary_strategy_params(params):
+        account = quant_engine.trading_account(as_of=effective_as_of, limit=limit)
+    account["strategy_account_source"] = "runtime_state"
+    return account
+
+
 def _scale_row(row: Dict[str, Any], scale: float, keys: tuple[str, ...]) -> Dict[str, Any]:
     item = dict(row)
     for key in keys:
@@ -950,9 +1057,9 @@ def frontend_snapshot(
     daily_plan: Dict[str, Any] = {}
     if not light:
         with quant_engine.temporary_strategy_params(context["strategy_params"]):
-            trading_account = quant_engine.trading_account(as_of=as_of, limit=500)
             recommendations = quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n)
             daily_plan = quant_engine.daily_plan(as_of=as_of, limit_days=120)
+        trading_account = _frontend_strategy_account(context, as_of, limit=500)
         trading_account = _frontend_trading_account(trading_account, context)
     payload = {
         "status": "ok",
@@ -981,22 +1088,7 @@ def frontend_trading_account(
     limit: int = Query(default=500, ge=1, le=2000),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
-    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
-    followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
-    model = _frontend_full_model(followed_id) if followed_id != "active" else {}
-    target_cash = safe_float(context["strategy_params"].get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
-    raw_records = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
-    trade_records = _scale_model_trades_for_cash(model, target_cash) if model else []
-    if model and raw_records:
-        account = quant_engine.account_from_trades(
-            trade_records,
-            initial_cash=target_cash,
-            as_of=as_of,
-            limit=limit,
-        )
-    else:
-        with quant_engine.temporary_strategy_params(context["strategy_params"]):
-            account = quant_engine.trading_account(as_of=as_of, limit=limit)
+    account = _frontend_strategy_account(context, as_of, limit=limit)
     return _frontend_trading_account(account, context)
 
 
