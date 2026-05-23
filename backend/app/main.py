@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -546,13 +547,27 @@ def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, An
     return unique
 
 
-def _frontend_profile_context(request: Request) -> Dict[str, Any]:
+def _active_strategy_model() -> Dict[str, Any]:
+    return {
+        "id": "active",
+        "name": "当前运行策略",
+        "source": "runtime",
+        "reusable": True,
+        "params": quant_engine.strategy_params(),
+    }
+
+
+def _frontend_profile_context(request: Request, include_catalog: bool = True) -> Dict[str, Any]:
     username = _request_username(request)
     profile_payload = frontend_user_profile(username)
     profile = profile_payload.get("profile") if isinstance(profile_payload.get("profile"), dict) else {}
-    models_payload = strategy_evolution.models()
+    original_selected_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+    selected_id = original_selected_id
+    if include_catalog or selected_id != "active":
+        models_payload = strategy_evolution.models(limit=40, include_records=False)
+    else:
+        models_payload = {"status": "ok", "active": _active_strategy_model(), "items": [], "count": 0}
     model_items = _strategy_catalog_items(models_payload)
-    selected_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
     selected = next((item for item in model_items if str(item.get("id")) == selected_id), None)
     if not selected and model_items:
         selected = model_items[0]
@@ -561,9 +576,27 @@ def _frontend_profile_context(request: Request) -> Dict[str, Any]:
     params = quant_engine.strategy_params((selected or {}).get("params") if isinstance((selected or {}).get("params"), dict) else {})
     simulated_cash = max(10_000.0, min(10_000_000.0, safe_float(profile.get("simulated_cash"), params["account_initial_cash"])))
     params["account_initial_cash"] = simulated_cash
+    if simulated_cash <= 20_000:
+        params["max_positions"] = 1.0
+        params["top_n"] = min(safe_float(params.get("top_n"), 5), 8.0)
+        params["buy_threshold"] = max(safe_float(params.get("buy_threshold"), 72), 72.0)
+        capital_mode = "small_10k"
+    elif simulated_cash <= 50_000:
+        params["max_positions"] = min(max(1.0, safe_float(params.get("max_positions"), 2)), 2.0)
+        params["top_n"] = min(safe_float(params.get("top_n"), 8), 10.0)
+        capital_mode = "small_50k"
+    else:
+        capital_mode = "standard"
     max_positions = max(1.0, safe_float(params.get("max_positions"), 1.0))
     params["paper_position_value"] = min(safe_float(params.get("paper_position_value"), simulated_cash), simulated_cash / max_positions)
+    params["capital_mode"] = capital_mode
     profile["simulated_cash"] = round(simulated_cash, 2)
+    if original_selected_id != selected_id:
+        profile["strategy_model_id"] = selected_id
+        try:
+            update_frontend_user_profile(username, profile)
+        except Exception:
+            pass
     return {
         "username": username,
         "profile": profile,
@@ -571,6 +604,94 @@ def _frontend_profile_context(request: Request) -> Dict[str, Any]:
         "followed_model": selected or {},
         "strategy_params": params,
     }
+
+
+def _frontend_full_model(model_id: str) -> Dict[str, Any]:
+    model_id = str(model_id or "active").strip() or "active"
+    for model in _strategy_catalog_items(strategy_evolution.models(limit=200, include_records=True)):
+        if str(model.get("id") or "") == model_id:
+            return model
+    return {}
+
+
+def _affordable_payload(payload: Dict[str, Any], context: Dict[str, Any], as_of: Optional[str]) -> Dict[str, Any]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
+    cash = safe_float(profile.get("simulated_cash"), params.get("account_initial_cash", 0))
+    max_positions = max(1.0, safe_float(params.get("max_positions"), 1))
+    position_cash = min(safe_float(params.get("paper_position_value"), cash), cash / max_positions if max_positions else cash)
+    if cash <= 0:
+        return payload
+
+    def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
+        row = dict(item)
+        code = str(row.get("code") or "").strip()
+        price = safe_float(row.get("price") or row.get("current") or row.get("close"), 0)
+        if price <= 0 and code:
+            latest = quant_engine.latest_price(code, as_of=as_of)
+            price = safe_float((latest or {}).get("close"), 0)
+        lot_amount = price * 100 if price > 0 else 0.0
+        max_qty = math.floor(position_cash / price / 100) * 100 if price > 0 else 0
+        affordable = bool(price > 0 and max_qty >= 100 and lot_amount <= cash)
+        row["estimated_price"] = round(price, 3) if price > 0 else 0.0
+        row["min_lot_amount"] = round(lot_amount, 2)
+        row["max_buy_qty"] = int(max_qty)
+        row["affordable"] = affordable
+        if not affordable:
+            row["capital_note"] = "模拟资金不足以买入一手" if price > 0 else "缺少可用行情，暂不能估算一手金额"
+        elif cash <= 50_000:
+            row["capital_note"] = "小资金可买一手"
+        return row
+
+    next_payload = dict(payload)
+    for key in ("items", "buy_list"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            enriched = [enrich(item) if isinstance(item, dict) else item for item in values]
+            if cash <= 50_000:
+                enriched.sort(
+                    key=lambda item: (
+                        0 if isinstance(item, dict) and item.get("affordable") else 1,
+                        -safe_float(item.get("buy_score"), 0) if isinstance(item, dict) else 0,
+                    )
+                )
+            next_payload[key] = enriched
+    next_payload["capital_filter"] = {
+        "simulated_cash": round(cash, 2),
+        "position_cash": round(position_cash, 2),
+        "max_positions": int(max_positions),
+        "small_cash_mode": cash <= 50_000,
+    }
+    if isinstance(params, dict):
+        next_payload["strategy_params"] = {**(next_payload.get("strategy_params") if isinstance(next_payload.get("strategy_params"), dict) else {}), **params}
+    return next_payload
+
+
+def _scale_model_trades_for_cash(model: Dict[str, Any], target_cash: float) -> list[Dict[str, Any]]:
+    trades = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
+    if not trades:
+        return []
+    backtest = model.get("backtest") if isinstance(model.get("backtest"), dict) else {}
+    params = model.get("params") if isinstance(model.get("params"), dict) else {}
+    base_cash = safe_float(backtest.get("initial_cash"), safe_float(params.get("account_initial_cash"), target_cash))
+    scale = target_cash / base_cash if base_cash > 0 and target_cash > 0 else 1.0
+    if abs(scale - 1.0) < 0.0001:
+        return [dict(trade) for trade in trades if isinstance(trade, dict)]
+    scaled: list[Dict[str, Any]] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        qty = safe_float(trade.get("qty"), 0)
+        price = safe_float(trade.get("price"), 0)
+        scaled_qty = math.floor(qty * scale / 100) * 100 if qty > 0 else 0
+        if scaled_qty <= 0 or price <= 0:
+            continue
+        item = dict(trade)
+        item["qty"] = scaled_qty
+        item["amount"] = round(scaled_qty * price, 2)
+        item["scaled_for_cash"] = round(target_cash, 2)
+        scaled.append(item)
+    return scaled
 
 
 def _scale_row(row: Dict[str, Any], scale: float, keys: tuple[str, ...]) -> Dict[str, Any]:
@@ -649,7 +770,7 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
 
 def _find_strategy_model(model_id: str) -> Dict[str, Any]:
     model_id = str(model_id or "active").strip() or "active"
-    models_payload = strategy_evolution.models()
+    models_payload = strategy_evolution.models(limit=200, include_records=True)
     for model in _strategy_catalog_items(models_payload):
         if str(model.get("id") or "") == model_id:
             return model
@@ -756,7 +877,7 @@ def frontend_snapshot(
     top_n = 12 if mobile else 30
     jobs_payload = job_manager.status()
     news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
-    context = _frontend_profile_context(request)
+    context = _frontend_profile_context(request, include_catalog=True)
     trading_account: Dict[str, Any] = {}
     recommendations: Dict[str, Any] = {}
     daily_plan: Dict[str, Any] = {}
@@ -792,9 +913,23 @@ def frontend_trading_account(
     as_of: Optional[str] = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
 ):
-    context = _frontend_profile_context(request)
-    with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        account = quant_engine.trading_account(as_of=as_of, limit=limit)
+    context = _frontend_profile_context(request, include_catalog=False)
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+    model = _frontend_full_model(followed_id) if followed_id != "active" else {}
+    target_cash = safe_float(context["strategy_params"].get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
+    raw_records = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
+    trade_records = _scale_model_trades_for_cash(model, target_cash) if model else []
+    if model and raw_records:
+        account = quant_engine.account_from_trades(
+            trade_records,
+            initial_cash=target_cash,
+            as_of=as_of,
+            limit=limit,
+        )
+    else:
+        with quant_engine.temporary_strategy_params(context["strategy_params"]):
+            account = quant_engine.trading_account(as_of=as_of, limit=limit)
     return _frontend_trading_account(account, context)
 
 
@@ -805,9 +940,10 @@ def frontend_recommendations(
     lookback_days: int = Query(default=2, ge=1, le=20),
     top_n: int = Query(default=30, ge=1, le=100),
 ):
-    context = _frontend_profile_context(request)
+    context = _frontend_profile_context(request, include_catalog=False)
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        return quant_engine.recommendations(as_of=as_of, lookback_days=lookback_days, top_n=top_n)
+        payload = quant_engine.recommendations(as_of=as_of, lookback_days=lookback_days, top_n=top_n)
+    return _affordable_payload(payload, context, as_of)
 
 
 @app.get("/api/front/daily_plan")
@@ -817,9 +953,10 @@ def frontend_daily_plan(
     start_date: Optional[str] = Query(default=None),
     limit_days: int = Query(default=120, ge=1, le=500),
 ):
-    context = _frontend_profile_context(request)
+    context = _frontend_profile_context(request, include_catalog=False)
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        return quant_engine.daily_plan(as_of=as_of, start_date=start_date, limit_days=limit_days)
+        payload = quant_engine.daily_plan(as_of=as_of, start_date=start_date, limit_days=limit_days)
+    return _affordable_payload(payload, context, as_of)
 
 
 @app.get("/api/admin/snapshot")
@@ -840,7 +977,8 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
             "lhb": lhb_status(),
             "notification_status": trade_notifier.status(),
             "evolution_status": strategy_evolution.status(),
-            "strategy_models": strategy_evolution.models(),
+            "strategy_models": strategy_evolution.models(limit=40, include_records=False),
+            "frontend_users": frontend_user_summary(),
             "dashboard": dashboard,
         }
     return {
@@ -852,7 +990,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "ai_usage": ai_usage_summary(),
         "notification_status": trade_notifier.status(),
         "evolution_status": strategy_evolution.status(),
-        "strategy_models": strategy_evolution.models(),
+        "strategy_models": strategy_evolution.models(limit=80, include_records=False),
         "access_logs": access_logs(limit=120),
         "frontend_users": frontend_user_summary(),
         "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
@@ -1391,6 +1529,11 @@ def admin_access_logs(
     path: Optional[str] = Query(default=None),
 ):
     return access_logs(limit=limit, username=username, ip=ip, path=path)
+
+
+@app.get("/api/admin/frontend_users")
+def admin_frontend_users():
+    return frontend_user_summary()
 
 
 @app.post("/api/admin/restart")

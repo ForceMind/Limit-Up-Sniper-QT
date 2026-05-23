@@ -19,7 +19,7 @@ AUTH_FILE = DATA_DIR / "auth.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 PBKDF2_ITERATIONS = 200_000
 TOKEN_TTL_SECONDS = int(safe_float(os.getenv("QT_AUTH_TOKEN_TTL_SECONDS"), 12 * 60 * 60))
-DEFAULT_FRONTEND_SIMULATED_CASH = 200_000.0
+DEFAULT_FRONTEND_SIMULATED_CASH = 10_000.0
 DEFAULT_FRONTEND_PROFILE = {
     "simulated_cash": DEFAULT_FRONTEND_SIMULATED_CASH,
     "strategy_model_id": "active",
@@ -140,6 +140,13 @@ def auth_status() -> Dict[str, Any]:
     admin = users.get("admin") if isinstance(users.get("admin"), dict) else {}
     frontend = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
     frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
+    frontend_names = [
+        str(record.get("username") or username)
+        for username, record in frontend_users.items()
+        if isinstance(record, dict) and (record.get("username") or username)
+    ]
+    if frontend.get("username"):
+        frontend_names.append(str(frontend.get("username") or ""))
     admin_configured = bool(admin.get("username") and admin.get("password"))
     frontend_configured = bool(frontend_users) or bool(frontend.get("username") and frontend.get("password"))
     return {
@@ -148,8 +155,9 @@ def auth_status() -> Dict[str, Any]:
         "admin_configured": admin_configured,
         "frontend_configured": frontend_configured,
         "admin_username": str(admin.get("username") or ""),
-        "frontend_username": str(frontend.get("username") or ""),
-        "frontend_user_count": len(frontend_users) + (1 if frontend.get("username") else 0),
+        "frontend_username": frontend_names[0] if frontend_names else "",
+        "frontend_user_count": len(frontend_names),
+        "frontend_usernames": frontend_names[:20],
         "token_ttl_seconds": max(TOKEN_TTL_SECONDS, 600),
     }
 

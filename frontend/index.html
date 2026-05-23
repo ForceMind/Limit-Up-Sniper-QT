@@ -309,7 +309,7 @@
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">买入信号</div>
-              <div class="mobile-panel-sub">买入阈值 {{ fixed(rules.buy_threshold) }} · 单票资金 {{ money(rules.paper_position_value) }}</div>
+              <div class="mobile-panel-sub">买入阈值 {{ fixed(rules.buy_threshold) }} · 单票资金 {{ money(rules.paper_position_value) }}<span v-if="capitalFilter.small_cash_mode"> · 小资金模式</span></div>
             </div>
             <span class="mobile-link">候选 {{ buyList.length }}</span>
           </div>
@@ -321,6 +321,7 @@
                 <div class="tag-line">
                   <span class="tag">{{ item.industry || '-' }}</span>
                   <span class="tag tag-red">新闻 {{ item.event_count || 0 }}</span>
+                  <span v-if="item.capital_note" class="tag">{{ item.capital_note }}</span>
                 </div>
               </div>
               <div>
@@ -334,7 +335,7 @@
               <div>
                 <div class="score-buy">买 {{ fixed(item.buy_score) }}</div>
                 <div class="score-sell">卖 {{ fixed(item.sell_score) }}</div>
-                <div class="score-sell mt-2">{{ item.event_type || '事件' }}</div>
+                <div class="score-sell mt-2">{{ item.affordable === false ? money(item.min_lot_amount) + '/手' : (item.event_type || '事件') }}</div>
               </div>
             </div>
           </article>
@@ -448,7 +449,7 @@
             <div class="grid grid-cols-[1fr_auto] gap-2 items-end">
               <label class="text-sm">
                 <span class="block text-xs text-neutral-500 mb-1">我的模拟资金</span>
-                <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="10000" class="w-full h-10 px-3 border border-neutral-300 bg-white outline-none focus:border-neutral-900">
+                <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="1000" class="w-full h-10 px-3 border border-neutral-300 bg-white outline-none focus:border-neutral-900">
               </label>
               <button @click="saveProfile()" :disabled="profileSaving" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存' }}</button>
             </div>
@@ -640,7 +641,7 @@
           </div>
           <label class="text-sm">
             <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
-            <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="10000" class="w-full h-9 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+            <input v-model.number="profileForm.simulated_cash" type="number" min="10000" step="1000" class="w-full h-9 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
           </label>
           <button @click="saveProfile()" :disabled="profileSaving" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存设置' }}</button>
         </div>
@@ -868,7 +869,7 @@
                   <td class="px-3 py-3">{{ item.event_type || '-' }}</td>
                   <td class="px-3 py-3">
                     <div class="line-clamp-2">{{ item.reason || '-' }}</div>
-                    <div class="text-xs text-neutral-500 mt-1">情绪 {{ fixed((item.components || {}).sentiment_score) }} / 事件 {{ fixed((item.components || {}).event_score) }} / 技术 {{ fixed((item.components || {}).technical_score) }} / 风控 {{ fixed((item.components || {}).risk_score) }}</div>
+                    <div class="text-xs text-neutral-500 mt-1">情绪 {{ fixed((item.components || {}).sentiment_score) }} / 事件 {{ fixed((item.components || {}).event_score) }} / 技术 {{ fixed((item.components || {}).technical_score) }} / 风控 {{ fixed((item.components || {}).risk_score) }}<span v-if="item.capital_note"> / {{ item.capital_note }} {{ item.min_lot_amount ? money(item.min_lot_amount) + '/手' : '' }}</span></div>
                   </td>
                   <td class="px-3 py-3 text-right">{{ item.event_count || 0 }}</td>
                 </tr>
@@ -1190,8 +1191,8 @@
           jobLogs: {},
           recommendations: {},
           strategyModels: {},
-          userProfile: { simulated_cash: 200000, strategy_model_id: 'active' },
-          profileForm: { simulated_cash: 200000, strategy_model_id: 'active' },
+          userProfile: { simulated_cash: 10000, strategy_model_id: 'active' },
+          profileForm: { simulated_cash: 10000, strategy_model_id: 'active' },
           followedModel: {},
           profileSaving: false,
           profileMessage: '',
@@ -1284,7 +1285,10 @@
         followedModelName() {
           const id = String(this.userProfile.strategy_model_id || 'active');
           const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
-          return model.name || model.id || '当前运行策略';
+          return model.name || model.id || this.account.follow_model_name || '当前运行策略';
+        },
+        capitalFilter() {
+          return this.recommendations.capital_filter || this.plan.capital_filter || { small_cash_mode: false };
         },
         summary() { return this.plan.timeline_summary || {}; },
         rules() {
@@ -1316,7 +1320,8 @@
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
-          const res = await fetch(url, { ...options, headers });
+          const { timeoutMs, ...fetchOptions } = options;
+          const res = await this.fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs || 15000);
           if (!res.ok) {
             const text = await res.text();
             if (res.status === 401 || res.status === 403) {
@@ -1434,7 +1439,7 @@
           this.profileMessage = '';
           try {
             const payload = {
-              simulated_cash: Number(this.profileForm.simulated_cash || this.userProfile.simulated_cash || 200000),
+              simulated_cash: Number(this.profileForm.simulated_cash || this.userProfile.simulated_cash || 10000),
               strategy_model_id: String(modelId || this.profileForm.strategy_model_id || this.userProfile.strategy_model_id || 'active'),
             };
             const result = await this.api('/api/front/profile', {
@@ -1485,17 +1490,15 @@
           window.setTimeout(() => {
             if (!this.isLoggedIn) return;
             if (!mobile || ['overview', 'positions', 'deals'].includes(this.mobileView)) this.loadMarketData(true);
-            if (!mobile || ['overview', 'buy'].includes(this.mobileView)) {
-              this.loadRecommendations(true);
-              this.loadPlan(true);
-            }
+            if (!mobile || ['overview', 'buy'].includes(this.mobileView)) this.loadRecommendations(true);
+            if (!mobile || this.mobileView === 'buy') this.loadPlan(true);
           }, 0);
         },
         async loadMarketData(quiet = false) {
           try {
             if (!this.isLoggedIn) return;
             const date = this.asOf || '';
-            const accountQuery = date ? `?as_of=${date}&limit=500` : '?limit=500';
+            const accountQuery = date ? `?as_of=${date}&limit=160` : '?limit=160';
             const account = await this.api(`/api/front/trading_account${accountQuery}`);
             this.accountView = account;
             if (!this.asOf && account.as_of) this.asOf = account.as_of;
@@ -1517,7 +1520,7 @@
           try {
             if (!this.isLoggedIn) return;
             const date = this.asOf || '';
-            const planQuery = date ? `?as_of=${date}&limit_days=120` : '?limit_days=120';
+            const planQuery = date ? `?as_of=${date}&limit_days=60` : '?limit_days=60';
             const plan = await this.api(`/api/front/daily_plan${planQuery}`);
             this.plan = plan;
             if (!this.asOf && plan.as_of) this.asOf = plan.as_of;

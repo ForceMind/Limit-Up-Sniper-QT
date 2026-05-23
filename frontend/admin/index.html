@@ -822,11 +822,25 @@
                 </div>
                 <div class="border border-neutral-200 p-3">
                   <div class="text-xs text-neutral-500">前台账号</div>
-                  <div class="font-semibold mt-1">{{ authConfig.frontend_username || '-' }}</div>
+                  <div class="font-semibold mt-1">{{ authConfig.frontend_user_count || frontendUsers.count || 0 }} 个</div>
+                  <div class="text-xs text-neutral-500 mt-1 line-clamp-1">{{ (authConfig.frontend_usernames || []).join('、') || authConfig.frontend_username || '-' }}</div>
                   <div class="text-xs mt-1" :class="authConfig.frontend_configured ? 'text-emerald-700' : 'text-red-700'">{{ authConfig.frontend_configured ? '已配置' : '未配置' }}</div>
                 </div>
               </div>
-              <div class="text-xs text-neutral-500">如需改账号密码，当前版本先删除服务器本地 `backend/data/auth.json` 后重新初始化。不要把这个文件提交到 Git。</div>
+              <div class="border border-neutral-200">
+                <div class="px-3 py-2 border-b border-neutral-100 text-xs text-neutral-500">前台注册用户</div>
+                <div class="max-h-44 overflow-auto divide-y divide-neutral-100">
+                  <div v-for="item in frontendUserItems" :key="'settings-user-' + item.username" class="px-3 py-2 text-sm flex items-center justify-between gap-3">
+                    <div>
+                      <div class="font-semibold">{{ item.username }}</div>
+                      <div class="text-xs text-neutral-500">{{ item.registered_ip || '-' }} · {{ item.last_login_at || item.created_at || '-' }}</div>
+                    </div>
+                    <div class="text-xs text-neutral-500">资金 {{ money((item.profile || {}).simulated_cash) }} · {{ (item.profile || {}).strategy_model_id || 'active' }}</div>
+                  </div>
+                  <div v-if="!frontendUserItems.length" class="px-3 py-6 text-center text-sm text-neutral-500">暂无前台注册用户</div>
+                </div>
+              </div>
+              <div class="text-xs text-neutral-500">前台用户可自行注册；后台这里只查看用户、IP、最近登录、模拟资金和跟随策略。认证文件保存在服务器本地 `backend/data/auth.json`，不要提交到 Git。</div>
             </div>
 
             <div class="panel">
@@ -1717,6 +1731,14 @@
               else q.set('username', term);
             }
             this.accessLogs = await this.api(`/api/admin/access_logs?${q.toString()}`);
+            await this.fetchFrontendUsers();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          }
+        },
+        async fetchFrontendUsers() {
+          try {
+            this.frontendUsers = await this.api('/api/admin/frontend_users');
           } catch (err) {
             this.clientError = String(err.message || err);
           }

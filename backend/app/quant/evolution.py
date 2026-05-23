@@ -300,17 +300,27 @@ class StrategyEvolution:
         finally:
             conn.close()
 
-    def _load_persisted_models(self, limit: int = 80) -> List[Dict[str, Any]]:
+    def _strip_model_records(self, model: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(model)
+        for key in ("trade_records", "delivery_records", "daily_settlements", "equity_curve", "days"):
+            item.pop(key, None)
+        backtest = item.get("backtest") if isinstance(item.get("backtest"), dict) else {}
+        if backtest:
+            item["backtest"] = dict(backtest)
+        return item
+
+    def _load_persisted_models(self, limit: int = 80, include_records: bool = False) -> List[Dict[str, Any]]:
         if not QUANT_DB_FILE.exists():
             return []
         try:
             conn = self._connect_db()
             try:
+                raw_column = "raw_json" if include_records else "'{}' AS raw_json"
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT model_id, run_id, generated_at, rank, name, source, reusable,
                            objective, return_pct, max_drawdown_pct, sharpe_ratio, profit_factor,
-                           win_rate, closed_trades, params_json, backtest_json, raw_json
+                           win_rate, closed_trades, params_json, backtest_json, {raw_column}
                     FROM strategy_models
                     ORDER BY generated_at DESC, rank ASC
                     LIMIT ?
@@ -357,6 +367,8 @@ class StrategyEvolution:
                     "backtest": backtest if isinstance(backtest, dict) else {},
                 }
             )
+            if not include_records:
+                item = self._strip_model_records(item)
             items.append(item)
         return items
 
@@ -398,10 +410,10 @@ class StrategyEvolution:
             write_json(self.state_file, payload)
         return {"status": "ok", "paused": False, "message": "已恢复进化控制"}
 
-    def models(self) -> Dict[str, Any]:
+    def models(self, limit: int = 80, include_records: bool = False) -> Dict[str, Any]:
         payload = self.status()
         state_items = payload.get("models") if isinstance(payload.get("models"), list) else []
-        persisted_items = self._load_persisted_models()
+        persisted_items = self._load_persisted_models(limit=limit, include_records=include_records)
         items: List[Dict[str, Any]] = []
         seen: set[str] = set()
         for item in [*state_items, *persisted_items]:
@@ -411,7 +423,9 @@ class StrategyEvolution:
             if not model_id or model_id in seen:
                 continue
             seen.add(model_id)
-            items.append(item)
+            items.append(item if include_records else self._strip_model_records(item))
+            if len(items) >= max(1, min(int(limit or 80), 500)):
+                break
         active_params = quant_engine.strategy_params()
         return {
             "status": "ok",
@@ -429,7 +443,7 @@ class StrategyEvolution:
 
     def apply_model(self, model_id: str) -> Dict[str, Any]:
         payload = self.status()
-        models = self.models().get("items", [])
+        models = self.models(include_records=False).get("items", [])
         for model in models:
             if str(model.get("id")) != str(model_id):
                 continue

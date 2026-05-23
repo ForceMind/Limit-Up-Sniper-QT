@@ -1433,7 +1433,7 @@ class QuantEngine:
         params["max_positions"] = max(1.0, min(20.0, params["max_positions"]))
         params["top_n"] = max(1.0, min(50.0, params["top_n"]))
         params["account_initial_cash"] = max(10000.0, min(10_000_000.0, params["account_initial_cash"]))
-        params["paper_position_value"] = max(5000.0, min(2_000_000.0, params["paper_position_value"]))
+        params["paper_position_value"] = max(1000.0, min(2_000_000.0, params["paper_position_value"]))
         params["sentiment_coef"] = clamp(params["sentiment_coef"], 0, 80)
         params["ai_score_coef"] = clamp(params["ai_score_coef"], 0, 20)
         params["event_impact_weight"] = clamp(params["event_impact_weight"], 0, 1)
