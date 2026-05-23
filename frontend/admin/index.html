@@ -652,7 +652,7 @@
             </div>
             <div class="px-4 pb-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 text-sm">
               <div class="metric"><div class="text-xs text-neutral-500">推荐/日计划缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(((cacheStatus.tables || {}).frontend_payload_cache || {}).row_count) }}</div></div>
-              <div class="metric"><div class="text-xs text-neutral-500">账户回放缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(((cacheStatus.tables || {}).strategy_runtime_snapshots || {}).row_count) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">账户回放缓存</div><div class="mt-2 text-lg font-semibold">{{ qty((((cacheStatus.tables || {}).strategy_runtime_snapshots || {}).row_count || 0) + (((cacheStatus.tables || {}).user_follow_snapshots || {}).row_count || 0)) }}</div></div>
               <div class="metric"><div class="text-xs text-neutral-500">已过期缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(cacheStatus.expired_rows || 0) }}</div></div>
               <div class="metric"><div class="text-xs text-neutral-500">缓存最新生成</div><div class="mt-2 text-sm font-semibold">{{ shortTime(cacheLatestGeneratedAt) }}</div></div>
               <div class="flex flex-wrap items-end gap-2">
@@ -1716,7 +1716,8 @@
           const tables = this.cacheStatus.tables || {};
           const payloadLatest = ((tables.frontend_payload_cache || {}).latest_generated_at) || '';
           const accountLatest = ((tables.strategy_runtime_snapshots || {}).latest_generated_at) || '';
-          return [payloadLatest, accountLatest].filter(Boolean).sort().pop() || '';
+          const userFollowLatest = ((tables.user_follow_snapshots || {}).latest_generated_at) || '';
+          return [payloadLatest, accountLatest, userFollowLatest].filter(Boolean).sort().pop() || '';
         },
         fitCandidates() { return this.fitResult.candidates || []; },
         evolutionTraceSummary() { return this.evolutionTrace.summary || {}; },

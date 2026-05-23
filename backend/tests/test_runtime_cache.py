@@ -85,3 +85,40 @@ def test_runtime_cache_clear_account_keeps_daily_runtime_snapshots(tmp_path, mon
     assert result["status"] == "ok"
     assert result["deleted"]["strategy_runtime_snapshots"] == 0
     assert result["cache"]["tables"]["strategy_runtime_snapshots"]["daily_runtime_rows"] == 1
+
+
+def test_runtime_cache_clear_account_removes_user_follow_snapshots(tmp_path, monkeypatch):
+    db_file = tmp_path / "quant_data.sqlite3"
+    monkeypatch.setattr(runtime_cache, "QUANT_DB_FILE", db_file)
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", db_file)
+    evolution = StrategyEvolution()
+    evolution.save_user_follow_account(
+        "alice",
+        "model-a",
+        {"account_initial_cash": 100000},
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        {
+            "status": "ok",
+            "account": {"total_asset": 101000, "return_pct": 1, "position_count": 1, "deal_count": 1},
+            "positions": [{"code": "600000", "qty": 100, "market_value": 1000}],
+            "history_deals": [{"date": "2026-05-19", "side": "BUY", "code": "600000", "qty": 100, "price": 10}],
+        },
+        model_version="run-a",
+        source="runtime_tables",
+    )
+
+    status = runtime_cache.runtime_cache_status()
+    assert status["tables"]["user_follow_snapshots"]["row_count"] == 1
+    assert status["tables"]["user_follow_snapshots"]["position_rows"] == 1
+    assert status["tables"]["user_follow_snapshots"]["trade_rows"] == 1
+
+    result = runtime_cache.clear_runtime_cache("account")
+
+    assert result["status"] == "ok"
+    assert result["deleted"]["user_follow_snapshots"] == 1
+    assert result["deleted"]["user_follow_positions"] == 1
+    assert result["deleted"]["user_follow_trades"] == 1
+    assert result["cache"]["tables"]["user_follow_snapshots"]["row_count"] == 0

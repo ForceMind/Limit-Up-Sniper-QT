@@ -31,6 +31,8 @@
 - `strategy_model_id`：用户当前跟随策略。
 - `follow_started_at` / `follow_start_date`：本次跟随开始时间。新注册时取注册时间；切换策略时重置。
 
+v0.2.32 起，前台账户派生结果会按用户、策略、模拟资金、跟随开始日和 `as_of` 写入 `user_follow_snapshots`、`user_follow_positions`、`user_follow_trades`。这些表是用户账户视图的物化结果；策略级别的公共运行结果仍保存在 `strategy_runtime_*` 表中。
+
 ## 3. 策略模型
 
 策略分三类：
@@ -142,12 +144,13 @@ GET /api/front/trading_account
 后续架构重点：
 
 - 策略运行状态入库，当前已用 `strategy_runtime_snapshots` 缓存前台账户回放结果，并在 v0.2.23 新增 `strategy_daily_signals`、`strategy_runtime_positions`、`strategy_runtime_trades` 保存每个策略的每日信号、持仓和成交；v0.2.24 起 `strategy_runtime_snapshots` 同时保存 `daily_runtime:*` 正式每日账户快照，并新增 `strategy_runtime_settlements` 保存每日清算。
-- 前台账户优先读取 `strategy_runtime_trades`，再按用户跟随开始日和模拟资金派生账户；没有落库结果时才回退短缓存或即时回放。
+- 前台账户优先读取 `user_follow_snapshots`；未命中时读取 `strategy_runtime_trades`，再按用户跟随开始日和模拟资金派生账户；没有落库结果时才回退短缓存或即时回放。
 - 前台推荐和日计划已先用 `frontend_payload_cache` 做短缓存，避免登录后重复计算同一策略和同一日期的买入信号。
 - 后台数据库管理页可以查看并清理上述缓存，便于排查服务器接口变慢或缓存失效问题。
 - v0.2.25 起，后台慢任务触发接口默认快速返回，实际新闻、AI、行情、补数、交易循环和策略复盘继续在任务线程里运行，避免反向代理等待完整计算。
 - v0.2.28 起，服务器自动策略复盘按日期窗口分批推进，默认 15 天一批，避免常规调度每小时全量重跑历史区间。
 - v0.2.30 起，手动策略复盘和策略进化可以由独立 Python 子进程执行，降低重计算对 API 进程的影响。
-- 用户跟随账户入库，避免每次页面打开都重放完整历史。
+- v0.2.31 起，独立进程任务状态会自动巡检，异常退出时标记失败，避免任务状态永久停留在运行中。
+- v0.2.32 起，用户跟随账户快照、持仓和成交入库，避免每次页面打开都重复缩放、裁剪和派生同一周期账户。
 - 高频状态用 WebSocket 或增量轮询，重接口拆成后台任务加进度查询。
 - 推荐、覆盖率、日计划默认走轻量缓存，必要时再触发后台刷新。

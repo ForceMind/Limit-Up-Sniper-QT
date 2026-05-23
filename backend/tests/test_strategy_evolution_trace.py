@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -85,6 +86,81 @@ def test_strategy_account_cache_round_trips_through_sqlite(tmp_path, monkeypatch
     assert cached["strategy_account_cache"] == "hit"
     assert cached["account"]["total_asset"] == 101000
     assert cached["positions"][0]["code"] == "600000"
+
+
+def test_user_follow_account_persists_user_scoped_snapshot_and_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    monkeypatch.setenv("QT_USER_FOLLOW_ACCOUNT_CACHE_TTL_SECONDS", "3600")
+    evolution = StrategyEvolution()
+    params = {"buy_threshold": 72, "paper_position_value": 9000}
+    account = {
+        "status": "ok",
+        "as_of": "2026-05-19",
+        "follow_start_date": "2026-05-01",
+        "strategy_account_source": "runtime_tables",
+        "account": {"total_asset": 102500, "return_pct": 2.5, "position_count": 1, "deal_count": 2},
+        "positions": [
+            {
+                "code": "600000",
+                "name": "娴﹀彂閾惰",
+                "qty": 100,
+                "entry_date": "2026-05-18",
+                "entry_price": 10,
+                "last_price": 10.25,
+                "market_value": 1025,
+                "pnl_pct": 2.5,
+            }
+        ],
+        "history_deals": [
+            {"date": "2026-05-18", "time": "09:30:00", "side": "BUY", "code": "600000", "qty": 100, "price": 10, "amount": 1000},
+        ],
+        "today_deals": [
+            {"date": "2026-05-19", "time": "14:55:00", "side": "SELL", "code": "600001", "qty": 100, "price": 12, "amount": 1200, "pnl_pct": 5},
+        ],
+    }
+
+    evolution.save_user_follow_account(
+        "alice",
+        "model-a",
+        params,
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        account,
+        model_version="run-a",
+        source="runtime_tables",
+    )
+    cached = evolution.load_user_follow_account(
+        "alice",
+        "model-a",
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        model_version="run-a",
+        params=params,
+    )
+    other_user = evolution.load_user_follow_account(
+        "bob",
+        "model-a",
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        model_version="run-a",
+        params=params,
+    )
+
+    assert cached
+    assert cached["strategy_account_cache"] == "user_follow"
+    assert cached["account"]["total_asset"] == 102500
+    assert cached["positions"][0]["code"] == "600000"
+    assert other_user is None
+    with sqlite3.connect(tmp_path / "quant_data.sqlite3") as conn:
+        assert conn.execute("SELECT COUNT(*) FROM user_follow_snapshots").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM user_follow_positions").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM user_follow_trades").fetchone()[0] == 2
 
 
 def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monkeypatch):

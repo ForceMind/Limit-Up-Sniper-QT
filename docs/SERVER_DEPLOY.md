@@ -268,6 +268,10 @@ v0.2.25 起，后台页面手动触发新闻抓取、AI 分析、行情同步、
 
 v0.2.30 起，后台手动触发的策略复盘和策略进化默认使用独立 Python 子进程运行。API 进程只负责鉴权、记录任务状态和启动子进程；子进程继续写入 `quant_job_state.json` 和运行日志。需要临时回到线程模式时，可在接口上显式传 `process=false`，或设置 `QT_HEAVY_JOB_PROCESS_ENABLED=false` 后重启。
 
+v0.2.31 起，`/api/jobs/status` 会自动巡检独立进程任务。如果子进程已经退出但没有写回完成状态，任务会被标记为失败并写入日志，后台按钮不会永久停在“暂停/运行中”。刚启动进程有默认 8 秒宽限期，可用 `QT_JOB_PROCESS_START_GRACE_SECONDS` 调整。
+
+v0.2.32 起，前台账户会优先读取 `user_follow_snapshots`。如果用户跟随快照不存在，后端会从 `strategy_runtime_*` 运行表、短缓存、模型记录或即时回放派生账户，并写入 `user_follow_positions`、`user_follow_trades`。该快照默认最多缓存 86400 秒，可用 `QT_USER_FOLLOW_ACCOUNT_CACHE_TTL_SECONDS` 调整；接口传 `force=true` 会跳过用户跟随快照并重新派生。
+
 v0.2.29 起，后台上传合并数据包时，`quant_data.sqlite3` 不再一次性读入内存，而是流式写入临时 SQLite 后再合并。58MB 这类压缩包本身没有超过上传限制；如果旧版本合并失败，先更新到 v0.2.29 再重新上传。
 
 如果只是迁移本地跑好的策略运行结果，优先使用 `python scripts/package_strategy_runtime_export.py` 生成小包。该小包只包含 `strategy_runtime_*` 运行表，不包含新闻、行情、K 线 JSON 和账号配置，适合把本地资金档复盘结果合并到服务器。
@@ -307,7 +311,7 @@ python scripts/check_data_coverage.py /path/to/other/backend/data
 python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db backend/data/quant_data.sqlite3
 ```
 
-`backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。日 K 的长期主存储是 SQLite 的 `market_daily_bars` 表，旧的 `kline_day_cache/*.json` 只作为兼容缓存和迁移来源。
+`backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会创建策略运行和用户跟随账户相关表，并导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志；它不会导入账号、密钥和运行配置。日 K 的长期主存储是 SQLite 的 `market_daily_bars` 表，旧的 `kline_day_cache/*.json` 只作为兼容缓存和迁移来源。
 
 `qt install` 和 `qt update` 会执行智能迁移逻辑。手动 `qt migrate` 用于强制重新合并当前数据目录里的 JSON/CSV，或者在服务器外单独整理数据包。
 

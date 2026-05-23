@@ -944,6 +944,35 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
     effective_as_of = _frontend_account_as_of(as_of)
     replay_start_date = _frontend_follow_start_date(context, effective_as_of)
     model_version = _frontend_followed_model_version(context)
+    username = str(context.get("username") or "").strip() or "anonymous"
+
+    def persist_user_follow(account: Dict[str, Any], source: str) -> Dict[str, Any]:
+        strategy_evolution.save_user_follow_account(
+            username,
+            followed_id,
+            params,
+            target_cash,
+            replay_start_date,
+            effective_as_of,
+            limit,
+            account,
+            model_version=model_version,
+            source=source,
+        )
+        return account
+
+    user_cached = None if force else strategy_evolution.load_user_follow_account(
+        username,
+        followed_id,
+        target_cash,
+        replay_start_date,
+        effective_as_of,
+        limit,
+        model_version=model_version,
+        params=params,
+    )
+    if user_cached:
+        return user_cached
 
     runtime_account = None if force else strategy_evolution.load_runtime_account(
         followed_id,
@@ -966,7 +995,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             model_version=model_version,
             source="runtime_tables",
         )
-        return runtime_account
+        return persist_user_follow(runtime_account, "runtime_tables")
 
     sqlite_cached = None if force else strategy_evolution.load_account_cache(
         followed_id,
@@ -978,7 +1007,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
         model_version=model_version,
     )
     if sqlite_cached:
-        return sqlite_cached
+        return persist_user_follow(sqlite_cached, str(sqlite_cached.get("strategy_account_source") or "strategy_runtime_snapshot"))
 
     if followed_id != "active":
         model = _frontend_full_model(followed_id)
@@ -1007,7 +1036,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
                 model_version=model_version,
                 source="model_records",
             )
-            return account
+            return persist_user_follow(account, "model_records")
 
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -1073,7 +1102,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             model_version=model_version,
             source="strategy_replay",
         )
-        return account
+        return persist_user_follow(account, "strategy_replay")
 
     with quant_engine.temporary_strategy_params(params):
         account = quant_engine.trading_account(as_of=effective_as_of, limit=limit)
@@ -1091,7 +1120,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
         model_version=model_version,
         source="baseline_replay",
     )
-    return account
+    return persist_user_follow(account, "baseline_replay")
 
 
 def _scale_row(row: Dict[str, Any], scale: float, keys: tuple[str, ...]) -> Dict[str, Any]:

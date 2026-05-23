@@ -204,6 +204,76 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
 
+            CREATE TABLE IF NOT EXISTS user_follow_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                username TEXT,
+                model_id TEXT,
+                model_version TEXT,
+                params_hash TEXT,
+                follow_start_date TEXT,
+                as_of TEXT,
+                initial_cash REAL,
+                record_limit INTEGER,
+                source TEXT,
+                generated_at TEXT,
+                total_asset REAL,
+                return_pct REAL,
+                position_count INTEGER,
+                deal_count INTEGER,
+                account_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_user_model ON user_follow_snapshots(username, model_id, follow_start_date, as_of);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_generated ON user_follow_snapshots(generated_at);
+
+            CREATE TABLE IF NOT EXISTS user_follow_positions (
+                position_id TEXT PRIMARY KEY,
+                snapshot_id TEXT,
+                username TEXT,
+                model_id TEXT,
+                model_version TEXT,
+                params_hash TEXT,
+                follow_start_date TEXT,
+                as_of TEXT,
+                code TEXT,
+                name TEXT,
+                qty REAL,
+                available_qty REAL,
+                entry_date TEXT,
+                entry_price REAL,
+                last_price REAL,
+                market_value REAL,
+                pnl_pct REAL,
+                source TEXT,
+                generated_at TEXT,
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_follow_positions_user_date ON user_follow_positions(username, as_of);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_positions_code_date ON user_follow_positions(code, as_of);
+
+            CREATE TABLE IF NOT EXISTS user_follow_trades (
+                trade_id TEXT PRIMARY KEY,
+                snapshot_id TEXT,
+                username TEXT,
+                model_id TEXT,
+                model_version TEXT,
+                params_hash TEXT,
+                follow_start_date TEXT,
+                date TEXT,
+                time TEXT,
+                side TEXT,
+                code TEXT,
+                name TEXT,
+                qty REAL,
+                price REAL,
+                amount REAL,
+                pnl_pct REAL,
+                source TEXT,
+                generated_at TEXT,
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_follow_trades_user_date ON user_follow_trades(username, date);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_trades_code_date ON user_follow_trades(code, date);
+
             CREATE TABLE IF NOT EXISTS strategy_daily_signals (
                 signal_id TEXT PRIMARY KEY,
                 model_id TEXT,
@@ -723,6 +793,9 @@ class StrategyEvolution:
     def _runtime_cache_ttl_seconds(self) -> int:
         return _env_int("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400)
 
+    def _user_follow_cache_ttl_seconds(self) -> int:
+        return _env_int("QT_USER_FOLLOW_ACCOUNT_CACHE_TTL_SECONDS", 86400, minimum=0, maximum=604800)
+
     def _runtime_cache_key(
         self,
         model_id: str,
@@ -742,6 +815,33 @@ class StrategyEvolution:
             params_hash,
             round(safe_float(initial_cash, 0), 2),
             str(start_date or ""),
+            str(as_of or ""),
+            int(limit or 0),
+        )[:32]
+        return key, params_hash
+
+    def _user_follow_snapshot_key(
+        self,
+        username: str,
+        model_id: str,
+        params: Dict[str, Any],
+        initial_cash: Any,
+        follow_start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        model_version: str = "",
+    ) -> tuple[str, str]:
+        clean_username = str(username or "anonymous").strip() or "anonymous"
+        clean_model_id = str(model_id or "active").strip() or "active"
+        params_hash = self._digest("strategy_params", params or {})[:24]
+        key = self._digest(
+            "user_follow_snapshot",
+            clean_username,
+            clean_model_id,
+            str(model_version or ""),
+            params_hash,
+            round(safe_float(initial_cash, 0), 2),
+            str(follow_start_date or ""),
             str(as_of or ""),
             int(limit or 0),
         )[:32]
@@ -1332,6 +1432,224 @@ class StrategyEvolution:
             account["runtime_snapshot_return_pct"] = round(safe_float(snapshot_row["return_pct"], 0), 3)
         return account
 
+    def load_user_follow_account(
+        self,
+        username: str,
+        model_id: str,
+        initial_cash: Any,
+        follow_start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        model_version: str = "",
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not QUANT_DB_FILE.exists():
+            return None
+        snapshot_id, _params_hash = self._user_follow_snapshot_key(
+            username,
+            model_id,
+            params or {},
+            initial_cash,
+            follow_start_date,
+            as_of,
+            limit,
+            model_version=model_version,
+        )
+        try:
+            conn = self._connect_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT generated_at, source, account_json
+                    FROM user_follow_snapshots
+                    WHERE snapshot_id = ?
+                    LIMIT 1
+                    """,
+                    (snapshot_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        if not row or not self._user_follow_snapshot_is_fresh(str(row["generated_at"] or "")):
+            return None
+        try:
+            payload = json.loads(str(row["account_json"] or "{}"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["strategy_account_cache"] = "user_follow"
+        payload["strategy_account_source"] = payload.get("strategy_account_source") or str(row["source"] or "user_follow_snapshot")
+        payload["user_follow_snapshot_id"] = snapshot_id
+        payload["user_follow_snapshot_generated_at"] = str(row["generated_at"] or "")
+        return payload
+
+    def save_user_follow_account(
+        self,
+        username: str,
+        model_id: str,
+        params: Dict[str, Any],
+        initial_cash: Any,
+        follow_start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        account: Dict[str, Any],
+        model_version: str = "",
+        source: str = "",
+    ) -> None:
+        if not isinstance(account, dict):
+            return
+        clean_username = str(username or "anonymous").strip() or "anonymous"
+        clean_model_id = str(model_id or "active").strip() or "active"
+        snapshot_id, params_hash = self._user_follow_snapshot_key(
+            clean_username,
+            clean_model_id,
+            params or {},
+            initial_cash,
+            follow_start_date,
+            as_of,
+            limit,
+            model_version=model_version,
+        )
+        account_payload = dict(account)
+        account_payload.pop("strategy_account_cache", None)
+        account_payload.pop("strategy_account_cache_key", None)
+        account_payload.pop("user_follow_snapshot_id", None)
+        account_payload.pop("user_follow_snapshot_generated_at", None)
+        generated_at = datetime.now().isoformat(timespec="seconds")
+        source_text = str(source or account_payload.get("strategy_account_source") or "user_follow_account")
+        summary = account_payload.get("account") if isinstance(account_payload.get("account"), dict) else {}
+        positions = [dict(item) for item in account_payload.get("positions", []) if isinstance(item, dict)]
+        trade_rows: List[Dict[str, Any]] = []
+        seen_trades: set[str] = set()
+        for key in ("history_deals", "today_deals", "delivery_records", "trade_records", "trades"):
+            values = account_payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                marker = self._digest(
+                    str(item.get("date") or item.get("trade_date") or ""),
+                    str(item.get("time") or item.get("trade_time") or ""),
+                    str(item.get("side") or ""),
+                    str(item.get("code") or ""),
+                    safe_float(item.get("qty"), 0),
+                    safe_float(item.get("price"), 0),
+                    safe_float(item.get("amount"), 0),
+                )
+                if marker in seen_trades:
+                    continue
+                seen_trades.add(marker)
+                trade_rows.append(dict(item))
+        try:
+            conn = self._connect_db()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO user_follow_snapshots
+                    (snapshot_id, username, model_id, model_version, params_hash, follow_start_date,
+                     as_of, initial_cash, record_limit, source, generated_at, total_asset,
+                     return_pct, position_count, deal_count, account_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        clean_username,
+                        clean_model_id,
+                        str(model_version or ""),
+                        params_hash,
+                        str(follow_start_date or ""),
+                        str(as_of or ""),
+                        safe_float(initial_cash, 0),
+                        int(limit or 0),
+                        source_text,
+                        generated_at,
+                        safe_float(summary.get("total_asset"), 0),
+                        safe_float(summary.get("return_pct"), 0),
+                        int(safe_float(summary.get("position_count"), len(positions))),
+                        int(safe_float(summary.get("deal_count"), len(trade_rows))),
+                        self._json_text(account_payload),
+                    ),
+                )
+                conn.execute("DELETE FROM user_follow_positions WHERE snapshot_id = ?", (snapshot_id,))
+                conn.execute("DELETE FROM user_follow_trades WHERE snapshot_id = ?", (snapshot_id,))
+                for seq, position in enumerate(positions):
+                    code = str(position.get("code") or "").strip()
+                    position_id = self._digest("user_follow_position", snapshot_id, seq, code, position)[:40]
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO user_follow_positions
+                        (position_id, snapshot_id, username, model_id, model_version, params_hash,
+                         follow_start_date, as_of, code, name, qty, available_qty, entry_date,
+                         entry_price, last_price, market_value, pnl_pct, source, generated_at, raw_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            position_id,
+                            snapshot_id,
+                            clean_username,
+                            clean_model_id,
+                            str(model_version or ""),
+                            params_hash,
+                            str(follow_start_date or ""),
+                            str(as_of or ""),
+                            code,
+                            str(position.get("name") or ""),
+                            safe_float(position.get("qty"), 0),
+                            safe_float(position.get("available_qty"), safe_float(position.get("qty"), 0)),
+                            str(position.get("entry_date") or position.get("buy_date") or ""),
+                            safe_float(position.get("entry_price"), safe_float(position.get("cost_price"), 0)),
+                            safe_float(position.get("last_price"), safe_float(position.get("price"), 0)),
+                            safe_float(position.get("market_value"), 0),
+                            safe_float(position.get("pnl_pct"), safe_float(position.get("return_pct"), 0)),
+                            source_text,
+                            generated_at,
+                            self._json_text(position),
+                        ),
+                    )
+                for seq, trade in enumerate(trade_rows):
+                    code = str(trade.get("code") or "").strip()
+                    qty = safe_float(trade.get("qty"), 0)
+                    price = safe_float(trade.get("price"), 0)
+                    trade_id = self._digest("user_follow_trade", snapshot_id, seq, code, trade)[:40]
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO user_follow_trades
+                        (trade_id, snapshot_id, username, model_id, model_version, params_hash,
+                         follow_start_date, date, time, side, code, name, qty, price, amount,
+                         pnl_pct, source, generated_at, raw_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            trade_id,
+                            snapshot_id,
+                            clean_username,
+                            clean_model_id,
+                            str(model_version or ""),
+                            params_hash,
+                            str(follow_start_date or ""),
+                            str(trade.get("date") or trade.get("trade_date") or ""),
+                            str(trade.get("time") or trade.get("trade_time") or ""),
+                            str(trade.get("side") or ""),
+                            code,
+                            str(trade.get("name") or ""),
+                            qty,
+                            price,
+                            safe_float(trade.get("amount"), qty * price),
+                            safe_float(trade.get("pnl_pct"), safe_float(trade.get("return_pct"), 0)),
+                            source_text,
+                            generated_at,
+                            self._json_text(trade),
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            return
+
     def _runtime_summary_for_model(
         self,
         conn: sqlite3.Connection,
@@ -1470,6 +1788,16 @@ class StrategyEvolution:
 
     def _runtime_cache_is_fresh(self, generated_at: str) -> bool:
         ttl = self._runtime_cache_ttl_seconds()
+        if ttl <= 0:
+            return False
+        try:
+            generated = datetime.fromisoformat(str(generated_at or ""))
+        except Exception:
+            return False
+        return (datetime.now() - generated).total_seconds() <= ttl
+
+    def _user_follow_snapshot_is_fresh(self, generated_at: str) -> bool:
+        ttl = self._user_follow_cache_ttl_seconds()
         if ttl <= 0:
             return False
         try:

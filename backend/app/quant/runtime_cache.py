@@ -227,6 +227,17 @@ def runtime_cache_status() -> Dict[str, Any]:
                 " WHERE generated_at < ? AND COALESCE(source, '') NOT LIKE 'daily_runtime%'",
                 (account_cutoff,),
             ) if account_ttl > 0 else account_cache_rows
+            user_follow_rows = _table_count(conn, "user_follow_snapshots")
+            user_follow_position_rows = _table_count(conn, "user_follow_positions")
+            user_follow_trade_rows = _table_count(conn, "user_follow_trades")
+            user_follow_ttl = env_int("QT_USER_FOLLOW_ACCOUNT_CACHE_TTL_SECONDS", 86400, minimum=0, maximum=604800)
+            user_follow_cutoff = (datetime.now() - timedelta(seconds=user_follow_ttl)).isoformat(timespec="seconds") if user_follow_ttl > 0 else now
+            user_follow_expired = _table_count(
+                conn,
+                "user_follow_snapshots",
+                " WHERE generated_at < ?",
+                (user_follow_cutoff,),
+            ) if user_follow_ttl > 0 else user_follow_rows
             signal_rows = _table_count(conn, "strategy_daily_signals")
             position_rows = _table_count(conn, "strategy_runtime_positions")
             trade_rows = _table_count(conn, "strategy_runtime_trades")
@@ -234,12 +245,23 @@ def runtime_cache_status() -> Dict[str, Any]:
             payload = {
                 "status": "ok",
                 "database": str(QUANT_DB_FILE),
-                "total_rows": frontend_rows + account_rows + signal_rows + position_rows + trade_rows + settlement_rows,
-                "expired_rows": frontend_expired + account_expired,
+                "total_rows": (
+                    frontend_rows
+                    + account_rows
+                    + user_follow_rows
+                    + user_follow_position_rows
+                    + user_follow_trade_rows
+                    + signal_rows
+                    + position_rows
+                    + trade_rows
+                    + settlement_rows
+                ),
+                "expired_rows": frontend_expired + account_expired + user_follow_expired,
                 "ttl_seconds": {
                     "recommendations": env_int("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900, minimum=0, maximum=86400),
                     "daily_plan": env_int("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400),
                     "account": account_ttl,
+                    "user_follow_account": user_follow_ttl,
                 },
                 "tables": {
                     "frontend_payload_cache": {
@@ -255,6 +277,14 @@ def runtime_cache_status() -> Dict[str, Any]:
                         "expired_rows": account_expired,
                         "latest_generated_at": _table_max(conn, "strategy_runtime_snapshots", "generated_at"),
                         "by_source": _group_counts(conn, "strategy_runtime_snapshots", "source"),
+                    },
+                    "user_follow_snapshots": {
+                        "row_count": user_follow_rows,
+                        "position_rows": user_follow_position_rows,
+                        "trade_rows": user_follow_trade_rows,
+                        "expired_rows": user_follow_expired,
+                        "latest_generated_at": _table_max(conn, "user_follow_snapshots", "generated_at"),
+                        "by_source": _group_counts(conn, "user_follow_snapshots", "source"),
                     },
                     "strategy_daily_signals": {
                         "row_count": signal_rows,
@@ -289,7 +319,13 @@ def clear_runtime_cache(scope: str = "expired") -> Dict[str, Any]:
     scope = str(scope or "expired").strip().lower()
     if scope not in {"expired", "all", "payload", "account"}:
         scope = "expired"
-    deleted = {"frontend_payload_cache": 0, "strategy_runtime_snapshots": 0}
+    deleted = {
+        "frontend_payload_cache": 0,
+        "strategy_runtime_snapshots": 0,
+        "user_follow_snapshots": 0,
+        "user_follow_positions": 0,
+        "user_follow_trades": 0,
+    }
     if not QUANT_DB_FILE.exists():
         return {"status": "missing", "scope": scope, "deleted": deleted, "cache": runtime_cache_status()}
     now = datetime.now()
@@ -318,6 +354,37 @@ def clear_runtime_cache(scope: str = "expired") -> Dict[str, Any]:
                             (cutoff,),
                         )
                     deleted["strategy_runtime_snapshots"] = int(cur.rowcount or 0)
+            if _table_exists(conn, "user_follow_snapshots"):
+                if scope in {"all", "account"}:
+                    if _table_exists(conn, "user_follow_positions"):
+                        cur = conn.execute("DELETE FROM user_follow_positions")
+                        deleted["user_follow_positions"] = int(cur.rowcount or 0)
+                    if _table_exists(conn, "user_follow_trades"):
+                        cur = conn.execute("DELETE FROM user_follow_trades")
+                        deleted["user_follow_trades"] = int(cur.rowcount or 0)
+                    cur = conn.execute("DELETE FROM user_follow_snapshots")
+                    deleted["user_follow_snapshots"] = int(cur.rowcount or 0)
+                elif scope == "expired":
+                    user_follow_ttl = env_int("QT_USER_FOLLOW_ACCOUNT_CACHE_TTL_SECONDS", 86400, minimum=0, maximum=604800)
+                    if user_follow_ttl <= 0:
+                        expired_rows = conn.execute("SELECT snapshot_id FROM user_follow_snapshots").fetchall()
+                    else:
+                        cutoff = (now - timedelta(seconds=user_follow_ttl)).isoformat(timespec="seconds")
+                        expired_rows = conn.execute(
+                            "SELECT snapshot_id FROM user_follow_snapshots WHERE generated_at < ?",
+                            (cutoff,),
+                        ).fetchall()
+                    snapshot_ids = [str(row["snapshot_id"] if isinstance(row, sqlite3.Row) else row[0]) for row in expired_rows]
+                    if snapshot_ids:
+                        placeholders = ",".join("?" for _item in snapshot_ids)
+                        if _table_exists(conn, "user_follow_positions"):
+                            cur = conn.execute(f"DELETE FROM user_follow_positions WHERE snapshot_id IN ({placeholders})", snapshot_ids)
+                            deleted["user_follow_positions"] = int(cur.rowcount or 0)
+                        if _table_exists(conn, "user_follow_trades"):
+                            cur = conn.execute(f"DELETE FROM user_follow_trades WHERE snapshot_id IN ({placeholders})", snapshot_ids)
+                            deleted["user_follow_trades"] = int(cur.rowcount or 0)
+                        cur = conn.execute(f"DELETE FROM user_follow_snapshots WHERE snapshot_id IN ({placeholders})", snapshot_ids)
+                        deleted["user_follow_snapshots"] = int(cur.rowcount or 0)
             conn.commit()
         finally:
             conn.close()

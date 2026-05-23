@@ -22,22 +22,19 @@
 7. 前台不能出现后台初始化或管理入口；未登录只能看概览和新闻，登录后才能看账户、策略、持仓、成交等。
 8. 后台必须可管理用户、数据、缓存、任务、日志、调试通道和数据库。
 
-当前已完成到 v0.2.30：
+当前已完成到 v0.2.32：
 - 前台用户 profile 有 simulated_cash、strategy_model_id、follow_started_at、follow_start_date。
 - 切换策略会重置跟随开始时间。
 - 前台账户按 follow_start_date 裁剪，不继承旧持仓。
-- 交易账户使用 strategy_runtime_snapshots SQLite 缓存。
-- 策略复盘任务会把每个策略的每日信号、成交和持仓写入 strategy_daily_signals、strategy_runtime_trades、strategy_runtime_positions。
-- 策略复盘任务会把每个策略的每日账户快照和清算写入 strategy_runtime_snapshots、strategy_runtime_settlements。
-- 前台账户优先读取 strategy_runtime_trades，并按 follow_start_date 和模拟资金派生账户。
+- 策略复盘任务会把每个策略的每日信号、成交、持仓、账户快照和清算写入 strategy_daily_signals、strategy_runtime_trades、strategy_runtime_positions、strategy_runtime_snapshots、strategy_runtime_settlements。
+- 前台账户优先读取 user_follow_snapshots；未命中时从 strategy_runtime_*、短缓存、模型记录或即时回放派生，并写入 user_follow_positions、user_follow_trades。
 - 推荐和日计划使用 frontend_payload_cache SQLite 短缓存。
-- 资金档策略已改名为 小资金、短线稳健、均衡轮动、趋势多仓，并从 strategy_runtime_* 运行表汇总收益、回撤、胜率和成交数。
+- 后台慢任务触发接口默认 background=true；手动策略复盘和策略进化默认使用独立 Python 子进程运行。
+- 独立进程任务会在状态接口读取时自动巡检，异常退出但未写回结果时标记失败并写运行日志。
+- 自动策略复盘使用 QT_STRATEGY_REPLAY_BATCH_DAYS 分批推进，默认 15 天一批，并记录 strategy_replay_cursor。
+- 数据包导入改为流式合并 SQLite，避免 200MB 级数据库文件在服务器上一次性读入内存。
+- 可以用 python scripts/package_strategy_runtime_export.py 生成只包含 strategy_runtime_* 的小包，把本地复盘结果合并到服务器。
 - 后台数据库页可以查看和清理缓存。
-- 后台慢任务触发接口默认 background=true，新闻抓取、AI 分析、行情同步、日K补齐、龙虎榜、交易循环、策略复盘和系统启动会立即返回任务状态并在后台继续运行。
-- 自动策略复盘使用 `QT_STRATEGY_REPLAY_BATCH_DAYS` 分批推进，默认 15 天一批，并记录 `strategy_replay_cursor`，避免服务器每小时全量重跑历史。
-- 数据包导入改为流式合并 SQLite，避免 200MB 级数据库文件在服务器上一次性读入内存导致合并失败。
-- 手动策略复盘和策略进化默认使用独立 Python 子进程运行，避免重计算长期占用 API 进程。
-- 可以用 `python scripts/package_strategy_runtime_export.py` 生成只包含 `strategy_runtime_*` 的小包，把本地复盘结果合并到服务器，避免上传完整新闻/行情包。
 - 部署脚本会验证版本、接口模块和数据库表结构。
 
 重要安全要求：
@@ -61,27 +58,17 @@
   bash -n scripts/update_server.sh
 - 最后告诉我改了什么、为什么这么改、怎么部署、怎么验证。
 
-本轮目标：开始 P2 用户跟随账户落库：新增 user_follow_accounts、user_follow_trades 和跟随周期记录，让用户账户成为独立实体。
+本轮目标：实现用户跟随周期记录和后台账户诊断第一版：记录用户资金/策略切换周期，并在后台用户管理页展示当前跟随账户快照、持仓和最近成交来源。
 ```
 
 ## 可替换的本轮目标
 
-如果你想分阶段做，可以把提示词最后一行换成下面任意一个：
-
 ```text
-本轮目标：只做 P1 的数据库表和 repository，不改前台页面；新增 strategy_daily_signals、strategy_runtime_positions、strategy_runtime_trades，并补迁移、表结构验证和单元测试。
+本轮目标：把推荐和日计划生成改为后台定时预计算，前台只读 frontend_payload_cache，必要时提供 force 刷新。
 ```
 
 ```text
-本轮目标：让后台策略复盘任务把每个策略的每日信号、成交、持仓写入 SQLite，并在后台显示策略运行矩阵。
-```
-
-```text
-本轮目标：让前台用户账户优先从策略运行结果派生，只有缺失时才回放，并显示跟随开始日、策略来源、缓存/快照命中状态。
-```
-
-```text
-本轮目标：优化服务器性能，定位登录后慢接口和内存高的原因；只做可测量的轻量化、缓存或后台任务化改动。
+本轮目标：增加后台“策略运行矩阵”，展示每个策略最近运行日期、信号数、成交数、收益、回撤和运行数据是否缺失。
 ```
 
 ```text

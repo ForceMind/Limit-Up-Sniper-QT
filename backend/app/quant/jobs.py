@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import gc
 import json
 import os
@@ -116,6 +117,9 @@ class QuantJobManager:
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
 
+    def _process_start_grace_seconds(self) -> float:
+        return max(1.0, min(_env_float("QT_JOB_PROCESS_START_GRACE_SECONDS", 8.0), 120.0))
+
     def _load_state(self) -> Dict[str, Any]:
         with self._state_lock:
             payload = read_json(self.state_file, {})
@@ -172,6 +176,7 @@ class QuantJobManager:
         return compact
 
     def status(self, light: bool = False) -> Dict[str, Any]:
+        self.reconcile_process_jobs()
         state = self._load_state()
         if light:
             state = self._compact_state(state)
@@ -205,6 +210,93 @@ class QuantJobManager:
             JOB_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with JOB_LOG_FILE.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+    def _parse_iso_ts(self, value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            return parsed
+        except Exception:
+            return None
+
+    def _pid_alive(self, pid: Any) -> bool:
+        try:
+            value = int(pid)
+        except Exception:
+            return False
+        if value <= 0:
+            return False
+        if os.name == "nt":
+            try:
+                process_query_limited_information = 0x1000
+                still_active = 259
+                handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, value)
+                if not handle:
+                    return False
+                exit_code = ctypes.c_ulong()
+                try:
+                    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return False
+                    return int(exit_code.value) == still_active
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                return True
+        try:
+            os.kill(value, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return False
+
+    def reconcile_process_jobs(self) -> Dict[str, Any]:
+        now = _now_cn()
+        grace_seconds = self._process_start_grace_seconds()
+        stale_jobs = []
+        with self._state_lock:
+            state = self._load_state()
+            jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+            for name, current in jobs.items():
+                if not isinstance(current, dict):
+                    continue
+                if current.get("status") != "running" or not current.get("process"):
+                    continue
+                pid = current.get("process_pid")
+                started_at = self._parse_iso_ts(current.get("last_started_at") or current.get("started_at"))
+                if started_at and (now - started_at).total_seconds() < grace_seconds:
+                    continue
+                if self._pid_alive(pid):
+                    continue
+                message = "独立进程已退出但没有写入完成状态，任务已标记失败"
+                current.update(
+                    {
+                        "status": "failed",
+                        "progress_message": message,
+                        "progress_pct": current.get("progress_pct") or 1,
+                        "last_error": message,
+                        "last_finished_at": _iso_now(),
+                        "updated_at": _iso_now(),
+                    }
+                )
+                stale_jobs.append({"job": name, "pid": pid, "message": message})
+            if stale_jobs:
+                self._save_state(state)
+        for item in stale_jobs:
+            self._append_log(
+                "error",
+                item["message"],
+                job=str(item["job"]),
+                stage="process_stale",
+                payload={"pid": item.get("pid")},
+            )
+        return {"status": "ok", "stale_jobs": stale_jobs, "count": len(stale_jobs)}
 
     def _process_memory_snapshot(self) -> Dict[str, Any]:
         status_path = "/proc/self/status"
@@ -477,6 +569,7 @@ class QuantJobManager:
     ) -> Dict[str, Any]:
         name = str(name or "").strip()
         payload = payload or {}
+        self.reconcile_process_jobs()
         if self.is_paused(name):
             paused_message = f"{_job_label(name)}已暂停，跳过本次运行"
             self._append_log("warning", paused_message, job=name, stage="paused", payload=payload)
@@ -537,6 +630,7 @@ class QuantJobManager:
                     "process": True,
                     "process_pid": process.pid,
                     "process_request_id": process_payload["request_id"],
+                    "process_started_at": _iso_now(),
                     "progress_message": progress_message,
                     "updated_at": _iso_now(),
                 }

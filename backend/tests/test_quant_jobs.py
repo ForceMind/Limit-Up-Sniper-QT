@@ -98,6 +98,62 @@ def test_run_job_process_starts_subprocess_and_blocks_duplicate(tmp_path, monkey
     assert len(calls) == 1
 
 
+def test_reconcile_process_jobs_marks_exited_process_failed(tmp_path, monkeypatch):
+    manager = QuantJobManager()
+    manager.state_file = tmp_path / "job_state.json"
+    monkeypatch.setattr(jobs_module, "JOB_LOG_FILE", tmp_path / "runtime_logs.jsonl")
+    monkeypatch.setattr(manager, "_process_start_grace_seconds", lambda: 1)
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: False)
+    manager._save_state(
+        {
+            "jobs": {
+                "strategy_replay": {
+                    "name": "strategy_replay",
+                    "status": "running",
+                    "process": True,
+                    "process_pid": 98765,
+                    "last_started_at": "2026-05-23T10:00:00+08:00",
+                    "progress_pct": 12,
+                }
+            }
+        }
+    )
+
+    result = manager.reconcile_process_jobs()
+
+    assert result["count"] == 1
+    current = manager._load_state()["jobs"]["strategy_replay"]
+    assert current["status"] == "failed"
+    assert "独立进程已退出" in current["last_error"]
+
+
+def test_reconcile_process_jobs_keeps_alive_process_running(tmp_path, monkeypatch):
+    manager = QuantJobManager()
+    manager.state_file = tmp_path / "job_state.json"
+    monkeypatch.setattr(jobs_module, "JOB_LOG_FILE", tmp_path / "runtime_logs.jsonl")
+    monkeypatch.setattr(manager, "_process_start_grace_seconds", lambda: 1)
+    monkeypatch.setattr(manager, "_pid_alive", lambda pid: True)
+    manager._save_state(
+        {
+            "jobs": {
+                "strategy_replay": {
+                    "name": "strategy_replay",
+                    "status": "running",
+                    "process": True,
+                    "process_pid": 12345,
+                    "last_started_at": "2026-05-23T10:00:00+08:00",
+                    "progress_pct": 12,
+                }
+            }
+        }
+    )
+
+    result = manager.reconcile_process_jobs()
+
+    assert result["count"] == 0
+    assert manager._load_state()["jobs"]["strategy_replay"]["status"] == "running"
+
+
 def test_strategy_replay_window_advances_cursor_by_batch(tmp_path, monkeypatch):
     manager = QuantJobManager()
     manager.state_file = tmp_path / "job_state.json"

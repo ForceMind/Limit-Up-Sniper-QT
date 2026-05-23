@@ -417,6 +417,76 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
 
+        CREATE TABLE IF NOT EXISTS user_follow_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            username TEXT,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            follow_start_date TEXT,
+            as_of TEXT,
+            initial_cash REAL,
+            record_limit INTEGER,
+            source TEXT,
+            generated_at TEXT,
+            total_asset REAL,
+            return_pct REAL,
+            position_count INTEGER,
+            deal_count INTEGER,
+            account_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_user_model ON user_follow_snapshots(username, model_id, follow_start_date, as_of);
+        CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_generated ON user_follow_snapshots(generated_at);
+
+        CREATE TABLE IF NOT EXISTS user_follow_positions (
+            position_id TEXT PRIMARY KEY,
+            snapshot_id TEXT,
+            username TEXT,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            follow_start_date TEXT,
+            as_of TEXT,
+            code TEXT,
+            name TEXT,
+            qty REAL,
+            available_qty REAL,
+            entry_date TEXT,
+            entry_price REAL,
+            last_price REAL,
+            market_value REAL,
+            pnl_pct REAL,
+            source TEXT,
+            generated_at TEXT,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_follow_positions_user_date ON user_follow_positions(username, as_of);
+        CREATE INDEX IF NOT EXISTS idx_user_follow_positions_code_date ON user_follow_positions(code, as_of);
+
+        CREATE TABLE IF NOT EXISTS user_follow_trades (
+            trade_id TEXT PRIMARY KEY,
+            snapshot_id TEXT,
+            username TEXT,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            follow_start_date TEXT,
+            date TEXT,
+            time TEXT,
+            side TEXT,
+            code TEXT,
+            name TEXT,
+            qty REAL,
+            price REAL,
+            amount REAL,
+            pnl_pct REAL,
+            source TEXT,
+            generated_at TEXT,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_follow_trades_user_date ON user_follow_trades(username, date);
+        CREATE INDEX IF NOT EXISTS idx_user_follow_trades_code_date ON user_follow_trades(code, date);
+
         CREATE TABLE IF NOT EXISTS strategy_daily_signals (
             signal_id TEXT PRIMARY KEY,
             model_id TEXT,
