@@ -56,6 +56,7 @@ from app.quant.security import (
     admin_set_frontend_user_disabled,
     admin_update_frontend_user,
     auth_status,
+    debug_auth_status,
     ensure_admin_entry_path,
     frontend_user_profile,
     frontend_user_summary,
@@ -427,6 +428,42 @@ def api_auth_status():
     return auth_status()
 
 
+@app.get("/api/debug/status")
+def api_debug_status(request: Request):
+    payload = getattr(request.state, "auth_payload", None)
+    return {
+        "status": "ok",
+        "debug_auth": debug_auth_status(),
+        "auth": {
+            "scope": str((payload or {}).get("scope") or ""),
+            "sub": str((payload or {}).get("sub") or ""),
+            "debug": bool((payload or {}).get("debug")),
+            "write_allowed": bool((payload or {}).get("write_allowed")),
+        },
+        "version": app_version_payload(),
+    }
+
+
+@app.get("/api/debug/routes")
+def api_debug_routes():
+    paths = app.openapi().get("paths", {})
+    modules: Dict[str, Dict[str, int]] = {}
+    for path, operations in paths.items():
+        if not isinstance(operations, dict):
+            continue
+        parts = [part for part in str(path).split("/") if part]
+        module = parts[1] if len(parts) > 1 and parts[0] == "api" else "other"
+        bucket = modules.setdefault(module, {"paths": 0, "operations": 0})
+        bucket["paths"] += 1
+        bucket["operations"] += len(operations)
+    return {
+        "status": "ok",
+        "path_count": len(paths),
+        "operation_count": sum(len(value) for value in paths.values() if isinstance(value, dict)),
+        "modules": modules,
+    }
+
+
 @app.post("/api/auth/setup")
 def api_auth_setup(payload: Dict[str, Any] = Body(default_factory=dict)):
     return setup_auth(payload)
@@ -535,6 +572,15 @@ def _light_status_payload(as_of: Optional[str] = None, jobs_payload: Optional[Di
         "data_date": data_date,
         "ai_model": DEFAULT_AI_MODEL,
         "jobs": jobs,
+    }
+
+
+def _frontend_light_jobs(jobs_payload: Dict[str, Any]) -> Dict[str, Any]:
+    jobs = jobs_payload if isinstance(jobs_payload, dict) else {}
+    return {
+        "scheduler": jobs.get("scheduler", {}),
+        "running": jobs.get("running", {}),
+        "paused_jobs": jobs.get("paused_jobs", {}),
     }
 
 
@@ -1050,11 +1096,12 @@ def frontend_public_snapshot(
 ):
     news_limit = 12 if mobile or light else 80
     jobs_payload = job_manager.status()
+    light_jobs = _frontend_light_jobs(jobs_payload)
     news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     return {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=as_of, jobs_payload={"scheduler": jobs_payload.get("scheduler", {})}),
-        "jobs": {"scheduler": jobs_payload.get("scheduler", {})},
+        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=light_jobs),
+        "jobs": light_jobs,
         "news": news_payload,
         "market_sentiment": _market_sentiment(news_payload),
     }
@@ -1070,6 +1117,7 @@ def frontend_snapshot(
     news_limit = 12 if mobile or light else 80
     top_n = 12 if mobile else 30
     jobs_payload = job_manager.status()
+    visible_jobs = _frontend_light_jobs(jobs_payload) if light else jobs_payload
     news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     context = _frontend_profile_context(request, include_catalog=True)
     trading_account: Dict[str, Any] = {}
@@ -1083,8 +1131,8 @@ def frontend_snapshot(
         trading_account = _frontend_trading_account(trading_account, context)
     payload = {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=jobs_payload),
-        "jobs": jobs_payload,
+        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=visible_jobs),
+        "jobs": visible_jobs,
         "logs": job_manager.logs(limit=12),
         "frontend_profile": context["profile"],
         "followed_model": context["followed_model"],
@@ -1134,9 +1182,11 @@ def frontend_daily_plan(
     limit_days: int = Query(default=120, ge=1, le=500),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
+    effective_as_of = _frontend_account_as_of(as_of)
+    effective_start = start_date or _frontend_replay_start_date(effective_as_of)
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        payload = quant_engine.daily_plan(as_of=as_of, start_date=start_date, limit_days=limit_days)
-    return _affordable_payload(payload, context, as_of)
+        payload = quant_engine.daily_plan(as_of=effective_as_of, start_date=effective_start, limit_days=limit_days)
+    return _affordable_payload(payload, context, effective_as_of)
 
 
 @app.get("/api/admin/snapshot")

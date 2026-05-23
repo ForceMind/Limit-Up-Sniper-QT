@@ -535,6 +535,7 @@ print_admin_entry_path() {
 backend_feature_modules() {
   cat <<'EOF'
 version	version	GET:/api/version
+debug	debug	GET:/api/debug/status,GET:/api/debug/routes
 auth	auth	GET:/api/auth/status,POST:/api/auth/setup,POST:/api/auth/login,POST:/api/auth/register
 frontend	frontend	GET:/api/front/public_snapshot,GET:/api/front/snapshot,GET:/api/front/profile,POST:/api/front/profile,GET:/api/front/trading_account,GET:/api/front/recommendations,GET:/api/front/daily_plan
 admin	admin	GET:/api/admin/snapshot,POST:/api/admin/system/startup,POST:/api/admin/backup,GET:/api/admin/data/export,POST:/api/admin/data/import,GET:/api/admin/data/import/{job_id},GET:/api/admin/database/tables,GET:/api/admin/database/table/{table_name},POST:/api/admin/data/clear_sample_state,GET:/api/admin/access_logs,GET:/api/admin/frontend_users,POST:/api/admin/frontend_users,PATCH:/api/admin/frontend_users/{username},POST:/api/admin/frontend_users/{username}/password,POST:/api/admin/frontend_users/{username}/ban,POST:/api/admin/frontend_users/{username}/unban,DELETE:/api/admin/frontend_users/{username},POST:/api/admin/restart

@@ -79,6 +79,23 @@ rm -f backend/data/admin_credentials.json
 chmod 600 backend/data/config.json backend/data/auth.json backend/data/ws_token_secret.txt 2>/dev/null || true
 ```
 
+### 临时调试密钥
+
+调试密钥只用于临时远程排查，不是常驻管理员账号。生成方式：
+
+```bash
+qt debug-key
+```
+
+服务器 `.env` 只保存 `QT_DEBUG_API_KEY_SHA256`，不要保存或提交原始密钥。默认配置应保持：
+
+```bash
+QT_DEBUG_API_ENABLED=false
+QT_DEBUG_API_ALLOW_WRITE=false
+```
+
+需要调试时短期开启 `QT_DEBUG_API_ENABLED=true` 并重启服务，请求通过 `X-QT-Debug-Key` 请求头认证；调试完成后改回 `false` 并再次重启。只有确实要排查写接口时才临时设置 `QT_DEBUG_API_ALLOW_WRITE=true`，并在完成后立刻关闭。
+
 ### 备份和迁移包
 
 后台下载的数据包可能包含新闻、行情、AI 缓存、策略模型和日志。它们只能用于迁移服务器，不要提交 Git，也不要放在公开目录。

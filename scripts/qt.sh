@@ -42,6 +42,7 @@ usage() {
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
   qt auth                    账号密码管理
+  qt debug-key               生成临时调试密钥和 .env 配置
   qt data-audit [--fix-permissions] 服务器数据安全体检
   qt architecture            项目架构体检
   qt clear-sample            清理样例持仓
@@ -109,6 +110,11 @@ run_auth_tool() {
   else
     die "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe7\xae\xa1\xe7\x90\x86\xe8\xb4\xa6\xe5\x8f\xb7\xe5\xaf\x86\xe7\xa0\x81')"
   fi
+}
+
+cmd_debug_key() {
+  require_project_root
+  run_python_tool "生成临时调试密钥" "$ROOT_DIR/scripts/generate_debug_key.py" "$@"
 }
 
 run_python_tool() {
@@ -393,6 +399,7 @@ cmd_panel() {
 16) 部署环境检查
 17) 查看后台入口路径
 18) 修复 Nginx 上传和超时限制
+19) 生成临时调试密钥
 0) 退出
 
 EOF
@@ -425,6 +432,7 @@ EOF
       16) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       17) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
       18) panel_run "修复 Nginx 上传和超时限制" bash "$SCRIPT_DIR/qt.sh" nginx-upload ;;
+      19) panel_run "生成临时调试密钥" bash "$SCRIPT_DIR/qt.sh" debug-key ;;
       0|q|Q)
         echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
@@ -505,6 +513,9 @@ case "$cmd" in
     ;;
   auth|user|users|password|passwd)
     cmd_auth
+    ;;
+  debug-key|debug-token|diagnostic-key)
+    cmd_debug_key "${@:2}"
     ;;
   data-audit|audit-data|server-data-audit)
     require_project_root

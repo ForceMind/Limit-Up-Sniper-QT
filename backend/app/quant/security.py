@@ -19,6 +19,7 @@ AUTH_FILE = DATA_DIR / "auth.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 PBKDF2_ITERATIONS = 200_000
 TOKEN_TTL_SECONDS = int(safe_float(os.getenv("QT_AUTH_TOKEN_TTL_SECONDS"), 12 * 60 * 60))
+DEBUG_KEY_HEADER = "x-qt-debug-key"
 DEFAULT_FRONTEND_SIMULATED_CASH = 10_000.0
 DEFAULT_FRONTEND_PROFILE = {
     "simulated_cash": DEFAULT_FRONTEND_SIMULATED_CASH,
@@ -138,6 +139,63 @@ def verify_token(token: str, required_scope: str) -> Dict[str, Any]:
         if record.get("disabled"):
             raise HTTPException(status_code=403, detail="frontend user is disabled")
     return payload
+
+
+def _debug_env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _debug_key_hash(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def debug_auth_status() -> Dict[str, Any]:
+    raw_key = str(os.getenv("QT_DEBUG_API_KEY") or "").strip()
+    hash_key = str(os.getenv("QT_DEBUG_API_KEY_SHA256") or "").strip().lower()
+    enabled = _debug_env_bool("QT_DEBUG_API_ENABLED", False)
+    write_allowed = _debug_env_bool("QT_DEBUG_API_ALLOW_WRITE", False)
+    return {
+        "status": "ok",
+        "enabled": bool(enabled and (raw_key or hash_key)),
+        "enabled_flag": enabled,
+        "key_configured": bool(raw_key or hash_key),
+        "key_source": "env_raw" if raw_key else ("env_sha256" if hash_key else ""),
+        "write_allowed": write_allowed,
+        "header": DEBUG_KEY_HEADER,
+        "subject": os.getenv("QT_DEBUG_API_SUBJECT", "codex-debug"),
+    }
+
+
+def verify_debug_request(request: Request, required_scope: str) -> Optional[Dict[str, Any]]:
+    supplied = str(request.headers.get(DEBUG_KEY_HEADER) or "").strip()
+    if not supplied:
+        return None
+    status = debug_auth_status()
+    if not status["enabled"]:
+        raise HTTPException(status_code=403, detail="debug api is disabled")
+    raw_key = str(os.getenv("QT_DEBUG_API_KEY") or "").strip()
+    hash_key = str(os.getenv("QT_DEBUG_API_KEY_SHA256") or "").strip().lower()
+    matched = False
+    if raw_key and hmac.compare_digest(supplied, raw_key):
+        matched = True
+    if hash_key and hmac.compare_digest(_debug_key_hash(supplied), hash_key):
+        matched = True
+    if not matched:
+        raise HTTPException(status_code=401, detail="debug key is invalid")
+    method = str(request.method or "GET").upper()
+    if method not in {"GET", "HEAD", "OPTIONS"} and not status["write_allowed"]:
+        raise HTTPException(status_code=403, detail="debug api write access is disabled")
+    if required_scope not in {"admin", "frontend"}:
+        raise HTTPException(status_code=403, detail="debug api scope is not allowed")
+    return {
+        "scope": "admin",
+        "sub": str(status.get("subject") or "codex-debug"),
+        "debug": True,
+        "write_allowed": bool(status.get("write_allowed")),
+    }
 
 
 def auth_status() -> Dict[str, Any]:
@@ -520,6 +578,9 @@ def require_request_scope(request: Request, required_scope: str) -> Dict[str, An
     status = auth_status()
     if required_scope == "admin" and status["setup_required"]:
         raise HTTPException(status_code=401, detail="setup required")
+    debug_payload = verify_debug_request(request, required_scope)
+    if debug_payload:
+        return debug_payload
     authorization = request.headers.get("authorization") or request.headers.get("Authorization") or ""
     token = ""
     if authorization.lower().startswith("bearer "):
@@ -537,6 +598,8 @@ def required_scope_for_api(path: str, method: str) -> Optional[str]:
         return None
     if path == "/api/version":
         return None
+    if path.startswith("/api/debug"):
+        return "admin"
     if str(method).upper() == "GET" and (
         path == "/api/front/public_snapshot"
         or path.startswith("/api/quant/news")
@@ -679,6 +742,7 @@ def runtime_config_status() -> Dict[str, Any]:
         "security": {
             "admin_entry_path": admin_entry,
             "admin_entry_source": "config" if security_cfg.get("admin_entry_path") else "generated",
+            "debug_api": debug_auth_status(),
         },
         "deepseek": {
             "configured": bool(deepseek_key),
