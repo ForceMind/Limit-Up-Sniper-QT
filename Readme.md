@@ -105,6 +105,8 @@ cp .env.example .env
 - `SMTP_SERVER`、`SMTP_USER`、`SMTP_PASSWORD`、`EMAIL_TO`：邮件配置
 - `NEWS_FETCH_INTERVAL_SECONDS`、`AI_ANALYSIS_INTERVAL_SECONDS`、`MARKET_SYNC_INTERVAL_SECONDS`：自动任务间隔
 - `STRATEGY_REPLAY_ENABLED`、`STRATEGY_REPLAY_START_DATE`、`STRATEGY_REPLAY_INTERVAL_SECONDS`、`STRATEGY_REPLAY_MODE`：策略复盘调度，默认从 `2026-03-01` 开始，每小时跑一次分时复盘
+- `STRATEGY_EVOLUTION_ENABLED`、`STRATEGY_EVOLUTION_INTERVAL_SECONDS`、`STRATEGY_EVOLUTION_POPULATION_SIZE`：策略进化调度。为避免小服务器启动后直接占满内存，默认 `false`；确认数据和内存稳定后再设为 `true`
+- `QT_MEMORY_GUARD_ENABLED`、`QT_MEMORY_GUARD_PERCENT`、`QT_MEMORY_GUARD_AVAILABLE_MB`：重任务内存保护，默认内存使用超过 88% 或可用内存低于 1024MB 时跳过自动进化
 - `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
 - `QT_WRITE_KLINE_JSON_CACHE`：默认 `false`。日 K 新数据直接写入 SQLite；只有需要兼容旧脚本时才额外写回 `kline_day_cache/*.json`
 - `QT_SKIP_AUTO_MIGRATE`：默认 `false`。`qt install` 和 `qt update` 会自动把当前数据目录里的 JSON/CSV 合并进 SQLite；临时不想迁移时设为 `true`

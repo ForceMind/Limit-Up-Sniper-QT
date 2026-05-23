@@ -57,6 +57,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except Exception:
+        return default
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = str(os.getenv(name, "") or "").strip().lower()
     if not value:
@@ -514,6 +521,12 @@ class QuantJobManager:
             "population_size": population_size,
             "apply_best": apply_best,
         }
+        memory_guard = self._memory_guard()
+        payload["memory_guard"] = memory_guard
+        if memory_guard.get("pressure"):
+            message = "服务器内存压力过高，已跳过策略进化"
+            self._append_log("warning", message, job="strategy_evolution", stage="memory_guard", payload=payload)
+            return {"status": "skipped", "message": message, "memory_guard": memory_guard}
 
         def execute() -> Dict[str, Any]:
             fill_result = quant_engine.ensure_daily_kline_for_events(
@@ -603,6 +616,48 @@ class QuantJobManager:
 
     def _auto_backfill_max_codes(self) -> int:
         return max(1, min(_env_int("DATA_BACKFILL_MAX_CODES", 500), 2000))
+
+    def _memory_guard(self) -> Dict[str, Any]:
+        threshold_pct = max(50.0, min(_env_float("QT_MEMORY_GUARD_PERCENT", 88.0), 99.0))
+        min_available_mb = max(0.0, _env_float("QT_MEMORY_GUARD_AVAILABLE_MB", 1024.0))
+        payload: Dict[str, Any] = {
+            "enabled": _env_bool("QT_MEMORY_GUARD_ENABLED", True),
+            "threshold_pct": threshold_pct,
+            "min_available_mb": min_available_mb,
+            "pressure": False,
+        }
+        if not payload["enabled"]:
+            return payload
+        meminfo_path = "/proc/meminfo"
+        if not os.path.exists(meminfo_path):
+            payload["status"] = "unsupported"
+            return payload
+        try:
+            values: Dict[str, float] = {}
+            with open(meminfo_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        values[parts[0].rstrip(":")] = float(parts[1])
+            total_kb = values.get("MemTotal", 0.0)
+            available_kb = values.get("MemAvailable", values.get("MemFree", 0.0))
+            if total_kb <= 0:
+                payload["status"] = "unknown"
+                return payload
+            used_pct = max(0.0, min(100.0, (1 - available_kb / total_kb) * 100))
+            available_mb = available_kb / 1024
+            payload.update(
+                {
+                    "status": "ok",
+                    "used_pct": round(used_pct, 2),
+                    "available_mb": round(available_mb, 2),
+                    "pressure": used_pct >= threshold_pct or available_mb < min_available_mb,
+                }
+            )
+        except Exception as exc:
+            payload["status"] = "error"
+            payload["error"] = str(exc)
+        return payload
 
     def _is_trading_day(self, now: Optional[datetime] = None) -> bool:
         now = now or _now_cn()
@@ -698,7 +753,7 @@ class QuantJobManager:
                 ran_task = True
             elif not _env_bool("STRATEGY_REPLAY_ENABLED", True):
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
-            if _env_bool("STRATEGY_EVOLUTION_ENABLED", True) and now_ts >= next_strategy_evolution:
+            if _env_bool("STRATEGY_EVOLUTION_ENABLED", False) and now_ts >= next_strategy_evolution:
                 evolution_state = strategy_evolution.status()
                 if evolution_state.get("status") not in {"running", "paused"}:
                     asyncio.create_task(
@@ -716,7 +771,7 @@ class QuantJobManager:
                     ran_task = True
                 else:
                     next_strategy_evolution = time.time() + 300
-            elif not _env_bool("STRATEGY_EVOLUTION_ENABLED", True):
+            elif not _env_bool("STRATEGY_EVOLUTION_ENABLED", False):
                 next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
             if ran_task:
                 state = self._load_state()
@@ -750,7 +805,7 @@ class QuantJobManager:
                     "strategy_evolution_start_date": self._default_backfill_start_date(),
                     "strategy_evolution_generations": self._strategy_evolution_generations(),
                     "strategy_evolution_population_size": self._strategy_evolution_population_size(),
-                    "strategy_evolution_enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", True),
+                    "strategy_evolution_enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", False),
                 }
                 self._save_state(state)
                 self._append_log(

@@ -39,6 +39,11 @@ from app.quant.monitoring import ai_failures, ai_records_feed, ai_usage_summary,
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
 from app.quant.security import (
+    admin_create_frontend_user,
+    admin_delete_frontend_user,
+    admin_reset_frontend_user_password,
+    admin_set_frontend_user_disabled,
+    admin_update_frontend_user,
     auth_status,
     ensure_admin_entry_path,
     frontend_user_profile,
@@ -401,8 +406,8 @@ def api_auth_setup(payload: Dict[str, Any] = Body(default_factory=dict)):
 
 
 @app.post("/api/auth/login")
-def api_auth_login(payload: Dict[str, Any] = Body(default_factory=dict)):
-    return login(payload)
+def api_auth_login(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return login(payload, request)
 
 
 @app.post("/api/auth/register")
@@ -608,10 +613,7 @@ def _frontend_profile_context(request: Request, include_catalog: bool = True) ->
 
 def _frontend_full_model(model_id: str) -> Dict[str, Any]:
     model_id = str(model_id or "active").strip() or "active"
-    for model in _strategy_catalog_items(strategy_evolution.models(limit=200, include_records=True)):
-        if str(model.get("id") or "") == model_id:
-            return model
-    return {}
+    return strategy_evolution.model(model_id, include_records=True) or {}
 
 
 def _affordable_payload(payload: Dict[str, Any], context: Dict[str, Any], as_of: Optional[str]) -> Dict[str, Any]:
@@ -770,10 +772,9 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
 
 def _find_strategy_model(model_id: str) -> Dict[str, Any]:
     model_id = str(model_id or "active").strip() or "active"
-    models_payload = strategy_evolution.models(limit=200, include_records=True)
-    for model in _strategy_catalog_items(models_payload):
-        if str(model.get("id") or "") == model_id:
-            return model
+    model = strategy_evolution.model(model_id, include_records=True)
+    if model:
+        return model
     raise HTTPException(status_code=404, detail="strategy model not found")
 
 
@@ -1534,6 +1535,36 @@ def admin_access_logs(
 @app.get("/api/admin/frontend_users")
 def admin_frontend_users():
     return frontend_user_summary()
+
+
+@app.post("/api/admin/frontend_users")
+def admin_create_frontend_user_api(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return admin_create_frontend_user(payload, request)
+
+
+@app.patch("/api/admin/frontend_users/{username}")
+def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return admin_update_frontend_user(username, payload)
+
+
+@app.post("/api/admin/frontend_users/{username}/password")
+def admin_reset_frontend_user_password_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return admin_reset_frontend_user_password(username, payload)
+
+
+@app.post("/api/admin/frontend_users/{username}/ban")
+def admin_ban_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+    return admin_set_frontend_user_disabled(username, True, str((payload or {}).get("reason") or ""))
+
+
+@app.post("/api/admin/frontend_users/{username}/unban")
+def admin_unban_frontend_user_api(username: str):
+    return admin_set_frontend_user_disabled(username, False)
+
+
+@app.delete("/api/admin/frontend_users/{username}")
+def admin_delete_frontend_user_api(username: str):
+    return admin_delete_frontend_user(username)
 
 
 @app.post("/api/admin/restart")

@@ -827,20 +827,14 @@
                   <div class="text-xs mt-1" :class="authConfig.frontend_configured ? 'text-emerald-700' : 'text-red-700'">{{ authConfig.frontend_configured ? '已配置' : '未配置' }}</div>
                 </div>
               </div>
-              <div class="border border-neutral-200">
-                <div class="px-3 py-2 border-b border-neutral-100 text-xs text-neutral-500">前台注册用户</div>
-                <div class="max-h-44 overflow-auto divide-y divide-neutral-100">
-                  <div v-for="item in frontendUserItems" :key="'settings-user-' + item.username" class="px-3 py-2 text-sm flex items-center justify-between gap-3">
-                    <div>
-                      <div class="font-semibold">{{ item.username }}</div>
-                      <div class="text-xs text-neutral-500">{{ item.registered_ip || '-' }} · {{ item.last_login_at || item.created_at || '-' }}</div>
-                    </div>
-                    <div class="text-xs text-neutral-500">资金 {{ money((item.profile || {}).simulated_cash) }} · {{ (item.profile || {}).strategy_model_id || 'active' }}</div>
-                  </div>
-                  <div v-if="!frontendUserItems.length" class="px-3 py-6 text-center text-sm text-neutral-500">暂无前台注册用户</div>
+              <div class="border border-neutral-200 p-3 text-sm space-y-2">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-neutral-500">前台用户状态</span>
+                  <span class="font-semibold">{{ frontendUsers.active_count || 0 }} 正常 / {{ frontendUsers.disabled_count || 0 }} 封禁</span>
                 </div>
+                <button @click="activeTab = 'users'" class="w-full h-9 bg-neutral-900 text-white text-sm">打开用户管理</button>
               </div>
-              <div class="text-xs text-neutral-500">前台用户可自行注册；后台这里只查看用户、IP、最近登录、模拟资金和跟随策略。认证文件保存在服务器本地 `backend/data/auth.json`，不要提交到 Git。</div>
+              <div class="text-xs text-neutral-500">前台用户可自行注册；后台在“用户管理”里查看 IP、浏览器、资金、跟随策略，并可重置密码、封禁或删除账号。</div>
             </div>
 
             <div class="panel">
@@ -947,6 +941,73 @@
           </div>
         </section>
 
+        <section v-if="activeTab === 'users'" class="space-y-4">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="metric"><div class="text-xs text-neutral-500">前台账号</div><div class="mt-2 text-lg font-semibold">{{ frontendUsers.count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">正常账号</div><div class="mt-2 text-lg font-semibold text-emerald-700">{{ frontendUsers.active_count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">已封禁</div><div class="mt-2 text-lg font-semibold text-red-600">{{ frontendUsers.disabled_count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">最近登录</div><div class="mt-2 text-lg font-semibold">{{ latestFrontendLogin || '-' }}</div></div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div class="font-semibold">前台账号管理</div>
+                <div class="text-xs text-neutral-500 mt-1">查看注册信息、IP、浏览器、模拟资金和跟随策略；可重置密码、封禁、解封或删除账号。</div>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <input v-model="userFilter" placeholder="筛选用户名 / IP / 策略" class="h-9 px-3 border border-neutral-300 text-sm">
+                <button @click="fetchFrontendUsers" class="h-9 px-3 border border-neutral-300 bg-white text-sm">刷新</button>
+                <button @click="openFrontendUserDialog()" class="h-9 px-3 bg-neutral-900 text-white text-sm">新建前台账号</button>
+              </div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[620px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left">状态</th>
+                    <th class="px-3 py-2 text-left">用户名</th>
+                    <th class="px-3 py-2 text-right">模拟资金</th>
+                    <th class="px-3 py-2 text-left">跟随策略</th>
+                    <th class="px-3 py-2 text-left">注册 / 最近登录</th>
+                    <th class="px-3 py-2 text-left">IP</th>
+                    <th class="px-3 py-2 text-right">登录</th>
+                    <th class="px-3 py-2 text-left min-w-[280px]">浏览器</th>
+                    <th class="px-3 py-2 text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="item in filteredFrontendUsers" :key="'user-row-' + item.username" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">
+                      <span class="px-2 py-1 text-xs rounded-md" :class="item.disabled ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'">{{ item.disabled ? '已封禁' : '正常' }}</span>
+                    </td>
+                    <td class="px-3 py-2 font-semibold">{{ item.username }}</td>
+                    <td class="px-3 py-2 text-right">{{ money((item.profile || {}).simulated_cash) }}</td>
+                    <td class="px-3 py-2">{{ (item.profile || {}).strategy_model_id || 'active' }}</td>
+                    <td class="px-3 py-2">
+                      <div>{{ item.created_at || '-' }}</div>
+                      <div class="text-xs text-neutral-500">{{ item.last_login_at || '未登录' }}</div>
+                    </td>
+                    <td class="px-3 py-2">
+                      <div>{{ item.last_login_ip || item.registered_ip || '-' }}</div>
+                      <div class="text-xs text-neutral-500">注册 {{ item.registered_ip || '-' }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <div>{{ item.login_count || 0 }}</div>
+                      <div v-if="item.failed_login_count" class="text-xs text-red-600">失败 {{ item.failed_login_count }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-xs text-neutral-500 line-clamp-2">{{ item.last_login_user_agent || item.registered_user_agent || '-' }}</td>
+                    <td class="px-3 py-2 text-right">
+                      <button @click="openFrontendUserDialog(item)" class="h-8 px-3 border border-neutral-300 bg-white text-sm">管理</button>
+                    </td>
+                  </tr>
+                  <tr v-if="!filteredFrontendUsers.length"><td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无前台账号</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section v-if="activeTab === 'access'" class="space-y-4">
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div class="metric"><div class="text-xs text-neutral-500">访问记录</div><div class="mt-2 text-lg font-semibold">{{ accessLogs.count || 0 }}</div></div>
@@ -995,24 +1056,13 @@
             </div>
           </div>
 
-          <div class="panel">
-            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">前台注册用户</div>
-            <div class="table-wrap overflow-auto max-h-[320px]">
-              <table class="w-full text-sm">
-                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
-                  <tr><th class="px-3 py-2 text-left">用户名</th><th class="px-3 py-2 text-left">注册时间</th><th class="px-3 py-2 text-left">最近登录</th><th class="px-3 py-2 text-right">登录次数</th><th class="px-3 py-2 text-left">注册 IP</th></tr>
-                </thead>
-                <tbody class="divide-y divide-neutral-100">
-                  <tr v-for="item in frontendUserItems" :key="item.username">
-                    <td class="px-3 py-2 font-semibold">{{ item.username }}</td>
-                    <td class="px-3 py-2">{{ item.created_at || '-' }}</td>
-                    <td class="px-3 py-2">{{ item.last_login_at || '-' }}</td>
-                    <td class="px-3 py-2 text-right">{{ item.login_count || 0 }}</td>
-                    <td class="px-3 py-2">{{ item.registered_ip || '-' }}</td>
-                  </tr>
-                  <tr v-if="!frontendUserItems.length"><td colspan="5" class="px-3 py-10 text-center text-neutral-500">暂无前台注册用户</td></tr>
-                </tbody>
-              </table>
+            <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between gap-3">
+              <div>
+                <div class="font-semibold">前台用户</div>
+                <div class="text-xs text-neutral-500 mt-1">账号管理已移到独立页面，访问审计这里只保留行为记录。</div>
+              </div>
+              <button @click="activeTab = 'users'" class="h-9 px-3 bg-neutral-900 text-white text-sm">打开用户管理</button>
             </div>
           </div>
         </section>
@@ -1126,6 +1176,77 @@
       </aside>
     </div>
 
+    <div v-if="showUserDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+      <div class="w-full max-w-4xl rounded-lg bg-white shadow-2xl border border-neutral-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-neutral-200 flex items-center justify-between gap-3">
+          <div>
+            <div class="font-semibold">{{ selectedFrontendUser ? '管理前台账号' : '新建前台账号' }}</div>
+            <div class="text-xs text-neutral-500 mt-1">{{ selectedFrontendUser ? selectedFrontendUser.username : '后台创建的账号也可以在前台正常登录' }}</div>
+          </div>
+          <button @click="closeFrontendUserDialog" class="h-8 px-3 border border-neutral-300 bg-white text-sm hover:bg-neutral-50">关闭</button>
+        </div>
+        <div class="p-5 grid gap-4 lg:grid-cols-[1fr_320px]">
+          <div class="space-y-4">
+            <div class="grid gap-3 md:grid-cols-2">
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">用户名</span>
+                <input v-model="userForm.username" :disabled="Boolean(selectedFrontendUser)" class="w-full h-10 px-3 border border-neutral-300 disabled:bg-neutral-100">
+              </label>
+              <label v-if="!selectedFrontendUser" class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">初始密码</span>
+                <input v-model="userForm.password" type="password" autocomplete="new-password" class="w-full h-10 px-3 border border-neutral-300">
+              </label>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
+                <input v-model.number="userForm.simulated_cash" type="number" min="10000" step="1000" class="w-full h-10 px-3 border border-neutral-300">
+              </label>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">跟随策略</span>
+                <select v-model="userForm.strategy_model_id" class="w-full h-10 px-3 border border-neutral-300 bg-white">
+                  <option value="active">当前运行策略</option>
+                  <option v-for="model in evolutionModels" :key="'user-model-' + model.id" :value="model.id">{{ model.name || model.id }}</option>
+                </select>
+              </label>
+            </div>
+
+            <div v-if="selectedFrontendUser" class="border border-neutral-200">
+              <div class="px-3 py-2 border-b border-neutral-100 text-xs text-neutral-500">账号信息</div>
+              <div class="p-3 grid gap-3 md:grid-cols-2 text-sm">
+                <div><div class="text-xs text-neutral-500">状态</div><div class="font-semibold mt-1" :class="selectedFrontendUser.disabled ? 'text-red-700' : 'text-emerald-700'">{{ selectedFrontendUser.disabled ? '已封禁' : '正常' }}</div></div>
+                <div><div class="text-xs text-neutral-500">登录次数</div><div class="font-semibold mt-1">{{ selectedFrontendUser.login_count || 0 }} 次</div></div>
+                <div><div class="text-xs text-neutral-500">注册时间</div><div class="font-semibold mt-1">{{ selectedFrontendUser.created_at || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">最近登录</div><div class="font-semibold mt-1">{{ selectedFrontendUser.last_login_at || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">注册 IP</div><div class="font-semibold mt-1">{{ selectedFrontendUser.registered_ip || '-' }}</div></div>
+                <div><div class="text-xs text-neutral-500">最近登录 IP</div><div class="font-semibold mt-1">{{ selectedFrontendUser.last_login_ip || '-' }}</div></div>
+                <div class="md:col-span-2"><div class="text-xs text-neutral-500">最近浏览器</div><div class="mt-1 break-all">{{ selectedFrontendUser.last_login_user_agent || selectedFrontendUser.registered_user_agent || '-' }}</div></div>
+                <div v-if="selectedFrontendUser.disabled" class="md:col-span-2 text-red-700"><div class="text-xs">封禁原因</div><div class="mt-1">{{ selectedFrontendUser.disabled_reason || '-' }}</div></div>
+              </div>
+            </div>
+
+            <div v-if="userMessage" class="text-sm" :class="userMessage.includes('失败') || userMessage.includes('错误') ? 'text-red-700' : 'text-emerald-700'">{{ userMessage }}</div>
+          </div>
+
+          <div class="space-y-3">
+            <button @click="saveFrontendUser" :disabled="userSaving" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ userSaving ? '保存中' : (selectedFrontendUser ? '保存资料' : '创建账号') }}</button>
+            <div v-if="selectedFrontendUser" class="border border-neutral-200 p-3 space-y-3">
+              <div class="font-semibold text-sm">安全操作</div>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">新密码</span>
+                <input v-model="passwordForm.password" type="password" autocomplete="new-password" class="w-full h-9 px-2 border border-neutral-300">
+              </label>
+              <button @click="resetFrontendUserPassword" :disabled="userSaving" class="w-full h-9 border border-neutral-300 bg-white text-sm">重置密码</button>
+              <label v-if="!selectedFrontendUser.disabled" class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">封禁原因</span>
+                <input v-model="banForm.reason" placeholder="例如异常访问、测试账号停用" class="w-full h-9 px-2 border border-neutral-300">
+              </label>
+              <button @click="toggleFrontendUserBan" :disabled="userSaving" class="w-full h-9 text-sm" :class="selectedFrontendUser.disabled ? 'border border-neutral-300 bg-white' : 'bg-red-600 text-white'">{{ selectedFrontendUser.disabled ? '解除封禁' : '封禁账号' }}</button>
+              <button @click="deleteFrontendUser" :disabled="userSaving" class="w-full h-9 border border-red-300 text-red-700 bg-white text-sm">删除账号</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="showImportDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
       <div class="w-full max-w-2xl rounded-lg bg-white shadow-2xl border border-neutral-200 overflow-hidden">
         <div class="px-5 py-4 border-b border-neutral-200 flex items-center justify-between gap-3">
@@ -1196,6 +1317,7 @@
             { key: 'analysis', label: '回测复盘' },
             { key: 'data', label: '数据与AI' },
             { key: 'strategy', label: '策略库' },
+            { key: 'users', label: '用户管理' },
             { key: 'settings', label: '配置与安全' },
             { key: 'access', label: '访问审计' },
             { key: 'ops', label: '运维' },
@@ -1278,6 +1400,14 @@
           strategyModels: {},
           accessLogs: {},
           frontendUsers: {},
+          userFilter: '',
+          showUserDialog: false,
+          selectedFrontendUser: null,
+          userSaving: false,
+          userMessage: '',
+          userForm: { username: '', password: '', simulated_cash: 10000, strategy_model_id: 'active' },
+          passwordForm: { password: '' },
+          banForm: { reason: '' },
           fitResult: {},
           syncResult: {},
           dataManageResult: {},
@@ -1395,6 +1525,26 @@
         fitCandidates() { return this.fitResult.candidates || []; },
         accessLogItems() { return this.accessLogs.items || []; },
         frontendUserItems() { return this.frontendUsers.items || []; },
+        filteredFrontendUsers() {
+          const term = String(this.userFilter || '').trim().toLowerCase();
+          const items = this.frontendUserItems || [];
+          if (!term) return items;
+          return items.filter(item => {
+            const profile = item.profile || {};
+            return [
+              item.username,
+              item.registered_ip,
+              item.last_login_ip,
+              item.registered_user_agent,
+              item.last_login_user_agent,
+              profile.strategy_model_id,
+            ].some(value => String(value || '').toLowerCase().includes(term));
+          });
+        },
+        latestFrontendLogin() {
+          const item = (this.frontendUserItems || []).find(row => row.last_login_at);
+          return item ? this.shortTime(item.last_login_at) : '';
+        },
         evolutionModels() {
           const direct = this.evolutionStatus.models || [];
           return direct.length ? direct : (this.strategyModels.items || []);
@@ -1425,6 +1575,9 @@
           }
           if (value === 'access') {
             this.fetchAccessLogs();
+          }
+          if (value === 'users') {
+            this.fetchFrontendUsers();
           }
         },
       },
@@ -1739,8 +1892,123 @@
         async fetchFrontendUsers() {
           try {
             this.frontendUsers = await this.api('/api/admin/frontend_users');
+            if (this.selectedFrontendUser) {
+              const current = this.frontendUserItems.find(item => item.username === this.selectedFrontendUser.username);
+              if (current) this.openFrontendUserDialog(current, true);
+            }
           } catch (err) {
             this.clientError = String(err.message || err);
+          }
+        },
+        openFrontendUserDialog(user = null, silent = false) {
+          this.selectedFrontendUser = user ? { ...user, profile: { ...(user.profile || {}) } } : null;
+          const profile = (user || {}).profile || {};
+          this.userForm = {
+            username: user ? user.username : '',
+            password: '',
+            simulated_cash: Number(profile.simulated_cash || 10000),
+            strategy_model_id: String(profile.strategy_model_id || 'active'),
+          };
+          this.passwordForm = { password: '' };
+          this.banForm = { reason: '' };
+          if (!silent) this.userMessage = '';
+          this.showUserDialog = true;
+        },
+        closeFrontendUserDialog() {
+          this.showUserDialog = false;
+          this.selectedFrontendUser = null;
+          this.userMessage = '';
+        },
+        async saveFrontendUser() {
+          this.userSaving = true;
+          this.userMessage = '';
+          try {
+            const body = {
+              username: this.userForm.username,
+              password: this.userForm.password,
+              profile: {
+                simulated_cash: Number(this.userForm.simulated_cash || 10000),
+                strategy_model_id: this.userForm.strategy_model_id || 'active',
+              },
+            };
+            if (this.selectedFrontendUser) {
+              const username = encodeURIComponent(this.selectedFrontendUser.username);
+              await this.api(`/api/admin/frontend_users/${username}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body.profile),
+              });
+              this.userMessage = '资料已保存';
+            } else {
+              await this.api('/api/admin/frontend_users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+              });
+              this.userMessage = '账号已创建';
+            }
+            await this.fetchFrontendUsers();
+          } catch (err) {
+            this.userMessage = `操作失败：${String(err.message || err)}`;
+          } finally {
+            this.userSaving = false;
+          }
+        },
+        async resetFrontendUserPassword() {
+          if (!this.selectedFrontendUser) return;
+          this.userSaving = true;
+          this.userMessage = '';
+          try {
+            const username = encodeURIComponent(this.selectedFrontendUser.username);
+            await this.api(`/api/admin/frontend_users/${username}/password`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: this.passwordForm.password }),
+            });
+            this.passwordForm.password = '';
+            this.userMessage = '密码已重置';
+            await this.fetchFrontendUsers();
+          } catch (err) {
+            this.userMessage = `重置失败：${String(err.message || err)}`;
+          } finally {
+            this.userSaving = false;
+          }
+        },
+        async toggleFrontendUserBan() {
+          if (!this.selectedFrontendUser) return;
+          this.userSaving = true;
+          this.userMessage = '';
+          try {
+            const username = encodeURIComponent(this.selectedFrontendUser.username);
+            const disabled = Boolean(this.selectedFrontendUser.disabled);
+            await this.api(`/api/admin/frontend_users/${username}/${disabled ? 'unban' : 'ban'}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reason: this.banForm.reason }),
+            });
+            this.userMessage = disabled ? '账号已解封' : '账号已封禁';
+            await this.fetchFrontendUsers();
+          } catch (err) {
+            this.userMessage = `操作失败：${String(err.message || err)}`;
+          } finally {
+            this.userSaving = false;
+          }
+        },
+        async deleteFrontendUser() {
+          if (!this.selectedFrontendUser) return;
+          if (!window.confirm(`确定删除前台账号 ${this.selectedFrontendUser.username}？此操作不会删除历史访问日志。`)) return;
+          this.userSaving = true;
+          this.userMessage = '';
+          try {
+            const username = encodeURIComponent(this.selectedFrontendUser.username);
+            await this.api(`/api/admin/frontend_users/${username}`, { method: 'DELETE' });
+            this.userMessage = '账号已删除';
+            await this.fetchFrontendUsers();
+            this.closeFrontendUserDialog();
+          } catch (err) {
+            this.userMessage = `删除失败：${String(err.message || err)}`;
+          } finally {
+            this.userSaving = false;
           }
         },
         async loadDailyPlan(quiet = false) {

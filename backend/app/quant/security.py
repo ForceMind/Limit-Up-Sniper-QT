@@ -131,6 +131,12 @@ def verify_token(token: str, required_scope: str) -> Dict[str, Any]:
     scope = str(payload.get("scope") or "")
     if not _scope_satisfies(scope, required_scope):
         raise HTTPException(status_code=403, detail="insufficient permission")
+    if scope == "frontend":
+        record = _frontend_user_record(auth, str(payload.get("sub") or ""))
+        if not record:
+            raise HTTPException(status_code=401, detail="frontend user not found")
+        if record.get("disabled"):
+            raise HTTPException(status_code=403, detail="frontend user is disabled")
     return payload
 
 
@@ -248,6 +254,43 @@ def _frontend_user_record(auth: Dict[str, Any], username: str) -> Optional[Dict[
     return None
 
 
+def _ensure_frontend_users(auth: Dict[str, Any]) -> Dict[str, Any]:
+    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
+    auth["users"] = users
+    frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
+    users["frontend_users"] = frontend_users
+    legacy = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
+    legacy_username = str(legacy.get("username") or "").strip()
+    if legacy_username and legacy_username not in frontend_users:
+        frontend_users[legacy_username] = dict(legacy)
+        frontend_users[legacy_username]["username"] = legacy_username
+    return frontend_users
+
+
+def _public_frontend_user(username: str, record: Dict[str, Any], source: str = "frontend_users") -> Dict[str, Any]:
+    profile = _normalize_frontend_profile(record.get("profile") if isinstance(record.get("profile"), dict) else None)
+    return {
+        "username": str(record.get("username") or username),
+        "created_at": str(record.get("created_at") or ""),
+        "last_login_at": str(record.get("last_login_at") or ""),
+        "login_count": int(safe_float(record.get("login_count"), 0)),
+        "failed_login_count": int(safe_float(record.get("failed_login_count"), 0)),
+        "last_failed_login_at": str(record.get("last_failed_login_at") or ""),
+        "registered_ip": str(record.get("registered_ip") or ""),
+        "registered_user_agent": str(record.get("registered_user_agent") or ""),
+        "last_login_ip": str(record.get("last_login_ip") or ""),
+        "last_login_user_agent": str(record.get("last_login_user_agent") or ""),
+        "profile": profile,
+        "profile_updated_at": str(record.get("profile_updated_at") or ""),
+        "disabled": bool(record.get("disabled")),
+        "disabled_at": str(record.get("disabled_at") or ""),
+        "disabled_reason": str(record.get("disabled_reason") or ""),
+        "password_updated_at": str(record.get("password_updated_at") or ""),
+        "has_password": bool(record.get("password")),
+        "source": source,
+    }
+
+
 def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[str, Any]:
     username = _clean_username(payload.get("username"))
     password = _clean_password(payload.get("password"))
@@ -259,9 +302,7 @@ def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] =
     auth.setdefault("version", 2)
     auth.setdefault("created_at", _now_iso())
     auth.setdefault("token_secret", secrets.token_urlsafe(32))
-    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
-    auth["users"] = users
-    frontend_users = users.setdefault("frontend_users", {})
+    frontend_users = _ensure_frontend_users(auth)
     if _frontend_user_record(auth, username):
         raise HTTPException(status_code=409, detail="username already exists")
     frontend_users[username] = {
@@ -272,6 +313,8 @@ def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] =
         "login_count": 1,
         "registered_ip": _request_ip(request) if request else "",
         "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
+        "last_login_ip": _request_ip(request) if request else "",
+        "last_login_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
         "profile": _normalize_frontend_profile(payload.get("profile") if isinstance(payload.get("profile"), dict) else None),
     }
     auth["updated_at"] = _now_iso()
@@ -287,38 +330,117 @@ def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] =
 
 def frontend_user_summary() -> Dict[str, Any]:
     auth = _load_auth()
-    users = auth.get("users") if isinstance(auth.get("users"), dict) else {}
-    frontend_users = users.get("frontend_users") if isinstance(users.get("frontend_users"), dict) else {}
+    frontend_users = _ensure_frontend_users(auth)
     items = []
     for username, record in frontend_users.items():
         if not isinstance(record, dict):
             continue
-        items.append(
-            {
-                "username": str(record.get("username") or username),
-                "created_at": str(record.get("created_at") or ""),
-                "last_login_at": str(record.get("last_login_at") or ""),
-                "login_count": int(safe_float(record.get("login_count"), 0)),
-                "registered_ip": str(record.get("registered_ip") or ""),
-                "registered_user_agent": str(record.get("registered_user_agent") or ""),
-                "profile": _normalize_frontend_profile(record.get("profile") if isinstance(record.get("profile"), dict) else None),
-            }
-        )
-    legacy = users.get("frontend") if isinstance(users.get("frontend"), dict) else {}
-    if legacy.get("username"):
-        items.append(
-            {
-                "username": str(legacy.get("username") or ""),
-                "created_at": str(legacy.get("created_at") or ""),
-                "last_login_at": str(legacy.get("last_login_at") or ""),
-                "login_count": int(safe_float(legacy.get("login_count"), 0)),
-                "registered_ip": "",
-                "registered_user_agent": "",
-                "profile": _normalize_frontend_profile(legacy.get("profile") if isinstance(legacy.get("profile"), dict) else None),
-            }
-        )
+        items.append(_public_frontend_user(username, record))
     items.sort(key=lambda item: item.get("last_login_at") or item.get("created_at") or "", reverse=True)
-    return {"status": "ok", "items": items, "count": len(items)}
+    disabled_count = sum(1 for item in items if item.get("disabled"))
+    return {
+        "status": "ok",
+        "items": items,
+        "count": len(items),
+        "active_count": len(items) - disabled_count,
+        "disabled_count": disabled_count,
+    }
+
+
+def admin_create_frontend_user(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[str, Any]:
+    username = _clean_username(payload.get("username"))
+    password = _clean_password(payload.get("password"))
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="username must be at least 3 characters")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="password must be at least 6 characters")
+    auth = _load_auth()
+    auth.setdefault("version", 2)
+    auth.setdefault("created_at", _now_iso())
+    auth.setdefault("token_secret", secrets.token_urlsafe(32))
+    frontend_users = _ensure_frontend_users(auth)
+    if _frontend_user_record(auth, username):
+        raise HTTPException(status_code=409, detail="username already exists")
+    frontend_users[username] = {
+        "username": username,
+        "password": _hash_password(password),
+        "created_at": _now_iso(),
+        "created_by": "admin",
+        "last_login_at": "",
+        "login_count": 0,
+        "registered_ip": _request_ip(request) if request else "",
+        "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
+        "profile": _normalize_frontend_profile(payload.get("profile") if isinstance(payload.get("profile"), dict) else payload),
+    }
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "user": _public_frontend_user(username, frontend_users[username])}
+
+
+def admin_update_frontend_user(username: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    username = _clean_username(username)
+    auth = _load_auth()
+    frontend_users = _ensure_frontend_users(auth)
+    record = _frontend_user_record(auth, username)
+    if not record:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    updates = payload if isinstance(payload, dict) else {}
+    current = record.get("profile") if isinstance(record.get("profile"), dict) else {}
+    profile_payload = updates.get("profile") if isinstance(updates.get("profile"), dict) else updates
+    record["profile"] = _normalize_frontend_profile({**current, **profile_payload})
+    record["profile_updated_at"] = _now_iso()
+    if username not in frontend_users:
+        frontend_users[username] = record
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "user": _public_frontend_user(username, record)}
+
+
+def admin_reset_frontend_user_password(username: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    username = _clean_username(username)
+    password = _clean_password((payload or {}).get("password"))
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="password must be at least 6 characters")
+    auth = _load_auth()
+    record = _frontend_user_record(auth, username)
+    if not record:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    record["password"] = _hash_password(password)
+    record["password_updated_at"] = _now_iso()
+    record["failed_login_count"] = 0
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "user": _public_frontend_user(username, record)}
+
+
+def admin_set_frontend_user_disabled(username: str, disabled: bool, reason: str = "") -> Dict[str, Any]:
+    username = _clean_username(username)
+    auth = _load_auth()
+    record = _frontend_user_record(auth, username)
+    if not record:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    record["disabled"] = bool(disabled)
+    if disabled:
+        record["disabled_at"] = _now_iso()
+        record["disabled_reason"] = str(reason or "后台封禁").strip()[:200]
+    else:
+        record["disabled_at"] = ""
+        record["disabled_reason"] = ""
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "user": _public_frontend_user(username, record)}
+
+
+def admin_delete_frontend_user(username: str) -> Dict[str, Any]:
+    username = _clean_username(username)
+    auth = _load_auth()
+    frontend_users = _ensure_frontend_users(auth)
+    if username not in frontend_users:
+        raise HTTPException(status_code=404, detail="frontend user not found")
+    frontend_users.pop(username, None)
+    auth["updated_at"] = _now_iso()
+    _save_auth(auth)
+    return {"status": "ok", "deleted": username}
 
 
 def frontend_user_profile(username: str) -> Dict[str, Any]:
@@ -351,7 +473,7 @@ def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict
     return {"status": "ok", "username": username, "profile": profile}
 
 
-def login(payload: Dict[str, Any]) -> Dict[str, Any]:
+def login(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[str, Any]:
     scope = str(payload.get("scope") or "frontend").strip().lower()
     if scope not in {"admin", "frontend"}:
         raise HTTPException(status_code=400, detail="invalid login scope")
@@ -367,9 +489,22 @@ def login(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         record = _frontend_user_record(auth, username) or {}
     if username != str(record.get("username") or "") or not _verify_password(password, record.get("password") or {}):
+        if scope == "frontend" and record:
+            record["failed_login_count"] = int(safe_float(record.get("failed_login_count"), 0)) + 1
+            record["last_failed_login_at"] = _now_iso()
+            record["last_failed_login_ip"] = _request_ip(request)
+            auth["updated_at"] = _now_iso()
+            _save_auth(auth)
         raise HTTPException(status_code=401, detail="username or password is incorrect")
+    if scope == "frontend" and record.get("disabled"):
+        raise HTTPException(status_code=403, detail="frontend user is disabled")
     record["last_login_at"] = _now_iso()
     record["login_count"] = int(safe_float(record.get("login_count"), 0)) + 1
+    if request is not None:
+        record["last_login_ip"] = _request_ip(request)
+        record["last_login_user_agent"] = str(request.headers.get("user-agent") or "")[:500]
+    if scope == "frontend":
+        record["failed_login_count"] = 0
     auth["updated_at"] = _now_iso()
     _save_auth(auth)
     return {

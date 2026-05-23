@@ -26,7 +26,7 @@
 已修正方向：
 
 - 新增 `strategy_evolution` 调度任务。
-- 默认开启 `STRATEGY_EVOLUTION_ENABLED=true`。
+- 默认不自动开启 `STRATEGY_EVOLUTION_ENABLED`，避免小服务器刚启动就运行重型回测导致内存占满；确认数据覆盖和内存稳定后再显式开启。
 - 默认每 6 小时运行一次，可用环境变量调整。
 - 进化运行中或暂停时不会重复启动。
 
@@ -113,17 +113,20 @@
 环境变量：
 
 ```bash
-STRATEGY_EVOLUTION_ENABLED=true
+STRATEGY_EVOLUTION_ENABLED=false
 STRATEGY_EVOLUTION_INTERVAL_SECONDS=21600
 STRATEGY_EVOLUTION_GENERATIONS=1
 STRATEGY_EVOLUTION_POPULATION_SIZE=16
 STRATEGY_EVOLUTION_MODE=intraday
 STRATEGY_EVOLUTION_APPLY_BEST=false
+QT_MEMORY_GUARD_ENABLED=true
+QT_MEMORY_GUARD_PERCENT=88
+QT_MEMORY_GUARD_AVAILABLE_MB=1024
 ```
 
 验收：
 
-- 服务器启动后不需要手点按钮，也会周期产生模型。
+- 当 `STRATEGY_EVOLUTION_ENABLED=true` 时，服务器启动后不需要手点按钮，也会周期产生模型。
 - 进化任务有中文日志、进度、运行状态和下次运行时间。
 
 ### P3：数据入库与回测结果持久化
