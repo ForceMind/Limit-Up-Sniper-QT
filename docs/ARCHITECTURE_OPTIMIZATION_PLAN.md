@@ -2,6 +2,75 @@
 
 本文是当前项目从“能跑”进入“长期可复用量化系统”的执行计划。目标不是把所有逻辑堆到页面按钮里，而是形成稳定的数据层、策略层、回测层、进化层和展示层。
 
+## 0. 代码结构体检
+
+体检时间：2026-05-23。
+
+当前规模最大的文件：
+
+| 文件 | 行数 | 判断 |
+|---|---:|---|
+| `backend/app/quant/engine.py` | 4249 | 量化核心过于集中，已经混合数据读取、事件识别、因子、评分、回放、账户和策略参数 |
+| `frontend/admin/index.html` | 2889 | 后台单文件过大，用户管理、数据管理、任务日志、策略模型和配置混在一个页面 |
+| `backend/app/main.py` | 1994 | FastAPI 入口承担了 88 个路由装饰器、认证中间件、数据导入任务、WebSocket 和静态托管 |
+| `frontend/index.html` | 1641 | 前台终端把登录、概览、账户、策略、新闻和移动端状态放在一个文件里 |
+| `scripts/migrate_data_to_sqlite.py` | 1181 | 迁移脚本可用，但数据源解析、去重、入库和校验混在一起 |
+| `backend/app/quant/evolution.py` | 960 | 进化、回测结果保存、模型排序和状态文件兼容逻辑开始变重 |
+| `backend/app/quant/jobs.py` | 861 | 调度、日志、内存保护和任务执行都在一个模块里 |
+| `scripts/common.sh` | 684 | 部署公共脚本已经包含 Nginx、systemd、SQLite、接口验证和中文输出 |
+
+可以用以下命令重新生成体检报告：
+
+```bash
+python scripts/architecture_report.py
+```
+
+### 0.1 不合理的功能设计
+
+- `backend/app/main.py` 不应该继续新增业务逻辑。入口文件只应创建 FastAPI、注册中间件、注册路由和托管静态文件；认证、前台、后台、任务、数据、量化接口要拆到独立 router。
+- `backend/app/quant/engine.py` 不应该同时做数据仓库、因子计算、策略评分、回放和账户。长期看会导致一个修复影响全系统，也很难定位服务器性能问题。
+- 前后台页面不应该继续堆单文件 Vue。后台用户管理已经需要独立弹窗或页面，后续数据管理、策略模型、任务日志也应该有单独模块。
+- 自动任务不应该只靠进程内线程表达状态。系统要长期运行进化模型，任务状态、进度、最后错误和下一次运行时间必须落库。
+- 数据层不应该继续“SQLite + 散落 JSON 双主”。JSON 只能作为迁移来源和兼容缓存，长期主存储应收敛到 SQLite，未来数据量扩大后再迁 PostgreSQL。
+- 部署更新不应该每次重复做全量迁移或反复改 Nginx。日常 `qt update` 应默认做智能验证，只有首次、数据库缺失、迁移脚本变化或显式 `qt migrate` 才全量合并历史文件。
+- 前台接口不应该登录后一次性拿全量数据。首页只拿概览、当前账户、当前策略和少量新闻；成交、交割单、回测明细、模型记录按需分页加载。
+- “样例数据”过滤不应该散落在页面和多个接口里。样例识别应集中在数据层或仓库层，业务接口默认不返回样例，后台保留清理入口和诊断入口。
+
+### 0.2 目标目录拆分
+
+第一阶段只移动边界，不改变行为：
+
+```text
+backend/app/
+  main.py                  只保留 app 创建、中间件、路由注册、静态托管
+  api/
+    auth.py                登录、注册、状态、用户资料
+    front.py               前台概览、账户、推荐、日计划
+    admin.py               后台快照、用户管理、备份、导入、重启
+    jobs.py                任务状态、任务触发、日志
+    data.py                必盈、K线、龙虎榜、数据覆盖率
+    quant.py               回测、策略、模型、组合、时间线
+  services/
+    auth_service.py
+    strategy_service.py
+    account_service.py
+    data_import_service.py
+    job_service.py
+  repositories/
+    sqlite.py
+    news_repository.py
+    market_repository.py
+    strategy_repository.py
+  quant/
+    engine.py              保留兼容 facade，逐步变薄
+    factors.py
+    backtest.py
+    accounting.py
+    event_classifier.py
+```
+
+拆分顺序必须先 API router，再 service，再 repository。这样每一步都能用现有页面和接口验证，不需要一次性大改。
+
 ## 1. 当前问题判断
 
 ### 1.1 16 个策略收益没有差异的原因
@@ -185,6 +254,7 @@ QT_MEMORY_GUARD_AVAILABLE_MB=1024
 ## 5. 近期验收命令
 
 ```bash
+python scripts/architecture_report.py
 python -m compileall backend/app
 python scripts/check_data_coverage.py
 python scripts/security_scan.py

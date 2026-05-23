@@ -630,6 +630,68 @@
             <pre v-if="dataManageResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(dataManageResult) }}</pre>
           </div>
 
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
+              <div class="font-semibold">SQLite 数据库</div>
+              <button @click="fetchDatabaseOverview(true)" :disabled="databaseLoading" class="h-8 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ databaseLoading ? '刷新中' : '刷新数据库' }}</button>
+            </div>
+            <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-6 gap-3">
+              <div class="metric"><div class="text-xs text-neutral-500">数据库</div><div class="mt-2 text-sm font-semibold truncate">{{ ((database.database || {}).name) || '-' }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">大小</div><div class="mt-2 text-lg font-semibold">{{ formatBytes((database.database || {}).size_bytes) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">表数量</div><div class="mt-2 text-lg font-semibold">{{ database.table_count || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">总行数</div><div class="mt-2 text-lg font-semibold">{{ qty(database.total_rows) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">进化状态文件</div><div class="mt-2 text-lg font-semibold">{{ databaseStateFiles.length }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">更新时间</div><div class="mt-2 text-sm font-semibold">{{ shortTime((database.database || {}).modified_at) }}</div></div>
+            </div>
+            <div class="px-4 pb-4 grid gap-3 lg:grid-cols-[minmax(220px,320px)_100px_auto] text-sm">
+              <label>
+                <span class="block text-xs text-neutral-500 mb-1">数据表</span>
+                <select v-model="databaseForm.table" @change="fetchDatabaseTable(true)" class="w-full h-9 px-2 border border-neutral-300 bg-white">
+                  <option value="">选择数据表</option>
+                  <option v-for="table in databaseTables" :key="table.name" :value="table.name">{{ table.name }}（{{ qty(table.row_count) }}）</option>
+                </select>
+              </label>
+              <label>
+                <span class="block text-xs text-neutral-500 mb-1">每页</span>
+                <select v-model.number="databaseForm.limit" @change="fetchDatabaseTable(true)" class="w-full h-9 px-2 border border-neutral-300 bg-white">
+                  <option :value="30">30</option>
+                  <option :value="50">50</option>
+                  <option :value="100">100</option>
+                  <option :value="200">200</option>
+                </select>
+              </label>
+              <div class="flex flex-wrap items-end gap-2">
+                <button @click="databasePrevPage" :disabled="databaseRowsLoading || databaseForm.offset <= 0" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">上一页</button>
+                <button @click="databaseNextPage" :disabled="databaseRowsLoading || databaseForm.offset + databaseForm.limit >= (databaseTable.row_count || 0)" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">下一页</button>
+                <button @click="fetchDatabaseTable(false)" :disabled="databaseRowsLoading || !databaseForm.table" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ databaseRowsLoading ? '加载中' : '加载表数据' }}</button>
+                <span class="text-xs text-neutral-500 pb-2">第 {{ databaseForm.offset + 1 }} - {{ Math.min(databaseForm.offset + databaseForm.limit, databaseTable.row_count || 0) }} 行 / 共 {{ qty(databaseTable.row_count) }} 行</span>
+              </div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[460px] border-t border-neutral-200">
+              <table class="w-full text-xs">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-neutral-500">
+                  <tr><th v-for="column in databaseColumns" :key="column" class="px-3 py-2 text-left whitespace-nowrap">{{ column }}</th></tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="(row, rowIndex) in databaseRows" :key="`${databaseForm.table}-${databaseForm.offset}-${rowIndex}`" class="hover:bg-neutral-50">
+                    <td v-for="column in databaseColumns" :key="column" class="px-3 py-2 align-top">
+                      <span class="block max-w-[260px] truncate" :title="compactCell(row[column], 1000)">{{ compactCell(row[column]) }}</span>
+                    </td>
+                  </tr>
+                  <tr v-if="!databaseRows.length"><td :colspan="Math.max(databaseColumns.length, 1)" class="px-3 py-10 text-center text-neutral-500">暂无数据库行，或尚未选择数据表</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="databaseStateFiles.length" class="px-4 py-3 border-t border-neutral-200 text-xs text-neutral-500">
+              <div class="font-semibold text-neutral-700 mb-2">进化状态 JSON</div>
+              <div class="flex flex-wrap gap-2">
+                <span v-for="file in databaseStateFiles" :key="file.name" class="px-2 py-1 border border-neutral-200 bg-neutral-50 rounded">
+                  {{ file.role === 'current' ? '当前' : '归档' }}：{{ file.name }} / {{ formatBytes(file.size_bytes) }}
+                </span>
+              </div>
+            </div>
+          </div>
+
           <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
             <div class="panel">
               <div class="px-4 py-3 border-b border-neutral-200 font-semibold">数据覆盖</div>
@@ -1392,6 +1454,11 @@
           biyingStatus: {},
           lhbStatus: {},
           coverage: {},
+          database: {},
+          databaseTable: {},
+          databaseLoading: false,
+          databaseRowsLoading: false,
+          databaseForm: { table: '', limit: 50, offset: 0 },
           aiUsage: {},
           aiFailures: {},
           aiRecords: {},
@@ -1522,6 +1589,10 @@
         coverageTargets() { return this.coverage.targets || []; },
         aiFailureItems() { return this.aiFailures.items || []; },
         aiRecordItems() { return this.aiRecords.items || []; },
+        databaseTables() { return this.database.tables || []; },
+        databaseColumns() { return (this.databaseTable.columns || []).map(item => item.name || item); },
+        databaseRows() { return this.databaseTable.rows || []; },
+        databaseStateFiles() { return this.database.state_files || []; },
         fitCandidates() { return this.fitResult.candidates || []; },
         accessLogItems() { return this.accessLogs.items || []; },
         frontendUserItems() { return this.frontendUsers.items || []; },
@@ -1569,6 +1640,9 @@
             if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
             if (!this.activeTimeline.start_date) this.loadTimeline(false);
             if (!this.backtestResult.status) this.loadBacktest(false);
+          }
+          if (value === 'data' && !this.databaseTables.length) {
+            this.fetchDatabaseOverview(false);
           }
           if (value === 'settings' && !Object.keys(this.configForm || {}).length) {
             this.loadRuntimeConfig(false);
@@ -1899,6 +1973,52 @@
           } catch (err) {
             this.clientError = String(err.message || err);
           }
+        },
+        async fetchDatabaseOverview(loadRows = false) {
+          this.databaseLoading = true;
+          try {
+            this.database = await this.api('/api/admin/database/tables');
+            const tables = this.databaseTables;
+            if (!this.databaseForm.table && tables.length) {
+              const preferred = tables.find(item => item.name === 'strategy_models')
+                || tables.find(item => item.name === 'strategy_runs')
+                || tables[0];
+              this.databaseForm.table = preferred.name;
+              loadRows = true;
+            }
+            if (loadRows && this.databaseForm.table) await this.fetchDatabaseTable(false);
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.databaseLoading = false;
+          }
+        },
+        async fetchDatabaseTable(resetOffset = false) {
+          if (!this.databaseForm.table) return;
+          if (resetOffset) this.databaseForm.offset = 0;
+          this.databaseRowsLoading = true;
+          try {
+            const q = new URLSearchParams({
+              limit: String(this.databaseForm.limit || 50),
+              offset: String(this.databaseForm.offset || 0),
+            });
+            const table = encodeURIComponent(this.databaseForm.table);
+            this.databaseTable = await this.api(`/api/admin/database/table/${table}?${q.toString()}`);
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.databaseRowsLoading = false;
+          }
+        },
+        databasePrevPage() {
+          this.databaseForm.offset = Math.max(0, Number(this.databaseForm.offset || 0) - Number(this.databaseForm.limit || 50));
+          this.fetchDatabaseTable(false);
+        },
+        databaseNextPage() {
+          const next = Number(this.databaseForm.offset || 0) + Number(this.databaseForm.limit || 50);
+          if (next >= Number(this.databaseTable.row_count || 0)) return;
+          this.databaseForm.offset = next;
+          this.fetchDatabaseTable(false);
         },
         openFrontendUserDialog(user = null, silent = false) {
           this.selectedFrontendUser = user ? { ...user, profile: { ...(user.profile || {}) } } : null;
@@ -2747,6 +2867,20 @@
           } catch (err) {
             return String(value || '');
           }
+        },
+        compactCell(value, maxLength = 160) {
+          if (value === null || value === undefined || value === '') return '-';
+          let text = '';
+          if (typeof value === 'object') {
+            try {
+              text = JSON.stringify(value);
+            } catch (err) {
+              text = String(value);
+            }
+          } else {
+            text = String(value);
+          }
+          return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
         },
       },
     }).mount('#app');

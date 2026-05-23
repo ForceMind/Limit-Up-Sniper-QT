@@ -886,7 +886,50 @@ def upsert_quant_state(conn: sqlite3.Connection, source_dir: Path) -> dict[str, 
 
 
 def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dict[str, int]:
-    state = read_json(source_dir / "strategy_evolution_state.json", {})
+    state_files = [source_dir / "strategy_evolution_state.json"]
+    state_files.extend(sorted(source_dir.glob("strategy_evolution_state.archived-*.json")))
+    states = []
+    for path in state_files:
+        payload = read_json(path, {})
+        if isinstance(payload, dict) and payload:
+            states.append((path.name, payload))
+    if not states:
+        return {
+            "strategy_runs": 0,
+            "strategy_model_metrics": 0,
+            "strategy_models": 0,
+            "strategy_model_records": 0,
+        }
+
+    state = dict(states[0][1])
+    models_by_id: dict[str, dict] = {}
+    history_rows = []
+    for source_name, payload in states:
+        for key in ("best_model", "best", "started_at", "finished_at", "updated_at", "start_date", "end_date", "mode"):
+            if not state.get(key) and payload.get(key):
+                state[key] = payload.get(key)
+        if isinstance(payload.get("history"), list):
+            history_rows.extend(item for item in payload["history"] if isinstance(item, dict))
+        for idx, model in enumerate(payload.get("models") if isinstance(payload.get("models"), list) else []):
+            if not isinstance(model, dict):
+                continue
+            model_id = text(model.get("id")) or digest("strategy_model", source_name, idx, model)[:24]
+            model = dict(model)
+            model["id"] = model_id
+            existing = models_by_id.get(model_id)
+            if not existing:
+                models_by_id[model_id] = model
+                continue
+            for record_key in ("trade_records", "delivery_records", "daily_settlements"):
+                if not existing.get(record_key) and isinstance(model.get(record_key), list):
+                    existing[record_key] = model[record_key]
+            for key, value in model.items():
+                if existing.get(key) in (None, "", [], {}):
+                    existing[key] = value
+    if history_rows:
+        state["history"] = history_rows
+    if models_by_id:
+        state["models"] = list(models_by_id.values())
     if not isinstance(state, dict) or not state:
         return {
             "strategy_runs": 0,

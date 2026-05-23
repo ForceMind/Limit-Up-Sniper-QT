@@ -132,6 +132,15 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 该数据库属于本地运行数据，不提交 Git。当前迁移范围包括新闻、AI 分析、AI 缓存、结构化事件、日线、分时、龙虎榜、市场快照、模拟账户、策略进化、访问日志和任务日志。
 日 K 的长期主存储是 `backend/data/quant_data.sqlite3` 里的 `market_daily_bars` 表。`backend/data/kline_day_cache/*.json` 只作为历史兼容和迁移来源；新的日 K 同步默认不会继续写散落 JSON 文件。
+策略进化的完整模型、成交、交割单和资金流水会写入 SQLite 的 `strategy_models`、`strategy_model_records`、`strategy_runs` 等表。`strategy_evolution_state.json` 只保留轻量当前状态；如果旧状态文件过大，系统会把它归档为 `strategy_evolution_state.archived-*.json`，避免启动和后台接口反复读取大 JSON。`qt migrate` 会同时读取当前状态文件和归档状态文件，把能入库的模型记录继续合并进 SQLite。
+
+后台可以查看数据库：
+
+```text
+后台入口 -> 数据与AI -> SQLite 数据库
+```
+
+该页面只支持查看表、行数和分页数据，不执行任意 SQL。
 
 上传到服务器时不要走 GitHub。后台管理页已经提供迁移入口：
 
@@ -195,6 +204,7 @@ http://127.0.0.1:8000/docs
 提交或推送到 GitHub 前建议执行：
 
 ```bash
+python scripts/architecture_report.py
 python -m py_compile backend/app/quant/engine.py backend/app/quant/jobs.py backend/app/main.py
 python -m pytest backend/tests/test_quant_engine.py
 python scripts/security_scan.py
@@ -268,6 +278,7 @@ qt migrate
 
 - [产品需求文档](docs/PRODUCT_REQUIREMENTS.md)
 - [开发计划](docs/DEVELOPMENT_PLAN.md)
+- [架构优化与持续进化计划](docs/ARCHITECTURE_OPTIMIZATION_PLAN.md)
 - [买卖与回放逻辑](docs/QUANT_LOGIC.md)
 - [服务器部署说明](docs/SERVER_DEPLOY.md)
 - [数据存储决策](docs/DATA_STORAGE_DECISION.md)
