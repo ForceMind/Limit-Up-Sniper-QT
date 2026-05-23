@@ -1805,9 +1805,18 @@ def jobs_strategy_replay(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     mode: str = Query(default="intraday"),
+    batch_days: Optional[int] = Query(default=None, ge=1, le=366),
+    use_cursor: bool = Query(default=False),
     background: bool = Query(default=True),
 ):
-    return job_manager.run_strategy_replay(start_date=start_date, end_date=end_date, mode=mode, background=background)
+    return job_manager.run_strategy_replay(
+        start_date=start_date,
+        end_date=end_date,
+        mode=mode,
+        background=background,
+        batch_days=batch_days,
+        use_cursor=use_cursor,
+    )
 
 
 @app.post("/api/jobs/daily/run")
@@ -1873,7 +1882,13 @@ def _run_system_startup_flow(
     steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
 
     job_manager.update_progress("system_startup", 94, "策略复盘", {"step": "strategy_replay", "start_date": replay_start_date})
-    replay_result = job_manager.run_strategy_replay(start_date=replay_start_date, end_date=target_date, mode="intraday")
+    replay_result = job_manager.run_strategy_replay(
+        start_date=replay_start_date,
+        end_date=target_date,
+        mode="intraday",
+        batch_days=15,
+        use_cursor=True,
+    )
     steps.append({"name": "策略复盘", "job": "strategy_replay", "result": replay_result})
 
     failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running"}]

@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -158,6 +158,7 @@ class QuantJobManager:
             "scheduler": state.get("scheduler", {}),
             "jobs": {},
             "paused_jobs": state.get("paused_jobs", {}),
+            "strategy_replay_cursor": state.get("strategy_replay_cursor", {}),
             "updated_at": state.get("updated_at", ""),
         }
         jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
@@ -618,19 +619,36 @@ class QuantJobManager:
         end_date: Optional[str] = None,
         mode: str = "intraday",
         background: bool = False,
+        batch_days: Optional[int] = None,
+        use_cursor: bool = False,
     ) -> Dict[str, Any]:
-        start_date = str(start_date or self._default_backfill_start_date()).strip()
-        end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        requested_start_date = str(start_date or self._default_backfill_start_date()).strip()
+        requested_end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         mode = str(mode or os.getenv("STRATEGY_REPLAY_MODE") or "intraday").strip().lower()
         if mode not in {"daily", "intraday"}:
             mode = "intraday"
-        payload = {"start_date": start_date, "end_date": end_date, "mode": mode}
+        replay_start_date, replay_end_date, replay_cursor = self._strategy_replay_window(
+            requested_start_date,
+            requested_end_date,
+            mode,
+            batch_days=batch_days,
+            use_cursor=use_cursor,
+        )
+        payload = {
+            "start_date": replay_start_date,
+            "end_date": replay_end_date,
+            "requested_start_date": requested_start_date,
+            "requested_end_date": requested_end_date,
+            "mode": mode,
+            "batch_days": replay_cursor.get("batch_days"),
+            "cursor_enabled": replay_cursor.get("enabled"),
+        }
 
         def execute() -> Dict[str, Any]:
             targets = self._strategy_replay_targets()
             fill_result = quant_engine.ensure_daily_kline_for_events(
-                start_date=start_date,
-                end_date=end_date,
+                start_date=replay_start_date,
+                end_date=replay_end_date,
                 hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
                 max_codes=self._auto_backfill_max_codes(),
                 force=False,
@@ -651,8 +669,8 @@ class QuantJobManager:
                 with quant_engine.temporary_strategy_params(params):
                     if mode == "daily":
                         result = quant_engine.walk_forward(
-                            start_date=start_date,
-                            end_date=end_date,
+                            start_date=replay_start_date,
+                            end_date=replay_end_date,
                             initial_cash=params.get("account_initial_cash"),
                             max_positions=int(params.get("max_positions", 5)),
                             hold_days=int(params.get("max_hold_days", 3)),
@@ -661,8 +679,8 @@ class QuantJobManager:
                         )
                     else:
                         result = quant_engine.walk_forward_intraday(
-                            start_date=start_date,
-                            end_date=end_date,
+                            start_date=replay_start_date,
+                            end_date=replay_end_date,
                             initial_cash=params.get("account_initial_cash"),
                             max_positions=int(params.get("max_positions", 5)),
                             hold_days=int(params.get("max_hold_days", 3)),
@@ -676,8 +694,8 @@ class QuantJobManager:
                     model=model,
                     params=params,
                     timeline=result,
-                    start_date=start_date,
-                    end_date=end_date,
+                    start_date=replay_start_date,
+                    end_date=replay_end_date,
                     mode=mode,
                     source="strategy_replay",
                 )
@@ -688,8 +706,8 @@ class QuantJobManager:
                     "model_name": model.get("name"),
                     "source": model.get("source"),
                     "mode": result.get("mode") or mode,
-                    "start_date": result.get("start_date") or start_date,
-                    "end_date": result.get("end_date") or end_date,
+                    "start_date": result.get("start_date") or replay_start_date,
+                    "end_date": result.get("end_date") or replay_end_date,
                     "initial_cash": result.get("initial_cash", 0),
                     "final_value": result.get("final_value", 0),
                     "return_pct": result.get("return_pct", 0),
@@ -711,11 +729,13 @@ class QuantJobManager:
             result = first_result or {}
             days = result.get("days") if isinstance(result.get("days"), list) else []
             trades = result.get("trades") if isinstance(result.get("trades"), list) else []
-            return {
+            output = {
                 "status": "ok",
                 "mode": result.get("mode") or mode,
-                "start_date": result.get("start_date") or start_date,
-                "end_date": result.get("end_date") or end_date,
+                "start_date": result.get("start_date") or replay_start_date,
+                "end_date": result.get("end_date") or replay_end_date,
+                "requested_start_date": requested_start_date,
+                "requested_end_date": requested_end_date,
                 "initial_cash": result.get("initial_cash", 0),
                 "final_value": result.get("final_value", 0),
                 "return_pct": result.get("return_pct", 0),
@@ -730,7 +750,10 @@ class QuantJobManager:
                 "model_count": len(model_results),
                 "models": model_results,
                 "runtime_tables": aggregate,
+                "batch": replay_cursor,
             }
+            self._advance_strategy_replay_cursor(output)
+            return output
 
         if background:
             return self.run_job_background("strategy_replay", execute, payload=payload, message="策略复盘已转入后台运行")
@@ -839,8 +862,86 @@ class QuantJobManager:
     def _strategy_replay_interval_seconds(self) -> int:
         return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
 
+    def _strategy_replay_batch_days(self) -> int:
+        return max(1, min(_env_int("QT_STRATEGY_REPLAY_BATCH_DAYS", 15), 366))
+
     def _strategy_replay_max_models(self) -> int:
         return max(1, min(_env_int("QT_STRATEGY_REPLAY_MAX_MODELS", 24), 200))
+
+    def _parse_date(self, value: str) -> Optional[datetime]:
+        try:
+            return datetime.strptime(str(value or "")[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+    def _format_date(self, value: datetime) -> str:
+        return value.strftime("%Y-%m-%d")
+
+    def _strategy_replay_window(
+        self,
+        start_date: str,
+        end_date: str,
+        mode: str,
+        batch_days: Optional[int] = None,
+        use_cursor: bool = False,
+    ) -> tuple[str, str, Dict[str, Any]]:
+        batch_days = max(1, min(int(batch_days or self._strategy_replay_batch_days()), 366))
+        start_dt = self._parse_date(start_date)
+        end_dt = self._parse_date(end_date)
+        if not start_dt or not end_dt or start_dt > end_dt:
+            return start_date, end_date, {
+                "enabled": False,
+                "reason": "invalid_date_range",
+                "batch_days": batch_days,
+                "requested_start_date": start_date,
+                "requested_end_date": end_date,
+                "mode": mode,
+            }
+
+        cursor_key = f"{start_date}|{end_date}|{mode}|{self._strategy_replay_max_models()}"
+        current_dt = start_dt
+        if use_cursor:
+            state = self._load_state()
+            cursor = state.get("strategy_replay_cursor") if isinstance(state.get("strategy_replay_cursor"), dict) else {}
+            next_start = str(cursor.get("next_start_date") or "")
+            next_dt = self._parse_date(next_start)
+            if cursor.get("key") == cursor_key and next_dt and start_dt <= next_dt <= end_dt:
+                current_dt = next_dt
+        batch_end_dt = min(end_dt, current_dt + timedelta(days=batch_days - 1))
+        next_dt = batch_end_dt + timedelta(days=1)
+        next_start = self._format_date(start_dt if next_dt > end_dt else next_dt)
+        return self._format_date(current_dt), self._format_date(batch_end_dt), {
+            "enabled": bool(use_cursor),
+            "key": cursor_key,
+            "batch_days": batch_days,
+            "requested_start_date": start_date,
+            "requested_end_date": end_date,
+            "mode": mode,
+            "start_date": self._format_date(current_dt),
+            "end_date": self._format_date(batch_end_dt),
+            "next_start_date": next_start,
+            "completed_range": next_dt > end_dt,
+        }
+
+    def _advance_strategy_replay_cursor(self, result: Dict[str, Any]) -> None:
+        batch = result.get("batch") if isinstance(result.get("batch"), dict) else {}
+        if not batch.get("enabled"):
+            return
+        with self._state_lock:
+            state = self._load_state()
+            state["strategy_replay_cursor"] = {
+                "key": batch.get("key"),
+                "mode": batch.get("mode"),
+                "requested_start_date": batch.get("requested_start_date"),
+                "requested_end_date": batch.get("requested_end_date"),
+                "last_start_date": batch.get("start_date"),
+                "last_end_date": batch.get("end_date"),
+                "next_start_date": batch.get("next_start_date"),
+                "batch_days": batch.get("batch_days"),
+                "completed_range": bool(batch.get("completed_range")),
+                "updated_at": _iso_now(),
+            }
+            self._save_state(state)
 
     def _strategy_replay_targets(self) -> list[Dict[str, Any]]:
         max_models = self._strategy_replay_max_models()
@@ -1027,7 +1128,15 @@ class QuantJobManager:
                     next_trade_cycle = time.time() + 60
                 ran_task = True
             if _env_bool("STRATEGY_REPLAY_ENABLED", True) and now_ts >= next_strategy_replay:
-                await asyncio.to_thread(self.run_strategy_replay, None, None, os.getenv("STRATEGY_REPLAY_MODE", "intraday"))
+                await asyncio.to_thread(
+                    self.run_strategy_replay,
+                    None,
+                    None,
+                    os.getenv("STRATEGY_REPLAY_MODE", "intraday"),
+                    False,
+                    self._strategy_replay_batch_days(),
+                    True,
+                )
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
                 ran_task = True
             elif not _env_bool("STRATEGY_REPLAY_ENABLED", True):
@@ -1076,6 +1185,7 @@ class QuantJobManager:
                     "next_strategy_replay_at": datetime.fromtimestamp(next_strategy_replay, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
                     "strategy_replay_start_date": self._default_backfill_start_date(),
+                    "strategy_replay_batch_days": self._strategy_replay_batch_days(),
                     "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", True),
                     "next_strategy_evolution_at": datetime.fromtimestamp(next_strategy_evolution, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "strategy_evolution_interval_seconds": self._strategy_evolution_interval_seconds(),

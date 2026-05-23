@@ -60,6 +60,7 @@ STRATEGY_REPLAY_ENABLED=true
 STRATEGY_REPLAY_START_DATE=2026-03-01
 STRATEGY_REPLAY_INTERVAL_SECONDS=3600
 STRATEGY_REPLAY_MODE=intraday
+QT_STRATEGY_REPLAY_BATCH_DAYS=15
 QT_STRATEGY_REPLAY_MAX_MODELS=24
 STRATEGY_EVOLUTION_ENABLED=false
 STRATEGY_EVOLUTION_INTERVAL_SECONDS=21600
@@ -354,7 +355,7 @@ curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/a
 - AI 分析：默认每 1 小时增量调用 DeepSeek，将新闻结构化为事件、行业、个股、利好利空和影响强度
 - 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；日 K 补齐使用必盈历史行情并写入 SQLite；周末和非开盘时间不触发盘中行情同步
 - 模拟交易：按当前模型触发买入/卖出，触发后可通过 SMTP 发送邮件
-- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘一次；v0.2.24 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`、`strategy_runtime_snapshots`、`strategy_runtime_settlements`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
+- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘；v0.2.28 起自动调度按 `QT_STRATEGY_REPLAY_BATCH_DAYS` 分批推进，默认每批 15 天，并用 `strategy_replay_cursor` 记录下一批起点；v0.2.24 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`、`strategy_runtime_snapshots`、`strategy_runtime_settlements`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
 - 遗传进化：多组参数并行回放，按收益、回撤、胜率选择最优参数，后台可手动应用
 - 模型回放：前台和后台按全周期线性回放计算买入、卖出、收益和交割单
 

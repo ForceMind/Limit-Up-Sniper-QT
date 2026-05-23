@@ -52,3 +52,35 @@ def test_run_job_background_returns_before_worker_finishes(tmp_path, monkeypatch
     current = state["jobs"]["unit_job"]
     assert current["status"] == "ok"
     assert current["last_result"]["value"] == 7
+
+
+def test_strategy_replay_window_advances_cursor_by_batch(tmp_path, monkeypatch):
+    manager = QuantJobManager()
+    manager.state_file = tmp_path / "job_state.json"
+    monkeypatch.setenv("QT_STRATEGY_REPLAY_BATCH_DAYS", "15")
+
+    start, end, cursor = manager._strategy_replay_window(
+        "2026-03-01",
+        "2026-05-21",
+        "intraday",
+        batch_days=None,
+        use_cursor=True,
+    )
+
+    assert start == "2026-03-01"
+    assert end == "2026-03-15"
+    assert cursor["next_start_date"] == "2026-03-16"
+    assert cursor["completed_range"] is False
+
+    manager._advance_strategy_replay_cursor({"batch": cursor})
+    start, end, cursor = manager._strategy_replay_window(
+        "2026-03-01",
+        "2026-05-21",
+        "intraday",
+        batch_days=None,
+        use_cursor=True,
+    )
+
+    assert start == "2026-03-16"
+    assert end == "2026-03-30"
+    assert cursor["next_start_date"] == "2026-03-31"
