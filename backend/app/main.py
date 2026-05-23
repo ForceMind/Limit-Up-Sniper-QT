@@ -30,7 +30,6 @@ from app.quant.capital_strategy import (
     CAPITAL_BANDS,
     apply_capital_constraints,
     capital_presets,
-    is_capital_strategy_id,
     recommended_strategy_id,
 )
 from app.quant.data_transfer import (
@@ -464,6 +463,7 @@ def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(de
         models_payload = _frontend_strategy_models_payload(include_catalog=True)
         updates["strategy_model_id"] = recommended_strategy_id(cash, _strategy_catalog_items(models_payload))
     result = update_frontend_user_profile(username, updates)
+    _frontend_account_cache_clear()
     context = _frontend_profile_context(request, include_catalog=True)
     return {
         **result,
@@ -471,6 +471,7 @@ def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(de
         "followed_model": context["followed_model"],
         "strategy_models": context["models_payload"],
         "strategy_params": context["strategy_params"],
+        "account_cache_cleared": True,
     }
 
 
@@ -643,7 +644,6 @@ def _frontend_profile_context(request: Request, include_catalog: bool = True) ->
         not selected_id
         or selected_id == "active"
         or selected is None
-        or is_capital_strategy_id(selected_id)
     )
     if should_recommend:
         selected_id = recommended_id or DEFAULT_FRONTEND_STRATEGY_ID
@@ -786,6 +786,10 @@ def _frontend_account_cache_set(key: str, payload: Dict[str, Any]) -> Dict[str, 
     return payload
 
 
+def _frontend_account_cache_clear() -> None:
+    _FRONTEND_ACCOUNT_CACHE.clear()
+
+
 def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
     latest = str(quant_engine.latest_event_date() or "").strip()
     requested = str(as_of or "").strip()
@@ -806,7 +810,7 @@ def _frontend_replay_start_date(end_date: Optional[str]) -> Optional[str]:
         return first or None
 
 
-def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int) -> Dict[str, Any]:
+def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int, force: bool = False) -> Dict[str, Any]:
     profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
     params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
@@ -844,7 +848,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             ).encode("utf-8")
         ).hexdigest()
         cache_key = f"front-account:{fingerprint}"
-        cached = _frontend_account_cache_get(cache_key)
+        cached = None if force else _frontend_account_cache_get(cache_key)
         if cached:
             cached["strategy_account_cache"] = "hit"
             return cached
@@ -1102,9 +1106,10 @@ def frontend_trading_account(
     request: Request,
     as_of: Optional[str] = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
+    force: bool = Query(default=False),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
-    account = _frontend_strategy_account(context, as_of, limit=limit)
+    account = _frontend_strategy_account(context, as_of, limit=limit, force=force)
     return _frontend_trading_account(account, context)
 
 
@@ -1294,6 +1299,15 @@ def quant_fit_strategy(
 @app.get("/api/quant/evolution/status")
 def quant_evolution_status():
     return strategy_evolution.status()
+
+
+@app.get("/api/quant/evolution/trace")
+def quant_evolution_trace(
+    run_id: Optional[str] = Query(default=None),
+    generation: Optional[int] = Query(default=None, ge=1),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    return strategy_evolution.trace(run_id=run_id, generation=generation, limit=limit)
 
 
 @app.post("/api/quant/evolution/pause")

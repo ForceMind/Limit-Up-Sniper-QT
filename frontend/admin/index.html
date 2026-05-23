@@ -828,6 +828,79 @@
           </div>
 
           <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <div class="font-semibold">训练过程与淘汰记录</div>
+                <div class="text-xs text-neutral-500 mt-1">记录每一代评估过的候选策略、精英保留线、淘汰原因和参数指纹。</div>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <select v-model="evolutionTraceForm.run_id" class="h-8 px-2 border border-neutral-300 bg-white text-sm min-w-[220px]">
+                  <option value="">最近一次有轨迹的训练</option>
+                  <option v-for="run in evolutionTraceRuns" :key="run.run_id" :value="run.run_id">
+                    {{ shortTime(run.finished_at || run.started_at) }} · {{ run.candidate_count || 0 }} 个候选
+                  </option>
+                </select>
+                <input v-model="evolutionTraceForm.generation" type="number" min="1" placeholder="代数" class="h-8 w-24 px-2 border border-neutral-300 text-sm">
+                <select v-model.number="evolutionTraceForm.limit" class="h-8 px-2 border border-neutral-300 bg-white text-sm">
+                  <option :value="100">100条</option>
+                  <option :value="200">200条</option>
+                  <option :value="500">500条</option>
+                  <option :value="1000">1000条</option>
+                </select>
+                <button @click="loadEvolutionTrace(false)" :disabled="evolutionTraceLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolutionTraceLoading ? '读取中' : '刷新轨迹' }}</button>
+              </div>
+            </div>
+            <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-6 gap-3">
+              <div class="metric"><div class="text-xs text-neutral-500">训练批次</div><div class="mt-2 text-sm font-semibold truncate">{{ evolutionTrace.selected_run_id || '-' }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">已评估候选</div><div class="mt-2 text-lg font-semibold">{{ qty(evolutionTraceSummary.evaluated) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">保留进入下一代</div><div class="mt-2 text-lg font-semibold text-emerald-700">{{ qty(evolutionTraceSummary.selected) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">淘汰</div><div class="mt-2 text-lg font-semibold text-red-600">{{ qty(evolutionTraceSummary.eliminated) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">最新代数</div><div class="mt-2 text-lg font-semibold">{{ evolutionTraceSummary.latest_generation || 0 }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">当前返回</div><div class="mt-2 text-lg font-semibold">{{ qty(evolutionTraceSummary.returned) }}</div></div>
+            </div>
+            <div v-if="evolutionTraceMetrics.length" class="px-4 pb-3 flex flex-wrap gap-2 text-xs">
+              <span v-for="row in evolutionTraceMetrics.slice(-12)" :key="'metric-' + row.generation" class="px-2 py-1 border border-neutral-200 bg-neutral-50">
+                第{{ row.generation }}代：保留{{ row.kept_count || 0 }}/{{ row.evaluated_count || row.population || 0 }}，目标{{ fixed(row.best_objective) }}
+              </span>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[460px] border-t border-neutral-200">
+              <table class="w-full text-xs">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left">代数</th>
+                    <th class="px-3 py-2 text-right">排名</th>
+                    <th class="px-3 py-2 text-left">结果</th>
+                    <th class="px-3 py-2 text-left min-w-[180px]">淘汰/保留原因</th>
+                    <th class="px-3 py-2 text-right">目标</th>
+                    <th class="px-3 py-2 text-right">收益</th>
+                    <th class="px-3 py-2 text-right">回撤</th>
+                    <th class="px-3 py-2 text-right">胜率</th>
+                    <th class="px-3 py-2 text-right">交易</th>
+                    <th class="px-3 py-2 text-left">参数指纹</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in evolutionTraceCandidates" :key="row.candidate_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2 whitespace-nowrap">第{{ row.generation }}代</td>
+                    <td class="px-3 py-2 text-right">#{{ row.rank }}</td>
+                    <td class="px-3 py-2">
+                      <span class="px-2 py-1" :class="row.selected ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'">{{ row.selected ? '保留' : '淘汰' }}</span>
+                    </td>
+                    <td class="px-3 py-2">{{ row.elimination_reason || '-' }}</td>
+                    <td class="px-3 py-2 text-right">{{ fixed(row.objective) }}</td>
+                    <td class="px-3 py-2 text-right" :class="numClass(row.return_pct)">{{ pct(row.return_pct) }}</td>
+                    <td class="px-3 py-2 text-right">{{ pct(row.max_drawdown_pct) }}</td>
+                    <td class="px-3 py-2 text-right">{{ pct(row.win_rate) }}</td>
+                    <td class="px-3 py-2 text-right">{{ row.closed_trades || 0 }}</td>
+                    <td class="px-3 py-2 font-mono text-[11px]">{{ row.params_hash || '-' }}</td>
+                  </tr>
+                  <tr v-if="!evolutionTraceCandidates.length"><td colspan="10" class="px-3 py-10 text-center text-neutral-500">暂无训练轨迹；启动一次进化后会自动写入候选策略和淘汰记录</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div class="font-semibold">策略回测详情与交割单</div>
@@ -1463,6 +1536,9 @@
           aiRecords: {},
           notificationStatus: {},
           evolutionStatus: {},
+          evolutionTrace: {},
+          evolutionTraceLoading: false,
+          evolutionTraceForm: { run_id: '', generation: '', limit: 200 },
           strategyModels: {},
           accessLogs: {},
           frontendUsers: {},
@@ -1598,6 +1674,10 @@
         databaseRows() { return this.databaseTable.rows || []; },
         databaseStateFiles() { return this.database.state_files || []; },
         fitCandidates() { return this.fitResult.candidates || []; },
+        evolutionTraceSummary() { return this.evolutionTrace.summary || {}; },
+        evolutionTraceRuns() { return this.evolutionTrace.runs || []; },
+        evolutionTraceMetrics() { return this.evolutionTrace.metrics || []; },
+        evolutionTraceCandidates() { return this.evolutionTrace.candidates || []; },
         accessLogItems() { return this.accessLogs.items || []; },
         frontendUserItems() { return this.frontendUsers.items || []; },
         filteredFrontendUsers() {
@@ -1664,6 +1744,9 @@
           }
           if (value === 'users') {
             this.fetchFrontendUsers();
+          }
+          if (value === 'strategy' && !this.evolutionTraceCandidates.length) {
+            this.loadEvolutionTrace(true);
           }
         },
       },
@@ -2545,6 +2628,24 @@
             this.fitting = false;
           }
         },
+        async loadEvolutionTrace(quiet = true) {
+          this.evolutionTraceLoading = true;
+          try {
+            const q = new URLSearchParams({ limit: String(this.evolutionTraceForm.limit || 200) });
+            const runId = String(this.evolutionTraceForm.run_id || '').trim();
+            const generation = String(this.evolutionTraceForm.generation || '').trim();
+            if (runId) q.set('run_id', runId);
+            if (generation) q.set('generation', generation);
+            this.evolutionTrace = await this.api(`/api/quant/evolution/trace?${q.toString()}`);
+            if (!runId && this.evolutionTrace.selected_run_id) {
+              this.evolutionTraceForm.run_id = this.evolutionTrace.selected_run_id;
+            }
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          } finally {
+            this.evolutionTraceLoading = false;
+          }
+        },
         async evolveStrategy() {
           if (this.isEvolutionRunning) return this.pauseEvolution();
           if (this.isEvolutionPaused) return this.resumeEvolution();
@@ -2555,6 +2656,7 @@
             if (this.asOf) q.set('end_date', this.asOf);
             this.evolutionStatus = await this.api(`/api/quant/evolve_strategy?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
+            await this.loadEvolutionTrace(true);
           } finally {
             this.evolving = false;
           }
@@ -2564,6 +2666,7 @@
           try {
             this.evolutionStatus = await this.api('/api/quant/evolution/pause', { method: 'POST' });
             await this.refreshAll();
+            await this.loadEvolutionTrace(true);
           } finally {
             this.evolutionToggling = false;
           }
@@ -2573,6 +2676,7 @@
           try {
             this.evolutionStatus = await this.api('/api/quant/evolution/resume', { method: 'POST' });
             await this.refreshAll();
+            await this.loadEvolutionTrace(true);
           } finally {
             this.evolutionToggling = false;
           }

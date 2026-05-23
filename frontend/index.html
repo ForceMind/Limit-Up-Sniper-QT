@@ -1521,12 +1521,13 @@
             this.profileForm = { ...this.profileForm, ...this.userProfile };
             this.followedModel = result.followed_model || this.followedModel;
             if (result.strategy_models) this.strategyModels = result.strategy_models;
-            this.profileMessage = `已保存，当前跟随：${this.followedModelName}`;
+            this.profileMessage = `已保存，正在同步 ${this.followedModelName} 的持仓`;
             this.accountView = {};
             this.recommendations = {};
             this.plan = {};
-            await this.loadAll();
-            this.loadMarketData(true);
+            await this.loadMarketData(false, true);
+            this.profileMessage = `已同步，当前跟随：${this.followedModelName}`;
+            this.loadAll().catch(() => {});
             if (['overview', 'buy'].includes(this.mobileView)) this.loadRecommendations(true);
             if (this.mobileView === 'buy') this.loadPlan(true);
           } catch (err) {
@@ -1589,11 +1590,14 @@
             }
           }, 0);
         },
-        async loadMarketData(quiet = false) {
+        async loadMarketData(quiet = false, force = false) {
           try {
             if (!this.isLoggedIn) return;
             const date = this.asOf || '';
-            const accountQuery = date ? `?as_of=${date}&limit=160` : '?limit=160';
+            const q = new URLSearchParams({ limit: '160' });
+            if (date) q.set('as_of', date);
+            if (force) q.set('force', 'true');
+            const accountQuery = `?${q.toString()}`;
             const account = await this.api(`/api/front/trading_account${accountQuery}`);
             this.accountView = account;
             if (!this.asOf && account.as_of) this.asOf = account.as_of;

@@ -120,6 +120,28 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_strategy_metrics_run ON strategy_model_metrics(run_id);
 
+            CREATE TABLE IF NOT EXISTS strategy_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                generation INTEGER,
+                rank INTEGER,
+                selected INTEGER,
+                selection_role TEXT,
+                elimination_reason TEXT,
+                objective REAL,
+                return_pct REAL,
+                max_drawdown_pct REAL,
+                sharpe_ratio REAL,
+                profit_factor REAL,
+                win_rate REAL,
+                closed_trades INTEGER,
+                params_hash TEXT,
+                params_json TEXT NOT NULL DEFAULT '{}',
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_candidates_run_generation ON strategy_candidates(run_id, generation, rank);
+            CREATE INDEX IF NOT EXISTS idx_strategy_candidates_selected ON strategy_candidates(run_id, selected);
+
             CREATE TABLE IF NOT EXISTS strategy_models (
                 model_id TEXT PRIMARY KEY,
                 run_id TEXT,
@@ -221,6 +243,12 @@ class StrategyEvolution:
             payload["models"] = [
                 self._strip_model_records(item) for item in payload["models"] if isinstance(item, dict)
             ]
+        candidate_records = payload.pop("candidate_records", None)
+        if isinstance(candidate_records, list):
+            payload["evaluated_candidate_count"] = max(
+                int(safe_float(payload.get("evaluated_candidate_count"), 0)),
+                len(candidate_records),
+            )
         return payload
 
     def _result_has_inline_records(self, result: Dict[str, Any]) -> bool:
@@ -325,6 +353,44 @@ class StrategyEvolution:
                             safe_float(item.get("best_drawdown_pct"), 0),
                             safe_float(item.get("best_win_rate"), 0),
                             int(safe_float(item.get("population"), 0)),
+                            self._json_text(item),
+                        ),
+                    )
+                for item in result.get("candidate_records", []) if isinstance(result.get("candidate_records"), list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+                    params_hash = str(item.get("params_hash") or self._digest("params", params)[:16])
+                    candidate_id = str(
+                        item.get("candidate_id")
+                        or self._digest("strategy_candidate", run_id, item.get("generation"), item.get("rank"), params_hash)[:32]
+                    )
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO strategy_candidates
+                        (candidate_id, run_id, generation, rank, selected, selection_role,
+                         elimination_reason, objective, return_pct, max_drawdown_pct,
+                         sharpe_ratio, profit_factor, win_rate, closed_trades,
+                         params_hash, params_json, raw_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            candidate_id,
+                            run_id,
+                            int(safe_float(item.get("generation"), 0)),
+                            int(safe_float(item.get("rank"), 0)),
+                            1 if item.get("selected") else 0,
+                            str(item.get("selection_role") or ""),
+                            str(item.get("elimination_reason") or ""),
+                            safe_float(item.get("objective"), 0),
+                            safe_float(item.get("return_pct"), 0),
+                            safe_float(item.get("max_drawdown_pct"), 0),
+                            safe_float(item.get("sharpe_ratio"), 0),
+                            safe_float(item.get("profit_factor"), 0),
+                            safe_float(item.get("win_rate"), 0),
+                            int(safe_float(item.get("closed_trades"), 0)),
+                            params_hash,
+                            self._json_text(params),
                             self._json_text(item),
                         ),
                     )
@@ -634,6 +700,192 @@ class StrategyEvolution:
             return payload
         return {}
 
+    def trace(
+        self,
+        run_id: Optional[str] = None,
+        generation: Optional[int] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        limit = max(1, min(int(safe_float(limit, 200)), 2000))
+        if not QUANT_DB_FILE.exists():
+            return {
+                "status": "ok",
+                "selected_run_id": "",
+                "runs": [],
+                "metrics": [],
+                "candidates": [],
+                "summary": {"evaluated": 0, "selected": 0, "eliminated": 0},
+            }
+        conn = self._connect_db()
+        try:
+            run_rows = conn.execute(
+                """
+                SELECT r.run_id, r.status, r.started_at, r.finished_at, r.duration_ms,
+                       r.generations, r.population_size, r.start_date, r.end_date,
+                       r.objective, r.return_pct, r.max_drawdown_pct, r.win_rate, r.closed_trades,
+                       COUNT(c.candidate_id) AS candidate_count,
+                       SUM(CASE WHEN c.selected = 1 THEN 1 ELSE 0 END) AS selected_count
+                FROM strategy_runs r
+                LEFT JOIN strategy_candidates c ON c.run_id = r.run_id
+                GROUP BY r.run_id
+                ORDER BY COALESCE(NULLIF(r.finished_at, ''), NULLIF(r.started_at, '')) DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            runs = [
+                {
+                    "run_id": str(row["run_id"] or ""),
+                    "status": str(row["status"] or ""),
+                    "started_at": str(row["started_at"] or ""),
+                    "finished_at": str(row["finished_at"] or ""),
+                    "duration_ms": safe_float(row["duration_ms"], 0),
+                    "generations": int(row["generations"] or 0),
+                    "population_size": int(row["population_size"] or 0),
+                    "start_date": str(row["start_date"] or ""),
+                    "end_date": str(row["end_date"] or ""),
+                    "objective": safe_float(row["objective"], 0),
+                    "return_pct": safe_float(row["return_pct"], 0),
+                    "max_drawdown_pct": safe_float(row["max_drawdown_pct"], 0),
+                    "win_rate": safe_float(row["win_rate"], 0),
+                    "closed_trades": int(row["closed_trades"] or 0),
+                    "candidate_count": int(row["candidate_count"] or 0),
+                    "selected_count": int(row["selected_count"] or 0),
+                    "eliminated_count": max(0, int(row["candidate_count"] or 0) - int(row["selected_count"] or 0)),
+                }
+                for row in run_rows
+            ]
+            selected_run_id = str(run_id or "").strip()
+            if not selected_run_id:
+                selected = next((item for item in runs if item.get("candidate_count")), runs[0] if runs else {})
+                selected_run_id = str(selected.get("run_id") or "")
+            if not selected_run_id:
+                return {
+                    "status": "ok",
+                    "selected_run_id": "",
+                    "runs": runs,
+                    "metrics": [],
+                    "candidates": [],
+                    "summary": {"evaluated": 0, "selected": 0, "eliminated": 0},
+                }
+
+            metric_rows = conn.execute(
+                """
+                SELECT generation, best_objective, best_return_pct, best_drawdown_pct,
+                       best_win_rate, population, raw_json
+                FROM strategy_model_metrics
+                WHERE run_id = ?
+                ORDER BY generation ASC
+                """,
+                (selected_run_id,),
+            ).fetchall()
+            metrics = []
+            for row in metric_rows:
+                try:
+                    raw = json.loads(str(row["raw_json"] or "{}"))
+                except Exception:
+                    raw = {}
+                metrics.append(
+                    {
+                        "generation": int(row["generation"] or 0),
+                        "best_objective": safe_float(row["best_objective"], 0),
+                        "best_return_pct": safe_float(row["best_return_pct"], 0),
+                        "best_drawdown_pct": safe_float(row["best_drawdown_pct"], 0),
+                        "best_win_rate": safe_float(row["best_win_rate"], 0),
+                        "population": int(row["population"] or 0),
+                        "evaluated_count": int(safe_float(raw.get("evaluated_count"), row["population"] or 0)) if isinstance(raw, dict) else int(row["population"] or 0),
+                        "kept_count": int(safe_float(raw.get("kept_count"), 0)) if isinstance(raw, dict) else 0,
+                        "eliminated_count": int(safe_float(raw.get("eliminated_count"), 0)) if isinstance(raw, dict) else 0,
+                        "cutoff_objective": safe_float(raw.get("cutoff_objective"), 0) if isinstance(raw, dict) else 0,
+                    }
+                )
+
+            where = ["run_id = ?"]
+            params: List[Any] = [selected_run_id]
+            if generation is not None:
+                where.append("generation = ?")
+                params.append(int(generation))
+            params.append(limit)
+            candidate_rows = conn.execute(
+                f"""
+                SELECT candidate_id, run_id, generation, rank, selected, selection_role,
+                       elimination_reason, objective, return_pct, max_drawdown_pct,
+                       sharpe_ratio, profit_factor, win_rate, closed_trades,
+                       params_hash, params_json
+                FROM strategy_candidates
+                WHERE {" AND ".join(where)}
+                ORDER BY generation DESC, rank ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            candidates = []
+            for row in candidate_rows:
+                try:
+                    item_params = json.loads(str(row["params_json"] or "{}"))
+                except Exception:
+                    item_params = {}
+                candidates.append(
+                    {
+                        "candidate_id": str(row["candidate_id"] or ""),
+                        "run_id": str(row["run_id"] or ""),
+                        "generation": int(row["generation"] or 0),
+                        "rank": int(row["rank"] or 0),
+                        "selected": bool(row["selected"]),
+                        "selection_role": str(row["selection_role"] or ""),
+                        "elimination_reason": str(row["elimination_reason"] or ""),
+                        "objective": safe_float(row["objective"], 0),
+                        "return_pct": safe_float(row["return_pct"], 0),
+                        "max_drawdown_pct": safe_float(row["max_drawdown_pct"], 0),
+                        "sharpe_ratio": safe_float(row["sharpe_ratio"], 0),
+                        "profit_factor": safe_float(row["profit_factor"], 0),
+                        "win_rate": safe_float(row["win_rate"], 0),
+                        "closed_trades": int(row["closed_trades"] or 0),
+                        "params_hash": str(row["params_hash"] or ""),
+                        "params": item_params if isinstance(item_params, dict) else {},
+                    }
+                )
+
+            summary_row = conn.execute(
+                """
+                SELECT COUNT(*) AS evaluated,
+                       SUM(CASE WHEN selected = 1 THEN 1 ELSE 0 END) AS selected,
+                       MAX(generation) AS latest_generation
+                FROM strategy_candidates
+                WHERE run_id = ?
+                """,
+                (selected_run_id,),
+            ).fetchone()
+            summary_values = dict(summary_row) if summary_row else {}
+            evaluated_count = int(summary_values.get("evaluated") or 0)
+            selected_count = int(summary_values.get("selected") or 0)
+            latest_generation = int(summary_values.get("latest_generation") or 0)
+            return {
+                "status": "ok",
+                "selected_run_id": selected_run_id,
+                "runs": runs,
+                "metrics": metrics,
+                "candidates": candidates,
+                "summary": {
+                    "evaluated": evaluated_count,
+                    "selected": selected_count,
+                    "eliminated": max(0, evaluated_count - selected_count),
+                    "latest_generation": latest_generation,
+                    "returned": len(candidates),
+                },
+            }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "message": str(exc),
+                "selected_run_id": str(run_id or ""),
+                "runs": [],
+                "metrics": [],
+                "candidates": [],
+                "summary": {"evaluated": 0, "selected": 0, "eliminated": 0},
+            }
+        finally:
+            conn.close()
+
     def apply_model(self, model_id: str) -> Dict[str, Any]:
         payload = self.status()
         models = self.models(include_records=False).get("items", [])
@@ -670,12 +922,23 @@ class StrategyEvolution:
             mode = "intraday"
         started_ts = time.time()
         started_at = datetime.now().isoformat(timespec="seconds")
+        run_id = self._digest(
+            "strategy_run",
+            started_at,
+            start_date,
+            end_date,
+            mode,
+            generations,
+            population_size,
+            random.random(),
+        )[:24]
         if not self._lock.acquire(blocking=False):
             return {"status": "running", "message": "strategy evolution is already running"}
         try:
             self._write_state(
                 {
                     "status": "running",
+                    "run_id": run_id,
                     "started_at": started_at,
                     "generations": generations,
                     "population_size": population_size,
@@ -692,9 +955,11 @@ class StrategyEvolution:
             history = []
             best: Optional[Dict[str, Any]] = None
             last_evaluated: List[Dict[str, Any]] = []
+            candidate_records: List[Dict[str, Any]] = []
             for generation in range(1, generations + 1):
                 if self._pause_requested():
                     return self._paused_result(
+                        run_id=run_id,
                         started_at=started_at,
                         started_ts=started_ts,
                         generations=generations,
@@ -706,12 +971,17 @@ class StrategyEvolution:
                         best=best,
                         history=history,
                         last_evaluated=last_evaluated,
+                        candidate_records=candidate_records,
                     )
                 evaluated = [self._evaluate(candidate, start_date=start_date, end_date=end_date, mode=mode) for candidate in population]
                 evaluated.sort(key=lambda item: item["objective"], reverse=True)
                 last_evaluated = evaluated
+                elite_count = max(2, population_size // 5)
+                generation_records = self._candidate_records_for_generation(run_id, generation, evaluated, elite_count)
+                candidate_records.extend(generation_records)
                 if best is None or evaluated[0]["objective"] > best["objective"]:
                     best = evaluated[0]
+                cutoff_index = min(max(elite_count, 1), len(evaluated)) - 1
                 history.append(
                     {
                         "generation": generation,
@@ -721,11 +991,16 @@ class StrategyEvolution:
                         "best_sharpe_ratio": evaluated[0].get("sharpe_ratio", 0),
                         "best_win_rate": evaluated[0]["win_rate"],
                         "population": len(evaluated),
+                        "evaluated_count": len(evaluated),
+                        "kept_count": min(elite_count, len(evaluated)),
+                        "eliminated_count": max(0, len(evaluated) - elite_count),
+                        "cutoff_objective": evaluated[cutoff_index]["objective"] if evaluated else 0,
                     }
                 )
                 self._write_state(
                     {
                         "status": "running",
+                        "run_id": run_id,
                         "started_at": started_at,
                         "generations": generations,
                         "population_size": population_size,
@@ -736,11 +1011,13 @@ class StrategyEvolution:
                         "progress_message": f"已完成第 {generation}/{generations} 代",
                         "best": best,
                         "history": history,
+                        "evaluated_candidate_count": len(candidate_records),
                         "models": self.models().get("items", []),
                     },
                 )
                 if self._pause_requested():
                     return self._paused_result(
+                        run_id=run_id,
                         started_at=started_at,
                         started_ts=started_ts,
                         generations=generations,
@@ -752,6 +1029,7 @@ class StrategyEvolution:
                         best=best,
                         history=history,
                         last_evaluated=last_evaluated,
+                        candidate_records=candidate_records,
                     )
                 population = self._next_generation(evaluated, population_size)
 
@@ -769,6 +1047,7 @@ class StrategyEvolution:
 
             result = {
                 "status": "ok",
+                "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "duration_ms": round((time.time() - started_ts) * 1000, 2),
@@ -784,6 +1063,8 @@ class StrategyEvolution:
                 "best_model": models[0] if models else {},
                 "models": models,
                 "history": history,
+                "candidate_records": candidate_records,
+                "evaluated_candidate_count": len(candidate_records),
             }
             try:
                 self._persist_result(result)
@@ -796,6 +1077,7 @@ class StrategyEvolution:
     def _paused_result(
         self,
         *,
+        run_id: str,
         started_at: str,
         started_ts: float,
         generations: int,
@@ -807,6 +1089,7 @@ class StrategyEvolution:
         best: Optional[Dict[str, Any]],
         history: List[Dict[str, Any]],
         last_evaluated: List[Dict[str, Any]],
+        candidate_records: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         paused_at = datetime.now().isoformat(timespec="seconds")
         model_source = list(last_evaluated)
@@ -816,6 +1099,7 @@ class StrategyEvolution:
         models = self._build_models(model_source, paused_at) if model_source else self.models().get("items", [])
         result = {
             "status": "paused",
+            "run_id": run_id,
             "started_at": started_at,
             "updated_at": paused_at,
             "duration_ms": round((time.time() - started_ts) * 1000, 2),
@@ -832,12 +1116,67 @@ class StrategyEvolution:
             "best_model": models[0] if models else {},
             "models": models,
             "history": history,
+            "candidate_records": candidate_records,
+            "evaluated_candidate_count": len(candidate_records),
         }
         try:
             self._persist_result(result)
         except Exception as exc:
             result["persist_error"] = str(exc)
         return self._write_state(result)
+
+    def _candidate_elimination_reason(self, item: Dict[str, Any], selected: bool) -> str:
+        if selected:
+            return "保留进入下一代精英池"
+        closed_trades = safe_float(item.get("closed_trades"), 0)
+        return_pct = safe_float(item.get("return_pct"), 0)
+        max_drawdown_pct = safe_float(item.get("max_drawdown_pct"), 0)
+        profit_factor = safe_float(item.get("profit_factor"), 0)
+        sharpe_ratio = safe_float(item.get("sharpe_ratio"), 0)
+        if closed_trades < 5:
+            return "闭环交易不足，样本不够稳定"
+        if return_pct < 0:
+            return "收益为负"
+        if max_drawdown_pct <= -20:
+            return "最大回撤过大"
+        if profit_factor and profit_factor < 1:
+            return "盈亏比不足"
+        if sharpe_ratio < 0:
+            return "夏普为负，波动收益质量差"
+        return "综合目标函数排名低于精英线"
+
+    def _candidate_records_for_generation(
+        self,
+        run_id: str,
+        generation: int,
+        evaluated: List[Dict[str, Any]],
+        elite_count: int,
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        for rank, item in enumerate(evaluated, start=1):
+            params = quant_engine.strategy_params(item.get("params", {}))
+            params_hash = self._digest("strategy_candidate_params", params)[:16]
+            selected = rank <= elite_count
+            record = {
+                "candidate_id": self._digest("strategy_candidate", run_id, generation, rank, params_hash)[:32],
+                "run_id": run_id,
+                "generation": generation,
+                "rank": rank,
+                "selected": selected,
+                "selection_role": "elite_survivor" if selected else "eliminated",
+                "elimination_reason": self._candidate_elimination_reason(item, selected),
+                "objective": safe_float(item.get("objective"), 0),
+                "return_pct": safe_float(item.get("return_pct"), 0),
+                "max_drawdown_pct": safe_float(item.get("max_drawdown_pct"), 0),
+                "sharpe_ratio": safe_float(item.get("sharpe_ratio"), 0),
+                "profit_factor": safe_float(item.get("profit_factor"), 0),
+                "win_rate": safe_float(item.get("win_rate"), 0),
+                "closed_trades": int(safe_float(item.get("closed_trades"), 0)),
+                "params_hash": params_hash,
+                "params": params,
+            }
+            records.append(record)
+        return records
 
     def _initial_population(self, base: Dict[str, float], population_size: int) -> List[Dict[str, float]]:
         population = [quant_engine.strategy_params(base)]

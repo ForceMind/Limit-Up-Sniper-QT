@@ -334,6 +334,28 @@ def create_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_strategy_metrics_run ON strategy_model_metrics(run_id);
 
+        CREATE TABLE IF NOT EXISTS strategy_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            generation INTEGER,
+            rank INTEGER,
+            selected INTEGER,
+            selection_role TEXT,
+            elimination_reason TEXT,
+            objective REAL,
+            return_pct REAL,
+            max_drawdown_pct REAL,
+            sharpe_ratio REAL,
+            profit_factor REAL,
+            win_rate REAL,
+            closed_trades INTEGER,
+            params_hash TEXT,
+            params_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidates_run_generation ON strategy_candidates(run_id, generation, rank);
+        CREATE INDEX IF NOT EXISTS idx_strategy_candidates_selected ON strategy_candidates(run_id, selected);
+
         CREATE TABLE IF NOT EXISTS strategy_models (
             model_id TEXT PRIMARY KEY,
             run_id TEXT,
@@ -897,6 +919,7 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
         return {
             "strategy_runs": 0,
             "strategy_model_metrics": 0,
+            "strategy_candidates": 0,
             "strategy_models": 0,
             "strategy_model_records": 0,
         }
@@ -904,12 +927,15 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
     state = dict(states[0][1])
     models_by_id: dict[str, dict] = {}
     history_rows = []
+    candidate_items = []
     for source_name, payload in states:
         for key in ("best_model", "best", "started_at", "finished_at", "updated_at", "start_date", "end_date", "mode"):
             if not state.get(key) and payload.get(key):
                 state[key] = payload.get(key)
         if isinstance(payload.get("history"), list):
             history_rows.extend(item for item in payload["history"] if isinstance(item, dict))
+        if isinstance(payload.get("candidate_records"), list):
+            candidate_items.extend(item for item in payload["candidate_records"] if isinstance(item, dict))
         for idx, model in enumerate(payload.get("models") if isinstance(payload.get("models"), list) else []):
             if not isinstance(model, dict):
                 continue
@@ -934,6 +960,7 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
         return {
             "strategy_runs": 0,
             "strategy_model_metrics": 0,
+            "strategy_candidates": 0,
             "strategy_models": 0,
             "strategy_model_records": 0,
         }
@@ -1005,6 +1032,52 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         metric_rows,
+    )
+    candidate_rows = []
+    for idx, item in enumerate(candidate_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        params = item.get("params") if isinstance(item.get("params"), dict) else {}
+        params_hash = text(item.get("params_hash")) or digest("strategy_candidate_params", params)[:16]
+        candidate_id = text(item.get("candidate_id")) or digest(
+            "strategy_candidate",
+            run_id,
+            item.get("generation"),
+            item.get("rank"),
+            idx,
+            params_hash,
+        )
+        candidate_rows.append(
+            (
+                candidate_id,
+                run_id,
+                integer(item.get("generation")),
+                integer(item.get("rank")),
+                1 if item.get("selected") else 0,
+                text(item.get("selection_role")),
+                text(item.get("elimination_reason")),
+                num(item.get("objective")),
+                num(item.get("return_pct")),
+                num(item.get("max_drawdown_pct")),
+                num(item.get("sharpe_ratio")),
+                num(item.get("profit_factor")),
+                num(item.get("win_rate")),
+                integer(item.get("closed_trades")),
+                params_hash,
+                json_text(params),
+                json_text(item),
+            )
+        )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO strategy_candidates
+        (candidate_id, run_id, generation, rank, selected, selection_role,
+         elimination_reason, objective, return_pct, max_drawdown_pct,
+         sharpe_ratio, profit_factor, win_rate, closed_trades,
+         params_hash, params_json, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        candidate_rows,
     )
     models = state.get("models") if isinstance(state.get("models"), list) else []
     model_rows = []
@@ -1088,6 +1161,7 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
     return {
         "strategy_runs": 1,
         "strategy_model_metrics": len(metric_rows),
+        "strategy_candidates": len(candidate_rows),
         "strategy_models": len(model_rows),
         "strategy_model_records": len(record_rows),
     }

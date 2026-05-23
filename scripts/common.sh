@@ -226,6 +226,7 @@ required = {
     "lhb_records": ["record_id", "trade_date", "stock_code", "buyer_seat_name"],
     "strategy_runs": ["run_id", "status", "started_at", "raw_json"],
     "strategy_model_metrics": ["metric_id", "run_id", "generation", "raw_json"],
+    "strategy_candidates": ["candidate_id", "run_id", "generation", "rank", "elimination_reason", "raw_json"],
     "strategy_models": ["model_id", "run_id", "params_json", "backtest_json", "raw_json"],
     "strategy_model_records": ["record_id", "model_id", "record_type", "raw_json"],
     "paper_accounts": ["as_of", "cash", "raw_json"],
@@ -540,7 +541,7 @@ admin	admin	GET:/api/admin/snapshot,POST:/api/admin/system/startup,POST:/api/adm
 jobs	jobs	GET:/api/jobs/status,GET:/api/jobs/logs,POST:/api/jobs/{job_name}/pause,POST:/api/jobs/{job_name}/resume,POST:/api/jobs/news/fetch,POST:/api/jobs/market/sync,POST:/api/jobs/ai/analyze,POST:/api/jobs/trading/run,POST:/api/jobs/strategy/replay,POST:/api/jobs/daily/run
 data	data	GET:/api/data/coverage,POST:/api/data/kline/fill,GET:/api/data/lhb/status,POST:/api/data/lhb/sync,GET:/api/data/biying/status,POST:/api/data/biying/sync_intraday
 quant	quant	GET:/api/quant/dashboard,GET:/api/quant/recommendations,GET:/api/quant/daily_plan,GET:/api/quant/timeline,GET:/api/quant/intraday_timeline,GET:/api/quant/backtest,POST:/api/quant/backtest,GET:/api/quant/trading_account,GET:/api/quant/portfolio,POST:/api/quant/run
-strategy	strategy	GET:/api/quant/strategy_params,POST:/api/quant/strategy_params,POST:/api/quant/strategy_params/reset,POST:/api/quant/fit_strategy,GET:/api/quant/models,GET:/api/quant/model/backtest,POST:/api/quant/model/apply,GET:/api/quant/evolution/status,POST:/api/quant/evolve_strategy,POST:/api/quant/evolution/pause,POST:/api/quant/evolution/resume
+strategy	strategy	GET:/api/quant/strategy_params,POST:/api/quant/strategy_params,POST:/api/quant/strategy_params/reset,POST:/api/quant/fit_strategy,GET:/api/quant/models,GET:/api/quant/model/backtest,POST:/api/quant/model/apply,GET:/api/quant/evolution/status,GET:/api/quant/evolution/trace,POST:/api/quant/evolve_strategy,POST:/api/quant/evolution/pause,POST:/api/quant/evolution/resume
 ai	ai	GET:/api/ai/usage,GET:/api/ai/records,GET:/api/ai/failures
 notify	notify	GET:/api/notifications/status,POST:/api/notifications/test
 EOF
