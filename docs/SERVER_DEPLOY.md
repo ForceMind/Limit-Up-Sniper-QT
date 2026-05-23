@@ -99,7 +99,7 @@ cd /opt/qt
 bash qt.sh
 ```
 
-`bash qt.sh` 等同于 `bash qt.sh update`；服务器快捷命令 `qt` 面板里的 `1) 一键更新部署` 也走同一套流程。它会先备份当前运行数据目录，再执行 `git pull --ff-only`、更新依赖、自动把 JSON/CSV 运行数据合并进 SQLite、验证关键数据表，并重启服务。自动迁移可以重复执行，不会整库覆盖；如需临时跳过，设置 `QT_SKIP_AUTO_MIGRATE=true`。
+`bash qt.sh` 等同于 `bash qt.sh update`；服务器快捷命令 `qt` 面板里的 `1) 一键更新部署` 也走同一套流程。它会先备份当前运行数据目录，再执行 `git pull --ff-only`、更新依赖、按需把 JSON/CSV 运行数据合并进 SQLite、验证关键数据表，并重启服务。默认 `QT_AUTO_MIGRATE_MODE=smart`，首次、数据库缺失或迁移脚本变化时才全量迁移；如需强制迁移执行 `qt migrate` 或 `QT_FORCE_AUTO_MIGRATE=1 qt update`，如需临时跳过设置 `QT_SKIP_AUTO_MIGRATE=true`。
 
 ## 重启服务
 
@@ -196,7 +196,7 @@ qt nginx-upload
 sudo nginx -T | grep -nE "client_max_body_size|proxy_read_timeout|proxy_send_timeout"
 ```
 
-`qt install` 和 `qt update` 也会自动尝试把指向本服务端口的 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE` 和 `QT_NGINX_PROXY_TIMEOUT`，默认 `1024m` 和 `1800` 秒。
+`qt install` 和 `qt update` 也会自动尝试把指向本服务端口的正式 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE` 和 `QT_NGINX_PROXY_TIMEOUT`，默认 `1024m` 和 `1800` 秒。脚本会跳过 `.qt_upload_backup_*` 历史备份文件，并默认清理 7 天前或重复嵌套的上传配置备份。
 
 正式域名和 TLS 证书按服务器实际情况调整。
 
@@ -235,7 +235,7 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 `backend/data/quant_data.sqlite3` 属于服务器本地运行数据，不提交 Git。迁移脚本会导入新闻、AI 缓存、结构化事件、行情、模拟账户、策略进化、访问日志和任务日志，但不会导入账号、密钥和运行配置。日 K 的长期主存储是 SQLite 的 `market_daily_bars` 表，旧的 `kline_day_cache/*.json` 只作为兼容缓存和迁移来源。
 
-`qt install` 和 `qt update` 会自动执行同一套迁移逻辑。手动命令主要用于指定其他旧数据目录，或在服务器外单独整理数据包。
+`qt install` 和 `qt update` 会执行智能迁移逻辑。手动 `qt migrate` 用于强制重新合并当前数据目录里的 JSON/CSV，或者在服务器外单独整理数据包。
 
 迁移服务器时优先使用后台页面，不要通过 GitHub 上传真实数据：
 

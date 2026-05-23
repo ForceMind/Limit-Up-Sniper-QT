@@ -45,6 +45,7 @@ usage() {
   qt clear-sample            清理样例持仓
   qt fill-kline              补齐有新闻事件股票的日K数据
   qt sync-lhb                拉取龙虎榜席位数据
+  qt migrate                 强制把 backend/data 里的 JSON/CSV 合并进 SQLite
   qt scan                    GitHub 上传前安全扫描
   qt doctor                  部署环境检查
   qt help                    显示帮助
@@ -499,6 +500,10 @@ case "$cmd" in
     ;;
   sync-lhb|lhb|lhb-sync)
     cmd_sync_lhb "${@:2}"
+    ;;
+  migrate|sqlite-migrate|migrate-sqlite)
+    require_project_root
+    QT_FORCE_AUTO_MIGRATE=1 auto_migrate_sqlite
     ;;
   scan|security)
     section "GitHub ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe5\x89\x8d\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')"

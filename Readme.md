@@ -109,7 +109,7 @@ cp .env.example .env
 - `QT_MEMORY_GUARD_ENABLED`、`QT_MEMORY_GUARD_PERCENT`、`QT_MEMORY_GUARD_AVAILABLE_MB`：重任务内存保护，默认内存使用超过 88% 或可用内存低于 1024MB 时跳过自动进化
 - `QT_AUTH_TOKEN_TTL_SECONDS`：前台/后台登录 token 有效期，默认 43200 秒
 - `QT_WRITE_KLINE_JSON_CACHE`：默认 `false`。日 K 新数据直接写入 SQLite；只有需要兼容旧脚本时才额外写回 `kline_day_cache/*.json`
-- `QT_SKIP_AUTO_MIGRATE`：默认 `false`。`qt install` 和 `qt update` 会自动把当前数据目录里的 JSON/CSV 合并进 SQLite；临时不想迁移时设为 `true`
+- `QT_SKIP_AUTO_MIGRATE`：默认 `false`。`QT_AUTO_MIGRATE_MODE=smart` 时，`qt install` 和 `qt update` 只在首次、数据库缺失或迁移脚本变化时全量合并 JSON/CSV；日常更新只验证 SQLite 表结构。需要强制重新合并时执行 `qt migrate` 或 `QT_FORCE_AUTO_MIGRATE=1 qt update`
 
 首次部署时会自动生成随机后台入口路径，不再公开固定 `/admin`。先在服务器执行 `qt admin-path` 或 `bash qt.sh admin-path` 查看入口，再访问该入口初始化两个账号：后台管理员账号和前台交易终端账号。后台账号可以修改配置和触发运维任务；前台账号只用于查看交易终端数据。账号密码哈希保存在服务器本地 `backend/data/auth.json`，真实运行配置保存在 `backend/data/config.json`，这两个文件都不应提交到 Git。
 
@@ -142,7 +142,7 @@ python scripts/migrate_data_to_sqlite.py --source /path/to/old/backend/data --db
 
 迁移服务器时，在旧服务器后台下载数据包，到新服务器后台上传合并即可。导入前服务器会自动备份当前 `backend/data`；导入时按新闻、AI、事件、日线、分时、龙虎榜、日志等类型去重合并，上传包不完整也可以，只会合并包里已有的数据。
 
-如果上传时报 `413 Request Entity Too Large`，是 Nginx 上传大小限制太小；如果报 `504 Gateway Time-out`，是 Nginx 等后端响应超时。服务器执行 `qt nginx-upload` 会把指向本服务端口的 Nginx 配置调到默认 `1024m` 上传限制和 `1800` 秒等待超时并重载。
+如果上传时报 `413 Request Entity Too Large`，是 Nginx 上传大小限制太小；如果报 `504 Gateway Time-out`，是 Nginx 等后端响应超时。服务器执行 `qt nginx-upload` 会把指向本服务端口的正式 Nginx 配置调到默认 `1024m` 上传限制和 `1800` 秒等待超时并重载；脚本会忽略 `.qt_upload_backup_*` 历史备份文件，并默认清理 7 天前或重复嵌套的上传配置备份。
 
 如果服务器以前跑过样例数据，上传后持仓仍显示“样例算力”，到后台 `运维` 点击 `清理样例持仓`。候选、计划和账户接口也会过滤样例代码，防止样例重新出现在今日买入候选里。
 
@@ -257,6 +257,7 @@ qt restart
 qt logs
 qt fill-kline
 qt sync-lhb
+qt migrate
 ```
 
 直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、日志、备份、恢复、补齐日K、拉取龙虎榜、安全扫描和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。

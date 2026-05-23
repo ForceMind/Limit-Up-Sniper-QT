@@ -41,6 +41,11 @@ PORT="${QUANT_PORT:-8000}"
 NGINX_UPLOAD_MAX_SIZE="${QT_NGINX_UPLOAD_MAX_SIZE:-1024m}"
 NGINX_PROXY_TIMEOUT="${QT_NGINX_PROXY_TIMEOUT:-1800}"
 
+is_truthy() {
+  local value="${1:-}"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "TRUE" || "$value" == "yes" || "$value" == "YES" || "$value" == "on" || "$value" == "ON" ]]
+}
+
 if [[ -t 1 ]]; then
   COLOR_BLUE=$'\033[1;34m'
   COLOR_GREEN=$'\033[1;32m'
@@ -125,7 +130,7 @@ run_as_root() {
 
 auto_migrate_sqlite() {
   local skip="${QT_SKIP_AUTO_MIGRATE:-0}"
-  if [[ "$skip" == "1" || "$skip" == "true" || "$skip" == "TRUE" || "$skip" == "yes" || "$skip" == "YES" ]]; then
+  if is_truthy "$skip"; then
     warn "已跳过 SQLite 自动迁移：QT_SKIP_AUTO_MIGRATE=$skip"
     return 0
   fi
@@ -136,22 +141,59 @@ auto_migrate_sqlite() {
     return 0
   fi
 
-  local data_dir db_file python_bin
+  local data_dir db_file python_bin marker mode force need reason
   data_dir="$(runtime_data_dir)"
   db_file="$data_dir/quant_data.sqlite3"
+  marker="$data_dir/.sqlite_migration_state"
+  mode="${QT_AUTO_MIGRATE_MODE:-smart}"
+  force="${QT_FORCE_AUTO_MIGRATE:-0}"
   python_bin="$(check_python_bin)"
   mkdir -p "$data_dir"
 
   section "SQLite 数据自动迁移"
+  if is_truthy "$force"; then
+    need=1
+    reason="已设置 QT_FORCE_AUTO_MIGRATE=$force"
+  elif [[ "$mode" == "always" ]]; then
+    need=1
+    reason="QT_AUTO_MIGRATE_MODE=always"
+  elif [[ ! -f "$db_file" ]]; then
+    need=1
+    reason="SQLite 数据库不存在"
+  elif [[ ! -f "$marker" ]]; then
+    need=1
+    reason="首次记录迁移状态"
+  elif [[ "$script" -nt "$marker" ]]; then
+    need=1
+    reason="迁移脚本已更新"
+  else
+    need=0
+    reason="数据库已迁移且迁移脚本未变化"
+  fi
+
+  if [[ "$need" -eq 0 ]]; then
+    success "SQLite 已完成迁移，本次跳过全量整理：$reason"
+    echo "如需强制重新合并 JSON/CSV 数据：QT_FORCE_AUTO_MIGRATE=1 qt update，或执行 qt migrate"
+    check_sqlite_schema
+    return 0
+  fi
+
   info "数据目录：$data_dir"
+  info "迁移原因：$reason"
   "$python_bin" "$script" --source "$data_dir" --db "$db_file"
+  {
+    echo "updated_at=$(date -Iseconds)"
+    echo "script=$script"
+    echo "db=$db_file"
+    echo "reason=$reason"
+  } > "$marker"
   check_sqlite_schema
   success "SQLite 数据自动迁移完成：$db_file"
 }
 
 check_sqlite_schema() {
   local skip="${QT_SKIP_AUTO_MIGRATE:-0}"
-  if [[ "$skip" == "1" || "$skip" == "true" || "$skip" == "TRUE" || "$skip" == "yes" || "$skip" == "YES" ]]; then
+  if is_truthy "$skip"; then
     warn "已跳过 SQLite 表结构验证：QT_SKIP_AUTO_MIGRATE=$skip"
     return 0
   fi
@@ -264,12 +306,40 @@ find_nginx_qt_configs() {
   for dir in "${dirs[@]}"; do
     [[ -d "$dir" ]] || continue
     while IFS= read -r -d '' file; do
-      if grep -Eq "127[.]0[.]0[.]1:${PORT}|localhost:${PORT}|server_name[[:space:]].*(qt|zhangting)|proxy_pass[[:space:]]+http://127[.]0[.]0[.]1" "$file" 2>/dev/null; then
+      case "$(basename "$file")" in
+        *.qt_upload_backup_*|*.bak|*.old|*~) continue ;;
+      esac
+      if grep -Eq "127[.]0[.]0[.]1:${PORT}|localhost:${PORT}|server_name[[:space:]].*(qt|zhangting)" "$file" 2>/dev/null; then
         real="$(readlink -f "$file" 2>/dev/null || printf '%s' "$file")"
+        case "$(basename "$real")" in
+          *.qt_upload_backup_*|*.bak|*.old|*~) continue ;;
+        esac
         printf '%s\n' "$real"
       fi
     done < <(find "$dir" -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
   done | awk '!seen[$0]++'
+}
+
+cleanup_nginx_upload_backups() {
+  local keep_days="${QT_NGINX_BACKUP_KEEP_DAYS:-7}"
+  [[ "$keep_days" =~ ^[0-9]+$ ]] || keep_days=7
+  local dirs=("/etc/nginx/conf.d" "/etc/nginx/sites-enabled" "/etc/nginx/sites-available")
+  local dir file removed=0
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r -d '' file; do
+      if run_as_root rm -f "$file"; then
+        removed=$((removed + 1))
+      fi
+    done < <(
+      find "$dir" -maxdepth 1 -type f -name "*.qt_upload_backup_*" \
+        \( -name "*.qt_upload_backup_*.qt_upload_backup_*" -o -mtime "+$keep_days" \) \
+        -print0 2>/dev/null
+    )
+  done
+  if [[ "$removed" -gt 0 ]]; then
+    success "已清理 Nginx 历史上传配置备份：${removed} 个"
+  fi
 }
 
 patch_nginx_upload_config() {
@@ -292,7 +362,7 @@ patch_nginx_upload_config() {
   fi
   if [[ "$needs_body" -eq 0 && "$needs_buffering" -eq 0 && "$needs_timeout" -eq 0 ]]; then
     success "Nginx 上传限制和等待超时已是 ${limit}/${timeout}s: $file"
-    return 0
+    return 2
   fi
   local backup="${file}.qt_upload_backup_$(date +%Y%m%d_%H%M%S)"
   run_as_root cp "$file" "$backup" || return 1
@@ -342,6 +412,7 @@ ensure_nginx_upload_limit() {
     warn "$(zh '\xe6\x9c\xaa\xe5\xae\x89\xe8\xa3\x85')"" nginx""$(zh '\xef\xbc\x8c\xe8\xb7\xb3\xe8\xbf\x87')"" Nginx ""$(zh '\xe4\xb8\x8a\xe4\xbc\xa0\xe9\x99\x90\xe5\x88\xb6\xe4\xbf\xae\xe5\xa4\x8d')"
     return 0
   fi
+  cleanup_nginx_upload_backups
   local files=()
   while IFS= read -r file; do
     [[ -n "$file" ]] && files+=("$file")
@@ -351,9 +422,19 @@ ensure_nginx_upload_limit() {
     echo "请手动在对应 server/location 段加上：client_max_body_size ${NGINX_UPLOAD_MAX_SIZE}; proxy_read_timeout ${NGINX_PROXY_TIMEOUT}; proxy_send_timeout ${NGINX_PROXY_TIMEOUT};"
     return 0
   fi
-  local file changed=0
+  local file changed=0 rc=0
   for file in "${files[@]}"; do
-    patch_nginx_upload_config "$file" "$NGINX_UPLOAD_MAX_SIZE" "$NGINX_PROXY_TIMEOUT" && changed=1 || true
+    set +e
+    patch_nginx_upload_config "$file" "$NGINX_UPLOAD_MAX_SIZE" "$NGINX_PROXY_TIMEOUT"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      changed=1
+    elif [[ "$rc" -eq 2 ]]; then
+      true
+    else
+      warn "Nginx 配置处理失败，已跳过：$file"
+    fi
   done
   if [[ "$changed" -eq 1 ]]; then
     if run_as_root nginx -t; then
