@@ -1500,7 +1500,7 @@
           await this.saveProfile(null, { autoRecommend: true });
           this.onboarding.visible = false;
           this.setMobileView('positions');
-          await this.loadMarketData(true);
+          this.loadMarketData(true);
         },
         async saveProfile(modelId = null, options = {}) {
           if (!this.isLoggedIn) return this.openAuth('login');
@@ -1526,9 +1526,9 @@
             this.recommendations = {};
             this.plan = {};
             await this.loadAll();
-            await this.loadMarketData(true);
-            if (['overview', 'buy'].includes(this.mobileView)) await this.loadRecommendations(true);
-            if (this.mobileView === 'buy') await this.loadPlan(true);
+            this.loadMarketData(true);
+            if (['overview', 'buy'].includes(this.mobileView)) this.loadRecommendations(true);
+            if (this.mobileView === 'buy') this.loadPlan(true);
           } catch (err) {
             this.profileMessage = String(err.message || err);
           } finally {

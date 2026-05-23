@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -91,6 +91,7 @@ def _app_version() -> str:
 APP_VERSION = _app_version()
 _FRONTEND_ACCOUNT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _FRONTEND_ACCOUNT_CACHE_TTL = 300
+_FRONTEND_ACCOUNT_REPLAY_DAYS = max(20, min(int(safe_float(os.getenv("QT_FRONTEND_ACCOUNT_REPLAY_DAYS"), 90)), 260))
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -793,12 +794,25 @@ def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
     return requested or latest or None
 
 
+def _frontend_replay_start_date(end_date: Optional[str]) -> Optional[str]:
+    first = str(quant_engine.first_data_date() or "").strip()
+    if not end_date:
+        return first or None
+    try:
+        start = datetime.strptime(end_date[:10], "%Y-%m-%d") - timedelta(days=_FRONTEND_ACCOUNT_REPLAY_DAYS)
+        start_text = start.strftime("%Y-%m-%d")
+        return max(first, start_text) if first else start_text
+    except Exception:
+        return first or None
+
+
 def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int) -> Dict[str, Any]:
     profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
     params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
     target_cash = safe_float(params.get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
     effective_as_of = _frontend_account_as_of(as_of)
+    replay_start_date = _frontend_replay_start_date(effective_as_of)
 
     if followed_id != "active":
         model = _frontend_full_model(followed_id)
@@ -819,6 +833,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
                 {
                     "model_id": followed_id,
                     "as_of": effective_as_of,
+                    "start_date": replay_start_date,
                     "limit": limit,
                     "cash": round(target_cash, 2),
                     "params": params,
@@ -835,7 +850,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             return cached
         with quant_engine.temporary_strategy_params(params):
             timeline = quant_engine.walk_forward(
-                start_date=quant_engine.first_data_date(),
+                start_date=replay_start_date,
                 end_date=effective_as_of,
                 initial_cash=target_cash,
                 max_positions=int(params.get("max_positions", 5)),
@@ -856,6 +871,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             "mode": timeline.get("mode", "daily"),
             "start_date": timeline.get("start_date"),
             "end_date": timeline.get("end_date"),
+            "replay_days": _FRONTEND_ACCOUNT_REPLAY_DAYS,
             "trade_count": len(trades),
             "closed_trades": timeline.get("closed_trades", 0),
             "return_pct": timeline.get("return_pct", 0),
