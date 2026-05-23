@@ -42,7 +42,10 @@ usage() {
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
   qt auth                    账号密码管理
+  qt debug-status            查看临时调试通道状态
   qt debug-key               生成临时调试密钥和 .env 配置
+  qt debug-on                生成临时调试密钥并写入 .env
+  qt debug-off               关闭临时调试通道
   qt data-audit [--fix-permissions] 服务器数据安全体检
   qt architecture            项目架构体检
   qt clear-sample            清理样例持仓
@@ -115,6 +118,21 @@ run_auth_tool() {
 cmd_debug_key() {
   require_project_root
   run_python_tool "生成临时调试密钥" "$ROOT_DIR/scripts/generate_debug_key.py" "$@"
+}
+
+cmd_debug_status() {
+  require_project_root
+  run_python_tool "查看临时调试通道状态" "$ROOT_DIR/scripts/generate_debug_key.py" --status
+}
+
+cmd_debug_on() {
+  require_project_root
+  run_python_tool "生成并写入临时调试密钥" "$ROOT_DIR/scripts/generate_debug_key.py" --write-env
+}
+
+cmd_debug_off() {
+  require_project_root
+  run_python_tool "关闭临时调试通道" "$ROOT_DIR/scripts/generate_debug_key.py" --disable
 }
 
 run_python_tool() {
@@ -399,7 +417,10 @@ cmd_panel() {
 16) 部署环境检查
 17) 查看后台入口路径
 18) 修复 Nginx 上传和超时限制
-19) 生成临时调试密钥
+19) 查看调试通道状态
+20) 生成临时调试密钥（只显示，不写入）
+21) 生成并写入调试密钥
+22) 关闭临时调试通道
 0) 退出
 
 EOF
@@ -432,7 +453,10 @@ EOF
       16) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
       17) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
       18) panel_run "修复 Nginx 上传和超时限制" bash "$SCRIPT_DIR/qt.sh" nginx-upload ;;
-      19) panel_run "生成临时调试密钥" bash "$SCRIPT_DIR/qt.sh" debug-key ;;
+      19) panel_run "查看调试通道状态" bash "$SCRIPT_DIR/qt.sh" debug-status ;;
+      20) panel_run "生成临时调试密钥" bash "$SCRIPT_DIR/qt.sh" debug-key ;;
+      21) panel_run "生成并写入调试密钥" bash "$SCRIPT_DIR/qt.sh" debug-on ;;
+      22) panel_run "关闭临时调试通道" bash "$SCRIPT_DIR/qt.sh" debug-off ;;
       0|q|Q)
         echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
@@ -514,8 +538,17 @@ case "$cmd" in
   auth|user|users|password|passwd)
     cmd_auth
     ;;
+  debug-status|debug-info|diagnostic-status)
+    cmd_debug_status
+    ;;
   debug-key|debug-token|diagnostic-key)
     cmd_debug_key "${@:2}"
+    ;;
+  debug-on|debug-enable|enable-debug)
+    cmd_debug_on
+    ;;
+  debug-off|debug-disable|disable-debug)
+    cmd_debug_off
     ;;
   data-audit|audit-data|server-data-audit)
     require_project_root

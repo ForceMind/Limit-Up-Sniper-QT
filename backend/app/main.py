@@ -650,10 +650,10 @@ def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, An
 def _active_strategy_model() -> Dict[str, Any]:
     return {
         "id": "active",
-        "name": "系统当前参数",
+        "name": "系统运行策略（当前参数）",
         "source": "runtime",
         "reusable": True,
-        "description": "后台当前运行参数，不是某个前台账号选择的回测模型。",
+        "description": "后台任务正在使用的全局参数，会驱动系统运行账户；策略库模型是训练/回测后保存的参数组合。",
         "params": quant_engine.strategy_params(),
     }
 
@@ -668,7 +668,7 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
     base_params = quant_engine.strategy_params()
     presets = capital_presets(base_params)
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
-    payload["active"]["name"] = "系统当前参数"
+    payload["active"]["name"] = "系统运行策略（当前参数）"
     payload["capital_presets"] = presets
     payload["capital_bands"] = CAPITAL_BANDS
     payload["count"] = int(safe_float(payload.get("count"), 0)) + len(presets)
@@ -993,7 +993,7 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
     next_account["total_pnl"] = round(safe_float(next_account.get("total_asset"), target_cash) - target_cash, 2)
     next_account["return_pct"] = round(safe_float(next_account.get("total_pnl"), 0) / target_cash * 100, 3) if target_cash > 0 else 0.0
     next_account["follow_model_id"] = str(profile.get("strategy_model_id") or "active")
-    next_account["follow_model_name"] = str((context.get("followed_model") or {}).get("name") or "系统当前参数")
+    next_account["follow_model_name"] = str((context.get("followed_model") or {}).get("name") or "系统运行策略（当前参数）")
     next_payload["account"] = next_account
     next_payload["positions"] = [_scale_row(item, scale, position_money_keys) for item in account_payload.get("positions", []) if isinstance(item, dict)]
     next_payload["today_deals"] = [_scale_row(item, scale, deal_money_keys) for item in account_payload.get("today_deals", []) if isinstance(item, dict)]
@@ -1230,6 +1230,18 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "ai_failures": ai_failures(limit=40),
         "ai_records": ai_records_feed(limit=80),
     }
+
+
+@app.get("/api/admin/trading_account")
+def admin_trading_account(
+    as_of: Optional[str] = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=2000),
+):
+    payload = quant_engine.trading_account(as_of=as_of, limit=limit)
+    payload["strategy_account_source"] = "runtime_state"
+    payload["strategy_scope"] = "system_runtime"
+    payload["strategy_name"] = "系统运行账户（系统运行策略）"
+    return payload
 
 
 @app.websocket("/ws/admin/live")

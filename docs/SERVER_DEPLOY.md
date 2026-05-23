@@ -162,7 +162,10 @@ qt scan
 qt data-audit
 qt data-audit --fix-permissions
 qt architecture
+qt debug-status
 qt debug-key
+qt debug-on
+qt debug-off
 ```
 
 直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、停止、日志、备份、恢复、安全扫描、服务器数据安全体检、项目架构体检和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
@@ -183,7 +186,7 @@ sudo ln -sf /opt/qt/scripts/qt.sh /usr/local/bin/qt
 qt debug-key
 ```
 
-把脚本输出的 `QT_DEBUG_API_ENABLED=true`、`QT_DEBUG_API_KEY_SHA256=...`、`QT_DEBUG_API_ALLOW_WRITE=false`、`QT_DEBUG_API_SUBJECT=codex-debug` 写入服务器 `.env`，然后重启：
+把脚本输出的 `QT_DEBUG_API_ENABLED=true`、`QT_DEBUG_API_KEY_SHA256=...`、`QT_DEBUG_API_ALLOW_WRITE=false`、`QT_DEBUG_API_SUBJECT=codex-debug` 写入服务器 `.env`，然后重启。也可以直接执行 `qt debug-on` 自动写入 `.env`，但原始密钥仍只会在终端显示一次。
 
 ```bash
 qt restart
@@ -195,7 +198,18 @@ qt restart
 curl -H "X-QT-Debug-Key: 原始密钥" https://qt.zhangting.ai/api/debug/status
 ```
 
-默认 `QT_DEBUG_API_ALLOW_WRITE=false`，只能访问 `GET`/`HEAD`/`OPTIONS` 接口。确实需要测试写接口时，临时改成 `true`，测试完成后立刻改回 `false`。完全关闭调试通道时，把 `QT_DEBUG_API_ENABLED=false` 写回 `.env` 并执行 `qt restart`。
+默认 `QT_DEBUG_API_ALLOW_WRITE=false`，只能访问 `GET`/`HEAD`/`OPTIONS` 接口。确实需要测试写接口时，临时改成 `true`，测试完成后立刻改回 `false`。完全关闭调试通道时执行：
+
+```bash
+qt debug-off
+qt restart
+```
+
+查看当前开关状态：
+
+```bash
+qt debug-status
+```
 
 ## 备份与恢复
 

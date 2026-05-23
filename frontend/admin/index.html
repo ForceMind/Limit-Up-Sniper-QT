@@ -357,6 +357,13 @@
         </section>
 
         <section v-if="activeTab === 'trading'" class="space-y-4">
+          <div class="panel px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div class="font-semibold">{{ tradingAccount.strategy_name || '系统运行账户（系统运行策略）' }}</div>
+              <div class="text-xs text-neutral-500 mt-1">系统运行策略是后台任务当前使用的全局参数；策略库模型是训练/回测后保存的参数组合，每个模型的独立交割单请到“策略库”点击“查看交割单”。</div>
+            </div>
+            <button @click="loadTradingAccount(false)" :disabled="tradingLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ tradingLoading ? '加载中' : '刷新交易账户' }}</button>
+          </div>
           <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
             <div class="metric"><div class="text-xs text-neutral-500">总资产</div><div class="mt-2 text-lg font-semibold">{{ money(account.total_asset) }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">现金</div><div class="mt-2 text-lg font-semibold">{{ money(account.cash) }}</div></div>
@@ -969,6 +976,16 @@
                 </div>
                 <button @click="activeTab = 'users'" class="w-full h-9 bg-neutral-900 text-white text-sm">打开用户管理</button>
               </div>
+              <div class="border border-neutral-200 p-3 text-sm space-y-2">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="font-semibold">临时调试通道</span>
+                  <span class="text-xs font-semibold" :class="debugConfig.enabled ? 'text-red-700' : 'text-emerald-700'">{{ debugConfig.enabled ? '已开启' : '已关闭' }}</span>
+                </div>
+                <div class="text-xs text-neutral-500">
+                  密钥 {{ debugConfig.key_configured ? '已配置' : '未配置' }} · 写接口 {{ debugConfig.write_allowed ? '允许' : '禁止' }} · 请求头 {{ debugConfig.header || 'x-qt-debug-key' }}
+                </div>
+                <div class="text-xs text-neutral-500">终端面板：`qt` 里选择 19-22；命令：qt debug-status / qt debug-on / qt debug-off。</div>
+              </div>
               <div class="text-xs text-neutral-500">前台用户可自行注册；后台在“用户管理”里查看 IP、浏览器、资金、跟随策略，并可重置密码、封禁或删除账号。</div>
             </div>
 
@@ -1494,6 +1511,7 @@
           loading: false,
           timelineLoading: false,
           backtestLoading: false,
+          tradingLoading: false,
           systemStarting: false,
           newsFetching: false,
           aiAnalyzing: false,
@@ -1637,6 +1655,7 @@
         biyingConfig() { return (this.configStatus.biying || {}); },
         emailConfig() { return (this.configStatus.email || {}); },
         securityConfig() { return (this.configStatus.security || {}); },
+        debugConfig() { return this.securityConfig.debug_api || {}; },
         data() { return this.dashboard.data || {}; },
         newsCount() { return this.data.news_count || ((this.jobStatus.news_fetcher || {}).history_count) || 0; },
         aiRecordCount() { return this.data.ai_record_count || ((this.jobStatus.ai_analyzer || {}).records) || 0; },
@@ -1732,6 +1751,9 @@
             if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
             if (!this.activeTimeline.start_date) this.loadTimeline(false);
             if (!this.backtestResult.status) this.loadBacktest(false);
+          }
+          if (value === 'trading') {
+            this.loadTradingAccount(true);
           }
           if (value === 'data' && !this.databaseTables.length) {
             this.fetchDatabaseOverview(false);
@@ -1977,6 +1999,7 @@
           this.clientError = '';
           try {
             await this.loadAdminSnapshot(quiet, true);
+            if (this.activeTab === 'trading') await this.loadTradingAccount(true);
             return;
           } catch (err) {
             this.clientError = String(err.message || err);
@@ -2027,8 +2050,22 @@
         async loadDetailData(quiet = true) {
           try {
             await this.loadAdminSnapshot(quiet, true);
+            if (this.activeTab === 'trading') await this.loadTradingAccount(true);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
+          }
+        },
+        async loadTradingAccount(quiet = true) {
+          if (!quiet) this.clientError = '';
+          this.tradingLoading = true;
+          try {
+            const q = new URLSearchParams({ limit: '1000' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            this.tradingAccount = await this.api(`/api/admin/trading_account?${q.toString()}`);
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          } finally {
+            this.tradingLoading = false;
           }
         },
         async fetchLogs() {

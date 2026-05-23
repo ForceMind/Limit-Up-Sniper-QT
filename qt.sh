@@ -43,7 +43,10 @@ usage() {
   backup | bak                备份 backend/data
   restore <tar.gz>            从备份恢复 backend/data
   auth                        账号密码管理
+  debug-status                查看临时调试通道状态
   debug-key                   生成临时调试密钥和 .env 配置
+  debug-on                    生成临时调试密钥并写入 .env
+  debug-off                   关闭临时调试通道
   clear-sample | sample       清理样例持仓
   fill-kline | kline          补齐有新闻事件股票的日K数据
   sync-lhb   | lhb            拉取龙虎榜席位数据

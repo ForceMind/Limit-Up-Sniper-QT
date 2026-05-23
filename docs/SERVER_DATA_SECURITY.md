@@ -85,6 +85,8 @@ chmod 600 backend/data/config.json backend/data/auth.json backend/data/ws_token_
 
 ```bash
 qt debug-key
+# 或自动写入 .env：
+qt debug-on
 ```
 
 服务器 `.env` 只保存 `QT_DEBUG_API_KEY_SHA256`，不要保存或提交原始密钥。默认配置应保持：
@@ -94,7 +96,7 @@ QT_DEBUG_API_ENABLED=false
 QT_DEBUG_API_ALLOW_WRITE=false
 ```
 
-需要调试时短期开启 `QT_DEBUG_API_ENABLED=true` 并重启服务，请求通过 `X-QT-Debug-Key` 请求头认证；调试完成后改回 `false` 并再次重启。只有确实要排查写接口时才临时设置 `QT_DEBUG_API_ALLOW_WRITE=true`，并在完成后立刻关闭。
+需要调试时短期开启 `QT_DEBUG_API_ENABLED=true` 并重启服务，请求通过 `X-QT-Debug-Key` 请求头认证；可用 `qt debug-status` 查看当前状态，调试完成后执行 `qt debug-off && qt restart`。只有确实要排查写接口时才临时设置 `QT_DEBUG_API_ALLOW_WRITE=true`，并在完成后立刻关闭。
 
 ### 备份和迁移包
 
