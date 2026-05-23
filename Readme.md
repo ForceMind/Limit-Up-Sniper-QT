@@ -206,6 +206,7 @@ http://127.0.0.1:8000/docs
 ```bash
 python scripts/architecture_report.py
 python -m py_compile backend/app/quant/engine.py backend/app/quant/jobs.py backend/app/main.py
+python -m pytest backend/tests/test_database_inspector.py
 python -m pytest backend/tests/test_quant_engine.py
 python scripts/security_scan.py
 git diff --check

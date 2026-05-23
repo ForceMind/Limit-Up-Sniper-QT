@@ -12,9 +12,9 @@
 |---|---:|---|
 | `backend/app/quant/engine.py` | 4249 | 量化核心过于集中，已经混合数据读取、事件识别、因子、评分、回放、账户和策略参数 |
 | `frontend/admin/index.html` | 2889 | 后台单文件过大，用户管理、数据管理、任务日志、策略模型和配置混在一个页面 |
-| `backend/app/main.py` | 1994 | FastAPI 入口承担了 88 个路由装饰器、认证中间件、数据导入任务、WebSocket 和静态托管 |
-| `frontend/index.html` | 1641 | 前台终端把登录、概览、账户、策略、新闻和移动端状态放在一个文件里 |
-| `scripts/migrate_data_to_sqlite.py` | 1181 | 迁移脚本可用，但数据源解析、去重、入库和校验混在一起 |
+| `backend/app/main.py` | 1872 | FastAPI 入口承担了 88 个路由装饰器、认证中间件、数据导入任务、WebSocket 和静态托管 |
+| `frontend/index.html` | 1658 | 前台终端把登录、概览、账户、策略、新闻和移动端状态放在一个文件里 |
+| `scripts/migrate_data_to_sqlite.py` | 1224 | 迁移脚本可用，但数据源解析、去重、入库和校验混在一起 |
 | `backend/app/quant/evolution.py` | 960 | 进化、回测结果保存、模型排序和状态文件兼容逻辑开始变重 |
 | `backend/app/quant/jobs.py` | 861 | 调度、日志、内存保护和任务执行都在一个模块里 |
 | `scripts/common.sh` | 684 | 部署公共脚本已经包含 Nginx、systemd、SQLite、接口验证和中文输出 |
@@ -70,6 +70,11 @@ backend/app/
 ```
 
 拆分顺序必须先 API router，再 service，再 repository。这样每一步都能用现有页面和接口验证，不需要一次性大改。
+
+当前已开始的低风险拆分：
+
+- `backend/app/quant/database_inspector.py`：后台数据库查看逻辑已从 `main.py` 移出，只保留只读路由入口。
+- `backend/app/quant/news_repository.py`：前台首屏和新闻列表改为 SQLite 小查询，避免公开页面触发完整量化引擎事件构建。
 
 ## 1. 当前问题判断
 

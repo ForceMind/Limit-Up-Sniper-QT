@@ -5,7 +5,6 @@ import json
 import math
 import os
 import shutil
-import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -32,12 +31,15 @@ from app.quant.data_transfer import (
     import_data_package,
     validate_data_package,
 )
-from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, QUANT_DB_FILE, quant_engine, safe_float
+from app.quant.database_inspector import database_overview, database_table_rows
+from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine, safe_float
 from app.quant.evolution import strategy_evolution
 from app.quant.lhb_sync import lhb_status
 from app.quant.jobs import job_manager
 from app.quant.monitoring import ai_failures, ai_records_feed, ai_usage_summary, data_coverage
 from app.quant.news_fetcher import news_fetcher
+from app.quant.news_repository import latest_news_time as latest_sqlite_news_time
+from app.quant.news_repository import lightweight_news_feed
 from app.quant.notifier import trade_notifier
 from app.quant.security import (
     admin_create_frontend_user,
@@ -303,151 +305,17 @@ def _log_key(item: Dict[str, Any]) -> str:
     )
 
 
-def _file_meta(path: Path) -> Dict[str, Any]:
+def _latest_news_time() -> str:
     try:
-        stat = path.stat()
-        modified_at = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
-        return {
-            "name": path.name,
-            "path": str(path),
-            "exists": True,
-            "size_bytes": stat.st_size,
-            "modified_at": modified_at,
-        }
-    except OSError:
-        return {"name": path.name, "path": str(path), "exists": False, "size_bytes": 0, "modified_at": ""}
-
-
-def _quote_sqlite_identifier(name: str) -> str:
-    return '"' + str(name).replace('"', '""') + '"'
-
-
-def _sqlite_user_tables(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        """
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-        ORDER BY name
-        """
-    ).fetchall()
-    return [str(row["name"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
-
-
-def _sqlite_columns(conn: sqlite3.Connection, table_name: str) -> list[Dict[str, Any]]:
-    rows = conn.execute(f"PRAGMA table_info({_quote_sqlite_identifier(table_name)})").fetchall()
-    return [
-        {
-            "name": str(row["name"]),
-            "type": str(row["type"] or ""),
-            "notnull": bool(row["notnull"]),
-            "primary_key": bool(row["pk"]),
-        }
-        for row in rows
-    ]
-
-
-def _sqlite_count(conn: sqlite3.Connection, table_name: str) -> int:
+        latest = latest_sqlite_news_time()
+        if latest:
+            return latest
+    except Exception:
+        pass
     try:
-        row = conn.execute(f"SELECT COUNT(*) AS count FROM {_quote_sqlite_identifier(table_name)}").fetchone()
-        return int(row["count"] if isinstance(row, sqlite3.Row) else row[0])
-    except sqlite3.Error:
-        return 0
-
-
-def _db_cell(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return f"<bytes {len(value)}>"
-    if value is None or isinstance(value, (int, float, bool)):
-        return value
-    text = str(value)
-    if len(text) > 1200:
-        return text[:1200] + "...（已截断）"
-    return text
-
-
-def _strategy_state_files() -> list[Dict[str, Any]]:
-    files: list[Dict[str, Any]] = []
-    for path in sorted(DATA_DIR.glob("strategy_evolution_state*.json")):
-        meta = _file_meta(path)
-        meta["role"] = "current" if path.name == "strategy_evolution_state.json" else "archived"
-        files.append(meta)
-    return files
-
-
-def _database_overview() -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "status": "ok",
-        "database": _file_meta(QUANT_DB_FILE),
-        "data_dir": str(DATA_DIR),
-        "state_files": _strategy_state_files(),
-        "tables": [],
-        "table_count": 0,
-        "total_rows": 0,
-    }
-    if not QUANT_DB_FILE.exists():
-        payload["status"] = "missing"
-        payload["message"] = "SQLite 数据库不存在，请先运行 qt migrate 或等待服务器自动迁移"
-        return payload
-    conn = sqlite3.connect(QUANT_DB_FILE)
-    conn.row_factory = sqlite3.Row
-    try:
-        tables = []
-        for name in _sqlite_user_tables(conn):
-            columns = _sqlite_columns(conn, name)
-            row_count = _sqlite_count(conn, name)
-            tables.append(
-                {
-                    "name": name,
-                    "row_count": row_count,
-                    "column_count": len(columns),
-                    "columns": [item["name"] for item in columns],
-                }
-            )
-        payload["tables"] = tables
-        payload["table_count"] = len(tables)
-        payload["total_rows"] = sum(int(item.get("row_count") or 0) for item in tables)
-        return payload
-    finally:
-        conn.close()
-
-
-def _database_table_rows(table_name: str, limit: int, offset: int) -> Dict[str, Any]:
-    table_name = str(table_name or "").strip()
-    if not table_name:
-        raise HTTPException(status_code=400, detail="table_name is required")
-    if not QUANT_DB_FILE.exists():
-        raise HTTPException(status_code=404, detail="SQLite database not found")
-    conn = sqlite3.connect(QUANT_DB_FILE)
-    conn.row_factory = sqlite3.Row
-    try:
-        tables = set(_sqlite_user_tables(conn))
-        if table_name not in tables:
-            raise HTTPException(status_code=404, detail=f"table not found: {table_name}")
-        clean_limit = max(1, min(int(limit or 50), 200))
-        clean_offset = max(0, int(offset or 0))
-        columns = _sqlite_columns(conn, table_name)
-        column_names = [item["name"] for item in columns]
-        order_sql = ""
-        for candidate in ("updated_at", "generated_at", "finished_at", "created_at", "analyzed_at", "date", "ts", "timestamp", "id"):
-            if candidate in column_names:
-                order_sql = f" ORDER BY {_quote_sqlite_identifier(candidate)} DESC"
-                break
-        rows = conn.execute(
-            f"SELECT * FROM {_quote_sqlite_identifier(table_name)}{order_sql} LIMIT ? OFFSET ?",
-            (clean_limit, clean_offset),
-        ).fetchall()
-        return {
-            "status": "ok",
-            "table": table_name,
-            "columns": columns,
-            "rows": [{key: _db_cell(row[key]) for key in row.keys()} for row in rows],
-            "limit": clean_limit,
-            "offset": clean_offset,
-            "row_count": _sqlite_count(conn, table_name),
-        }
-    finally:
-        conn.close()
+        return news_fetcher.latest_history_time()
+    except Exception:
+        return ""
 
 
 def _git_ref() -> Dict[str, str]:
@@ -600,7 +468,7 @@ def api_update_config_runtime(payload: Dict[str, Any] = Body(default_factory=dic
 @app.get("/api/status")
 def status():
     now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
-    latest_news_time = news_fetcher.latest_history_time()
+    latest_news_time = _latest_news_time()
     data_date = latest_news_time[:10] if latest_news_time else quant_engine.latest_event_date()
     return {
         "status": "ok",
@@ -622,10 +490,7 @@ def status():
 
 def _light_status_payload(as_of: Optional[str] = None, jobs_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
-    try:
-        latest_news_time = news_fetcher.latest_history_time()
-    except Exception:
-        latest_news_time = ""
+    latest_news_time = _latest_news_time()
     data_date = str(as_of or "").strip() or (latest_news_time[:10] if latest_news_time else "")
     jobs = jobs_payload if isinstance(jobs_payload, dict) else {}
     return {
@@ -647,6 +512,12 @@ def _light_status_payload(as_of: Optional[str] = None, jobs_payload: Optional[Di
 
 
 def _safe_news_feed(**kwargs: Any) -> Dict[str, Any]:
+    try:
+        lightweight = lightweight_news_feed(**kwargs)
+        if isinstance(lightweight, dict):
+            return lightweight
+    except Exception as exc:
+        job_manager._append_log("warning", f"轻量新闻快照读取失败，回退完整引擎：{exc}", job="frontend_snapshot", stage="news_light")
     try:
         return quant_engine.news_feed(**kwargs)
     except Exception as exc:
@@ -1371,7 +1242,7 @@ def quant_news(
     keyword: Optional[str] = Query(default=None),
     code: Optional[str] = Query(default=None),
 ):
-    return quant_engine.news_feed(
+    return _safe_news_feed(
         as_of=as_of,
         limit=limit,
         fallback_latest=fallback_latest,
@@ -1611,7 +1482,7 @@ def admin_data_import_status(job_id: str):
 
 @app.get("/api/admin/database/tables")
 def admin_database_tables():
-    return _database_overview()
+    return database_overview()
 
 
 @app.get("/api/admin/database/table/{table_name}")
@@ -1620,7 +1491,14 @@ def admin_database_table(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    return _database_table_rows(table_name, limit=limit, offset=offset)
+    try:
+        return database_table_rows(table_name, limit=limit, offset=offset)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/admin/data/import")

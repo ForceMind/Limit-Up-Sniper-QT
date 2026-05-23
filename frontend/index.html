@@ -1487,11 +1487,28 @@
         loadVisibleDetails() {
           if (!this.isLoggedIn) return;
           const mobile = window.innerWidth <= 767;
-          window.setTimeout(() => {
+          window.setTimeout(async () => {
             if (!this.isLoggedIn) return;
-            if (!mobile || ['overview', 'positions', 'deals'].includes(this.mobileView)) this.loadMarketData(true);
-            if (!mobile || ['overview', 'buy'].includes(this.mobileView)) this.loadRecommendations(true);
-            if (!mobile || this.mobileView === 'buy') this.loadPlan(true);
+            const pause = () => new Promise(resolve => window.setTimeout(resolve, 220));
+            if (!mobile) {
+              if (!this.accountView.account) await this.loadMarketData(true);
+              await pause();
+              if (!this.recommendations.items) await this.loadRecommendations(true);
+              await pause();
+              if (!this.plan.as_of) await this.loadPlan(true);
+              return;
+            }
+            if (['overview', 'positions', 'deals'].includes(this.mobileView) && !this.accountView.account) {
+              await this.loadMarketData(true);
+              await pause();
+            }
+            if (['overview', 'buy'].includes(this.mobileView) && !this.recommendations.items) {
+              await this.loadRecommendations(true);
+              await pause();
+            }
+            if (this.mobileView === 'buy' && !this.plan.as_of) {
+              await this.loadPlan(true);
+            }
           }, 0);
         },
         async loadMarketData(quiet = false) {
