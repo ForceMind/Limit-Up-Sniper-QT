@@ -493,6 +493,31 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_code_date ON strategy_runtime_positions(code, as_of);
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_generated ON strategy_runtime_positions(generated_at);
 
+        CREATE TABLE IF NOT EXISTS strategy_runtime_settlements (
+            settlement_id TEXT PRIMARY KEY,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            start_date TEXT,
+            date TEXT,
+            mode TEXT,
+            buy_amount REAL,
+            sell_amount REAL,
+            commission REAL,
+            stamp_duty REAL,
+            transfer_fee REAL,
+            total_fee REAL,
+            net_amount REAL,
+            realized_pnl REAL,
+            deal_count INTEGER,
+            source TEXT,
+            generated_at TEXT,
+            initial_cash REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_model_date ON strategy_runtime_settlements(model_id, date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_generated ON strategy_runtime_settlements(generated_at);
+
         CREATE TABLE IF NOT EXISTS frontend_payload_cache (
             cache_key TEXT PRIMARY KEY,
             payload_type TEXT,

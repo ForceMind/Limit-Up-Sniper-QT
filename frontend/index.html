@@ -1342,10 +1342,10 @@
         },
         capitalBands() {
           return this.strategyModels.capital_bands || [
-            { id: 'capital_10000', name: '1万小资金策略', min_cash: 10000, max_cash: 19999.99 },
-            { id: 'capital_20000_50000', name: '2万-5万小资金策略', min_cash: 20000, max_cash: 49999.99 },
-            { id: 'capital_50000_100000', name: '5万-10万中小资金策略', min_cash: 50000, max_cash: 99999.99 },
-            { id: 'capital_100000_plus', name: '10万以上标准策略', min_cash: 100000, max_cash: 10000000 },
+            { id: 'capital_10000', name: '小资金策略', min_cash: 10000, max_cash: 19999.99 },
+            { id: 'capital_20000_50000', name: '短线稳健策略', min_cash: 20000, max_cash: 49999.99 },
+            { id: 'capital_50000_100000', name: '均衡轮动策略', min_cash: 50000, max_cash: 99999.99 },
+            { id: 'capital_100000_plus', name: '趋势多仓策略', min_cash: 100000, max_cash: 10000000 },
           ];
         },
         capitalFilter() {
@@ -1677,7 +1677,7 @@
           const bands = this.capitalBands;
           const band = bands.find(item => cash >= Number(item.min_cash || 0) && cash <= Number(item.max_cash || 10000000))
             || bands[bands.length - 1]
-            || { id: 'capital_10000', name: '1万小资金策略' };
+            || { id: 'capital_10000', name: '小资金策略' };
           const model = this.strategyItems.find(item => String(item.id) === String(band.id));
           return model || band;
         },

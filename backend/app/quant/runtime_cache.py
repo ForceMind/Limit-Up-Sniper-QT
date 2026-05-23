@@ -209,18 +209,32 @@ def runtime_cache_status() -> Dict[str, Any]:
             frontend_rows = _table_count(conn, "frontend_payload_cache")
             frontend_expired = _table_count(conn, "frontend_payload_cache", " WHERE expires_at < ?", (now,))
             account_rows = _table_count(conn, "strategy_runtime_snapshots")
+            daily_snapshot_rows = _table_count(
+                conn,
+                "strategy_runtime_snapshots",
+                " WHERE COALESCE(source, '') LIKE 'daily_runtime%'",
+            )
+            account_cache_rows = _table_count(
+                conn,
+                "strategy_runtime_snapshots",
+                " WHERE COALESCE(source, '') NOT LIKE 'daily_runtime%'",
+            )
             account_ttl = env_int("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400)
             account_cutoff = (datetime.now() - timedelta(seconds=account_ttl)).isoformat(timespec="seconds") if account_ttl > 0 else now
             account_expired = _table_count(
                 conn,
                 "strategy_runtime_snapshots",
-                " WHERE generated_at < ?",
+                " WHERE generated_at < ? AND COALESCE(source, '') NOT LIKE 'daily_runtime%'",
                 (account_cutoff,),
-            ) if account_ttl > 0 else account_rows
+            ) if account_ttl > 0 else account_cache_rows
+            signal_rows = _table_count(conn, "strategy_daily_signals")
+            position_rows = _table_count(conn, "strategy_runtime_positions")
+            trade_rows = _table_count(conn, "strategy_runtime_trades")
+            settlement_rows = _table_count(conn, "strategy_runtime_settlements")
             payload = {
                 "status": "ok",
                 "database": str(QUANT_DB_FILE),
-                "total_rows": frontend_rows + account_rows,
+                "total_rows": frontend_rows + account_rows + signal_rows + position_rows + trade_rows + settlement_rows,
                 "expired_rows": frontend_expired + account_expired,
                 "ttl_seconds": {
                     "recommendations": env_int("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900, minimum=0, maximum=86400),
@@ -236,9 +250,31 @@ def runtime_cache_status() -> Dict[str, Any]:
                     },
                     "strategy_runtime_snapshots": {
                         "row_count": account_rows,
+                        "cache_rows": account_cache_rows,
+                        "daily_runtime_rows": daily_snapshot_rows,
                         "expired_rows": account_expired,
                         "latest_generated_at": _table_max(conn, "strategy_runtime_snapshots", "generated_at"),
                         "by_source": _group_counts(conn, "strategy_runtime_snapshots", "source"),
+                    },
+                    "strategy_daily_signals": {
+                        "row_count": signal_rows,
+                        "latest_generated_at": _table_max(conn, "strategy_daily_signals", "generated_at"),
+                        "by_source": _group_counts(conn, "strategy_daily_signals", "source"),
+                    },
+                    "strategy_runtime_positions": {
+                        "row_count": position_rows,
+                        "latest_generated_at": _table_max(conn, "strategy_runtime_positions", "generated_at"),
+                        "by_source": _group_counts(conn, "strategy_runtime_positions", "source"),
+                    },
+                    "strategy_runtime_trades": {
+                        "row_count": trade_rows,
+                        "latest_generated_at": _table_max(conn, "strategy_runtime_trades", "generated_at"),
+                        "by_source": _group_counts(conn, "strategy_runtime_trades", "source"),
+                    },
+                    "strategy_runtime_settlements": {
+                        "row_count": settlement_rows,
+                        "latest_generated_at": _table_max(conn, "strategy_runtime_settlements", "generated_at"),
+                        "by_source": _group_counts(conn, "strategy_runtime_settlements", "source"),
                     },
                 },
             }
@@ -269,15 +305,18 @@ def clear_runtime_cache(scope: str = "expired") -> Dict[str, Any]:
                     deleted["frontend_payload_cache"] = int(cur.rowcount or 0)
             if _table_exists(conn, "strategy_runtime_snapshots"):
                 if scope in {"all", "account"}:
-                    cur = conn.execute("DELETE FROM strategy_runtime_snapshots")
+                    cur = conn.execute("DELETE FROM strategy_runtime_snapshots WHERE COALESCE(source, '') NOT LIKE 'daily_runtime%'")
                     deleted["strategy_runtime_snapshots"] = int(cur.rowcount or 0)
                 elif scope == "expired":
                     account_ttl = env_int("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400)
                     if account_ttl <= 0:
-                        cur = conn.execute("DELETE FROM strategy_runtime_snapshots")
+                        cur = conn.execute("DELETE FROM strategy_runtime_snapshots WHERE COALESCE(source, '') NOT LIKE 'daily_runtime%'")
                     else:
                         cutoff = (now - timedelta(seconds=account_ttl)).isoformat(timespec="seconds")
-                        cur = conn.execute("DELETE FROM strategy_runtime_snapshots WHERE generated_at < ?", (cutoff,))
+                        cur = conn.execute(
+                            "DELETE FROM strategy_runtime_snapshots WHERE generated_at < ? AND COALESCE(source, '') NOT LIKE 'daily_runtime%'",
+                            (cutoff,),
+                        )
                     deleted["strategy_runtime_snapshots"] = int(cur.rowcount or 0)
             conn.commit()
         finally:

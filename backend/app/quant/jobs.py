@@ -377,6 +377,11 @@ class QuantJobManager:
         self._append_log("info", f"{_job_label(name)}已恢复调度", job=name, stage="resume")
         return {"status": "ok", "job": name, "paused": False}
 
+    def is_running(self, name: str) -> bool:
+        name = str(name or "").strip()
+        with self._lock:
+            return bool(self._running.get(name))
+
     def run_job(self, name: str, fn: Callable[[], Dict[str, Any]], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = payload or {}
         if self.is_paused(name):
@@ -400,13 +405,70 @@ class QuantJobManager:
             with self._lock:
                 self._running[name] = False
 
-    def run_news_fetch(self, hours: int = 12, pages: int = 5, page_size: int = 20) -> Dict[str, Any]:
+    def run_job_background(
+        self,
+        name: str,
+        fn: Callable[[], Dict[str, Any]],
+        payload: Optional[Dict[str, Any]] = None,
+        message: str = "",
+    ) -> Dict[str, Any]:
+        name = str(name or "").strip()
+        payload = payload or {}
+        if self.is_paused(name):
+            paused_message = f"{_job_label(name)}已暂停，跳过本次运行"
+            self._append_log("warning", paused_message, job=name, stage="paused", payload=payload)
+            return {"status": "paused", "job": name, "background": True, "message": paused_message}
+        with self._lock:
+            if self._running.get(name):
+                running_message = f"{_job_label(name)}正在运行，已跳过重复请求"
+                self._append_log("warning", running_message, job=name, stage="skip", payload=payload)
+                return {"status": "running", "job": name, "background": True, "message": running_message}
+            self._running[name] = True
+        started = time.time()
+        progress_message = str(message or f"{_job_label(name)}已转入后台运行").strip()
+        self._record_job_start(name, payload)
+        self.update_progress(name, 1, progress_message, {"background": True})
+
+        def worker() -> None:
+            try:
+                result = fn()
+                if not isinstance(result, dict):
+                    result = {"status": "ok", "result": result}
+                self._record_job_finish(name, started, result)
+            except Exception as exc:
+                self._record_job_finish(name, started, {}, error=str(exc))
+            finally:
+                with self._lock:
+                    self._running[name] = False
+
+        threading.Thread(target=worker, name=f"qt-{name}", daemon=True).start()
+        return {
+            "status": "running",
+            "job": name,
+            "background": True,
+            "progress_pct": 1,
+            "message": progress_message,
+        }
+
+    def run_news_fetch(
+        self,
+        hours: int = 12,
+        pages: int = 5,
+        page_size: int = 20,
+        refresh_events: bool = False,
+        background: bool = False,
+    ) -> Dict[str, Any]:
         payload = {"hours": hours, "pages": pages, "page_size": page_size}
-        return self.run_job(
-            "news_fetch",
-            lambda: news_fetcher.run(hours=hours, pages=pages, page_size=page_size),
-            payload=payload,
-        )
+
+        def execute() -> Dict[str, Any]:
+            result = news_fetcher.run(hours=hours, pages=pages, page_size=page_size)
+            if refresh_events and result.get("status") == "ok":
+                quant_engine.events(force=True)
+            return result
+
+        if background:
+            return self.run_job_background("news_fetch", execute, payload=payload, message="新闻抓取已转入后台运行")
+        return self.run_job("news_fetch", execute, payload=payload)
 
     def run_market_sync(
         self,
@@ -415,6 +477,7 @@ class QuantJobManager:
         max_codes: int = 80,
         force: bool = False,
         include_latest: bool = True,
+        background: bool = False,
     ) -> Dict[str, Any]:
         date = str(date or _now_cn().strftime("%Y-%m-%d")).strip()
         source = str(source or "recommendations").strip() or "recommendations"
@@ -428,34 +491,39 @@ class QuantJobManager:
             "include_latest": bool(include_latest),
             "codes_count": len(explicit_codes.split(",")) if explicit_codes else 0,
         }
-        return self.run_job(
-            "market_sync",
-            lambda: biying_minute_sync.sync_intraday(
+
+        def execute() -> Dict[str, Any]:
+            return biying_minute_sync.sync_intraday(
                 date=date,
                 source="events" if explicit_codes else source,
                 max_codes=max_codes,
                 codes=explicit_codes,
                 force=force,
                 include_latest=include_latest,
-            ),
-            payload=payload,
-        )
+            )
+
+        if background:
+            return self.run_job_background("market_sync", execute, payload=payload, message="行情同步已转入后台运行")
+        return self.run_job("market_sync", execute, payload=payload)
 
     def run_ai_analysis(
         self,
         as_of: Optional[str] = None,
         max_items: int = 8,
         batch_size: int = 4,
+        background: bool = False,
     ) -> Dict[str, Any]:
         as_of = str(as_of or _now_cn().strftime("%Y-%m-%d")).strip()
         max_items = max(1, min(int(max_items or 8), 50))
         batch_size = max(1, min(int(batch_size or 4), 10))
         payload = {"as_of": as_of, "max_items": max_items, "batch_size": batch_size}
-        return self.run_job(
-            "ai_analysis",
-            lambda: ai_analyzer.run(as_of=as_of, max_items=max_items, batch_size=batch_size),
-            payload=payload,
-        )
+
+        def execute() -> Dict[str, Any]:
+            return ai_analyzer.run(as_of=as_of, max_items=max_items, batch_size=batch_size)
+
+        if background:
+            return self.run_job_background("ai_analysis", execute, payload=payload, message="AI 分析已转入后台运行")
+        return self.run_job("ai_analysis", execute, payload=payload)
 
     def _default_backfill_start_date(self) -> str:
         return str(os.getenv("DATA_BACKFILL_START_DATE") or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
@@ -466,22 +534,25 @@ class QuantJobManager:
         end_date: Optional[str] = None,
         max_codes: int = 300,
         force: bool = False,
+        background: bool = False,
     ) -> Dict[str, Any]:
         start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         max_codes = max(1, min(int(max_codes or 300), 2000))
         payload = {"start_date": start_date, "end_date": end_date, "max_codes": max_codes, "force": bool(force)}
-        return self.run_job(
-            "kline_fill",
-            lambda: quant_engine.ensure_daily_kline_for_events(
+
+        def execute() -> Dict[str, Any]:
+            return quant_engine.ensure_daily_kline_for_events(
                 start_date=start_date,
                 end_date=end_date,
                 hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
                 max_codes=max_codes,
                 force=force,
-            ),
-            payload=payload,
-        )
+            )
+
+        if background:
+            return self.run_job_background("kline_fill", execute, payload=payload, message="日K补齐已转入后台运行")
+        return self.run_job("kline_fill", execute, payload=payload)
 
     def run_lhb_sync(
         self,
@@ -489,23 +560,30 @@ class QuantJobManager:
         end_date: Optional[str] = None,
         max_stock_days: int = 300,
         force: bool = False,
+        refresh_events: bool = False,
+        background: bool = False,
     ) -> Dict[str, Any]:
         start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
         max_stock_days = max(1, min(int(max_stock_days or 300), 2000))
         payload = {"start_date": start_date, "end_date": end_date, "max_stock_days": max_stock_days, "force": bool(force)}
-        return self.run_job(
-            "lhb_sync",
-            lambda: sync_lhb(
+
+        def execute() -> Dict[str, Any]:
+            result = sync_lhb(
                 start_date=start_date,
                 end_date=end_date,
                 max_stock_days=max_stock_days,
                 force=force,
-            ),
-            payload=payload,
-        )
+            )
+            if refresh_events and result.get("status") == "ok":
+                quant_engine.events(force=True)
+            return result
 
-    def run_trade_cycle(self, date: Optional[str] = None, notify: bool = True) -> Dict[str, Any]:
+        if background:
+            return self.run_job_background("lhb_sync", execute, payload=payload, message="龙虎榜同步已转入后台运行")
+        return self.run_job("lhb_sync", execute, payload=payload)
+
+    def run_trade_cycle(self, date: Optional[str] = None, notify: bool = True, background: bool = False) -> Dict[str, Any]:
         date = str(date or _now_cn().strftime("%Y-%m-%d")).strip()
         payload = {"date": date, "notify": bool(notify)}
 
@@ -530,6 +608,8 @@ class QuantJobManager:
                 "replay": replay.get("timeline", {}),
             }
 
+        if background:
+            return self.run_job_background("trade_cycle", execute, payload=payload, message="交易循环已转入后台运行")
         return self.run_job("trade_cycle", execute, payload=payload)
 
     def run_strategy_replay(
@@ -537,6 +617,7 @@ class QuantJobManager:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         mode: str = "intraday",
+        background: bool = False,
     ) -> Dict[str, Any]:
         start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
@@ -559,6 +640,8 @@ class QuantJobManager:
                 "signal_count": 0,
                 "trade_count": 0,
                 "position_count": 0,
+                "settlement_count": 0,
+                "snapshot_count": 0,
                 "day_count": 0,
                 "closed_trades": 0,
             }
@@ -621,6 +704,8 @@ class QuantJobManager:
                 aggregate["signal_count"] += int(persisted.get("signal_count", 0)) if isinstance(persisted, dict) else 0
                 aggregate["trade_count"] += int(persisted.get("trade_count", 0)) if isinstance(persisted, dict) else 0
                 aggregate["position_count"] += int(persisted.get("position_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["settlement_count"] += int(persisted.get("settlement_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["snapshot_count"] += int(persisted.get("snapshot_count", 0)) if isinstance(persisted, dict) else 0
                 aggregate["day_count"] += len(days)
                 aggregate["closed_trades"] += int(result.get("closed_trades", 0) or 0)
             result = first_result or {}
@@ -647,6 +732,8 @@ class QuantJobManager:
                 "runtime_tables": aggregate,
             }
 
+        if background:
+            return self.run_job_background("strategy_replay", execute, payload=payload, message="策略复盘已转入后台运行")
         return self.run_job("strategy_replay", execute, payload=payload)
 
     def run_strategy_evolution(

@@ -22,15 +22,18 @@
 7. 前台不能出现后台初始化或管理入口；未登录只能看概览和新闻，登录后才能看账户、策略、持仓、成交等。
 8. 后台必须可管理用户、数据、缓存、任务、日志、调试通道和数据库。
 
-当前已完成到 v0.2.23：
+当前已完成到 v0.2.27：
 - 前台用户 profile 有 simulated_cash、strategy_model_id、follow_started_at、follow_start_date。
 - 切换策略会重置跟随开始时间。
 - 前台账户按 follow_start_date 裁剪，不继承旧持仓。
 - 交易账户使用 strategy_runtime_snapshots SQLite 缓存。
 - 策略复盘任务会把每个策略的每日信号、成交和持仓写入 strategy_daily_signals、strategy_runtime_trades、strategy_runtime_positions。
+- 策略复盘任务会把每个策略的每日账户快照和清算写入 strategy_runtime_snapshots、strategy_runtime_settlements。
 - 前台账户优先读取 strategy_runtime_trades，并按 follow_start_date 和模拟资金派生账户。
 - 推荐和日计划使用 frontend_payload_cache SQLite 短缓存。
+- 资金档策略已改名为 小资金、短线稳健、均衡轮动、趋势多仓，并从 strategy_runtime_* 运行表汇总收益、回撤、胜率和成交数。
 - 后台数据库页可以查看和清理缓存。
+- 后台慢任务触发接口默认 background=true，新闻抓取、AI 分析、行情同步、日K补齐、龙虎榜、交易循环、策略复盘和系统启动会立即返回任务状态并在后台继续运行。
 - 部署脚本会验证版本、接口模块和数据库表结构。
 
 重要安全要求：
@@ -54,7 +57,7 @@
   bash -n scripts/update_server.sh
 - 最后告诉我改了什么、为什么这么改、怎么部署、怎么验证。
 
-本轮目标：继续 P1 后半段，把 strategy_runtime_snapshots 升级为正式每日账户快照，并新增 strategy_runtime_settlements 保存每个策略每日资金流水和清算结果。
+本轮目标：开始 P2 用户跟随账户落库：新增 user_follow_accounts、user_follow_trades 和跟随周期记录，让用户账户成为独立实体。
 ```
 
 ## 可替换的本轮目标

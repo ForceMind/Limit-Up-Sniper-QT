@@ -279,6 +279,31 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_model_date ON strategy_runtime_positions(model_id, as_of);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_code_date ON strategy_runtime_positions(code, as_of);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_generated ON strategy_runtime_positions(generated_at);
+
+            CREATE TABLE IF NOT EXISTS strategy_runtime_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                model_id TEXT,
+                model_version TEXT,
+                params_hash TEXT,
+                start_date TEXT,
+                date TEXT,
+                mode TEXT,
+                buy_amount REAL,
+                sell_amount REAL,
+                commission REAL,
+                stamp_duty REAL,
+                transfer_fee REAL,
+                total_fee REAL,
+                net_amount REAL,
+                realized_pnl REAL,
+                deal_count INTEGER,
+                source TEXT,
+                generated_at TEXT,
+                initial_cash REAL,
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_model_date ON strategy_runtime_settlements(model_id, date);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_generated ON strategy_runtime_settlements(generated_at);
             """
         )
 
@@ -745,12 +770,16 @@ class StrategyEvolution:
         model_version: str,
         start_date: Optional[str],
         as_of: Optional[str],
+        params_hash: str = "",
     ) -> tuple[str, list[Any]]:
         where = ["model_id = ?"]
         params: list[Any] = [model_id]
         if model_version:
             where.append("model_version = ?")
             params.append(model_version)
+        if params_hash:
+            where.append("params_hash = ?")
+            params.append(params_hash)
         if start_date:
             where.append(f"{date_column} >= ?")
             params.append(str(start_date))
@@ -766,14 +795,16 @@ class StrategyEvolution:
         model_version: str,
         start_date: Optional[str],
         as_of: Optional[str],
+        params_hash: str = "",
     ) -> bool:
         checks = (
             ("strategy_runtime_trades", "date"),
             ("strategy_daily_signals", "date"),
             ("strategy_runtime_positions", "as_of"),
+            ("strategy_runtime_settlements", "date"),
         )
         for table, date_column in checks:
-            where_sql, params = self._runtime_date_filter(conn, table, date_column, model_id, model_version, start_date, as_of)
+            where_sql, params = self._runtime_date_filter(conn, table, date_column, model_id, model_version, start_date, as_of, params_hash=params_hash)
             row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}", params).fetchone()
             if int((row["count"] if isinstance(row, sqlite3.Row) else row[0]) or 0) > 0:
                 return True
@@ -824,6 +855,7 @@ class StrategyEvolution:
         mode = str(timeline.get("mode") or mode or "").strip()
         generated_at = datetime.now().isoformat(timespec="seconds")
         initial_cash = safe_float(timeline.get("initial_cash"), safe_float((params or {}).get("account_initial_cash"), 0))
+        snapshot_source = f"daily_runtime:{mode or 'unknown'}"
         days = timeline.get("days") if isinstance(timeline.get("days"), list) else []
         trades = timeline.get("trades") if isinstance(timeline.get("trades"), list) else []
         if not days and not trades:
@@ -832,35 +864,63 @@ class StrategyEvolution:
         signal_count = 0
         position_count = 0
         trade_count = 0
+        settlement_count = 0
+        snapshot_count = 0
         conn = self._connect_db()
         try:
             conn.execute(
                 """
                 DELETE FROM strategy_daily_signals
-                WHERE model_id = ? AND start_date = ? AND mode = ? AND date >= ? AND date <= ?
+                WHERE model_id = ? AND start_date = ? AND params_hash = ? AND date >= ? AND date <= ?
                 """,
-                (model_id, start_date, mode, start_date, end_date),
+                (model_id, start_date, params_hash, start_date, end_date),
             )
             conn.execute(
                 """
                 DELETE FROM strategy_runtime_trades
-                WHERE model_id = ? AND start_date = ? AND mode = ? AND date >= ? AND date <= ?
+                WHERE model_id = ? AND start_date = ? AND params_hash = ? AND date >= ? AND date <= ?
                 """,
-                (model_id, start_date, mode, start_date, end_date),
+                (model_id, start_date, params_hash, start_date, end_date),
             )
             conn.execute(
                 """
                 DELETE FROM strategy_runtime_positions
-                WHERE model_id = ? AND start_date = ? AND mode = ? AND as_of >= ? AND as_of <= ?
+                WHERE model_id = ? AND start_date = ? AND params_hash = ? AND as_of >= ? AND as_of <= ?
                 """,
-                (model_id, start_date, mode, start_date, end_date),
+                (model_id, start_date, params_hash, start_date, end_date),
             )
+            conn.execute(
+                """
+                DELETE FROM strategy_runtime_settlements
+                WHERE model_id = ? AND start_date = ? AND params_hash = ? AND date >= ? AND date <= ?
+                """,
+                (model_id, start_date, params_hash, start_date, end_date),
+            )
+            conn.execute(
+                """
+                DELETE FROM strategy_runtime_snapshots
+                WHERE model_id = ? AND start_date = ? AND params_hash = ? AND source = ? AND as_of >= ? AND as_of <= ?
+                """,
+                (model_id, start_date, params_hash, snapshot_source, start_date, end_date),
+            )
+            equity_curve = timeline.get("equity_curve") if isinstance(timeline.get("equity_curve"), list) else []
+            equity_by_date = {
+                str(point.get("date") or ""): point
+                for point in equity_curve
+                if isinstance(point, dict)
+            }
+            trades_by_date: Dict[str, List[Dict[str, Any]]] = {}
+            for trade in trades:
+                if isinstance(trade, dict):
+                    trades_by_date.setdefault(str(trade.get("date") or ""), []).append(trade)
+            cumulative_deal_count = 0
             for day in days:
                 if not isinstance(day, dict):
                     continue
                 day_date = str(day.get("date") or "").strip()
                 if not day_date:
                     continue
+                cumulative_deal_count += len(trades_by_date.get(day_date, []))
                 for seq, signal in enumerate(day.get("signals") if isinstance(day.get("signals"), list) else [], start=1):
                     if not isinstance(signal, dict):
                         continue
@@ -929,6 +989,66 @@ class StrategyEvolution:
                         ),
                     )
                     position_count += 1
+                day_positions = day.get("positions") if isinstance(day.get("positions"), list) else []
+                day_trades = trades_by_date.get(day_date, [])
+                equity_point = equity_by_date.get(day_date, {})
+                total_asset = safe_float(day.get("total_value"), safe_float(equity_point.get("total_value"), initial_cash))
+                cash = safe_float(day.get("cash"), 0)
+                market_value = safe_float(day.get("market_value"), max(0.0, total_asset - cash))
+                account_summary = {
+                    "initial_cash": round(initial_cash, 2),
+                    "total_asset": round(total_asset, 2),
+                    "cash": round(cash, 2),
+                    "available_cash": round(max(0.0, cash), 2),
+                    "market_value": round(market_value, 2),
+                    "total_pnl": round(total_asset - initial_cash, 2),
+                    "return_pct": round(safe_float(equity_point.get("return_pct"), ((total_asset / initial_cash - 1) * 100 if initial_cash > 0 else 0)), 3),
+                    "position_count": len([pos for pos in day_positions if isinstance(pos, dict)]),
+                    "deal_count": cumulative_deal_count,
+                }
+                snapshot_payload = {
+                    "status": "ok",
+                    "as_of": day_date,
+                    "start_date": start_date,
+                    "strategy_account_source": "daily_runtime_snapshot",
+                    "mode": mode,
+                    "account": account_summary,
+                    "positions": [pos for pos in day_positions if isinstance(pos, dict)],
+                    "today_deals": [trade for trade in day_trades if isinstance(trade, dict)],
+                    "portfolio": {
+                        "cash": round(cash, 2),
+                        "total_value": round(total_asset, 2),
+                        "strategy_params": params or {},
+                    },
+                }
+                snapshot_key = self._digest("strategy_daily_snapshot", model_id, params_hash, start_date, day_date, mode)[:32]
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO strategy_runtime_snapshots
+                    (cache_key, model_id, model_version, params_hash, start_date, as_of, initial_cash,
+                     record_limit, source, generated_at, total_asset, return_pct, position_count,
+                     deal_count, account_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_key,
+                        model_id,
+                        model_version,
+                        params_hash,
+                        start_date,
+                        day_date,
+                        initial_cash,
+                        0,
+                        snapshot_source,
+                        generated_at,
+                        account_summary["total_asset"],
+                        account_summary["return_pct"],
+                        account_summary["position_count"],
+                        account_summary["deal_count"],
+                        self._json_text(snapshot_payload),
+                    ),
+                )
+                snapshot_count += 1
             for seq, trade in enumerate(trades, start=1):
                 if not isinstance(trade, dict):
                     continue
@@ -971,6 +1091,53 @@ class StrategyEvolution:
                     ),
                 )
                 trade_count += 1
+            settlement_account = quant_engine.account_from_trades(
+                trades,
+                initial_cash=initial_cash,
+                as_of=end_date,
+                start_date=None,
+                limit=0,
+            )
+            settlements = settlement_account.get("daily_settlements") if isinstance(settlement_account.get("daily_settlements"), list) else []
+            for settlement in settlements:
+                if not isinstance(settlement, dict):
+                    continue
+                settlement_date = str(settlement.get("date") or "").strip()
+                if not settlement_date or (start_date and settlement_date < start_date) or (end_date and settlement_date > end_date):
+                    continue
+                settlement_id = self._digest("strategy_runtime_settlement", model_id, params_hash, settlement_date, mode, settlement)[:32]
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO strategy_runtime_settlements
+                    (settlement_id, model_id, model_version, params_hash, start_date, date, mode,
+                     buy_amount, sell_amount, commission, stamp_duty, transfer_fee, total_fee,
+                     net_amount, realized_pnl, deal_count, source, generated_at, initial_cash, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        settlement_id,
+                        model_id,
+                        model_version,
+                        params_hash,
+                        start_date,
+                        settlement_date,
+                        mode,
+                        safe_float(settlement.get("buy_amount"), 0),
+                        safe_float(settlement.get("sell_amount"), 0),
+                        safe_float(settlement.get("commission"), 0),
+                        safe_float(settlement.get("stamp_duty"), 0),
+                        safe_float(settlement.get("transfer_fee"), 0),
+                        safe_float(settlement.get("total_fee"), 0),
+                        safe_float(settlement.get("net_amount"), 0),
+                        safe_float(settlement.get("realized_pnl"), 0),
+                        int(safe_float(settlement.get("deal_count"), 0)),
+                        source,
+                        generated_at,
+                        initial_cash,
+                        self._json_text(settlement),
+                    ),
+                )
+                settlement_count += 1
             conn.commit()
         finally:
             conn.close()
@@ -985,6 +1152,8 @@ class StrategyEvolution:
             "signal_count": signal_count,
             "trade_count": trade_count,
             "position_count": position_count,
+            "settlement_count": settlement_count,
+            "snapshot_count": snapshot_count,
             "generated_at": generated_at,
         }
 
@@ -996,6 +1165,7 @@ class StrategyEvolution:
         as_of: Optional[str],
         limit: int,
         model_version: str = "",
+        params: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not QUANT_DB_FILE.exists():
             return None
@@ -1004,15 +1174,19 @@ class StrategyEvolution:
         start_date = str(start_date or "").strip() or None
         target_cash = max(1.0, safe_float(initial_cash, 0))
         limit = max(1, min(int(limit or 500), 5000))
+        params_hash = self._digest("strategy_params", params or {})[:24] if isinstance(params, dict) else ""
         try:
             conn = self._connect_db()
             try:
                 selected_version = str(model_version or "").strip()
-                if selected_version and not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of):
+                if selected_version and not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=params_hash):
                     selected_version = ""
-                if not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of):
-                    return None
-                where_sql, params = self._runtime_date_filter(
+                if not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=params_hash):
+                    if params_hash and self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=""):
+                        params_hash = ""
+                    else:
+                        return None
+                where_sql, sql_params = self._runtime_date_filter(
                     conn,
                     "strategy_runtime_trades",
                     "date",
@@ -1020,6 +1194,7 @@ class StrategyEvolution:
                     selected_version,
                     start_date,
                     as_of,
+                    params_hash=params_hash,
                 )
                 rows = conn.execute(
                     f"""
@@ -1029,7 +1204,7 @@ class StrategyEvolution:
                     WHERE {where_sql}
                     ORDER BY date ASC, time ASC, trade_id ASC
                     """,
-                    params,
+                    sql_params,
                 ).fetchall()
                 signal_where, signal_params = self._runtime_date_filter(
                     conn,
@@ -1039,6 +1214,7 @@ class StrategyEvolution:
                     selected_version,
                     start_date,
                     as_of,
+                    params_hash=params_hash,
                 )
                 signal_count = conn.execute(
                     f"SELECT COUNT(*) AS count FROM strategy_daily_signals WHERE {signal_where}",
@@ -1052,10 +1228,47 @@ class StrategyEvolution:
                     selected_version,
                     start_date,
                     as_of,
+                    params_hash=params_hash,
                 )
                 position_count = conn.execute(
                     f"SELECT COUNT(*) AS count FROM strategy_runtime_positions WHERE {position_where}",
                     position_params,
+                ).fetchone()
+                settlement_where, settlement_params = self._runtime_date_filter(
+                    conn,
+                    "strategy_runtime_settlements",
+                    "date",
+                    model_id,
+                    selected_version,
+                    start_date,
+                    as_of,
+                    params_hash=params_hash,
+                )
+                settlement_count = conn.execute(
+                    f"SELECT COUNT(*) AS count FROM strategy_runtime_settlements WHERE {settlement_where}",
+                    settlement_params,
+                ).fetchone()
+                snapshot_where, snapshot_params = self._runtime_date_filter(
+                    conn,
+                    "strategy_runtime_snapshots",
+                    "as_of",
+                    model_id,
+                    selected_version,
+                    start_date,
+                    as_of,
+                    params_hash=params_hash,
+                )
+                snapshot_where = f"{snapshot_where} AND source LIKE ?"
+                snapshot_params.append("daily_runtime%")
+                snapshot_row = conn.execute(
+                    f"""
+                    SELECT as_of, source, total_asset, return_pct, position_count, deal_count, account_json
+                    FROM strategy_runtime_snapshots
+                    WHERE {snapshot_where}
+                    ORDER BY as_of DESC
+                    LIMIT 1
+                    """,
+                    snapshot_params,
                 ).fetchone()
             finally:
                 conn.close()
@@ -1099,6 +1312,7 @@ class StrategyEvolution:
         )
         signal_total = int((signal_count["count"] if isinstance(signal_count, sqlite3.Row) else signal_count[0]) or 0)
         position_total = int((position_count["count"] if isinstance(position_count, sqlite3.Row) else position_count[0]) or 0)
+        settlement_total = int((settlement_count["count"] if isinstance(settlement_count, sqlite3.Row) else settlement_count[0]) or 0)
         account["strategy_account_source"] = "runtime_tables"
         account["strategy_account_cache"] = "runtime"
         account["follow_start_date"] = start_date or ""
@@ -1108,9 +1322,151 @@ class StrategyEvolution:
         account["runtime_scaled_trade_count"] = len(scaled_trades)
         account["runtime_signal_count"] = signal_total
         account["runtime_position_count"] = position_total
+        account["runtime_settlement_count"] = settlement_total
         account["runtime_scaled_from_cash"] = round(base_cash, 2)
         account["runtime_scaled_to_cash"] = round(target_cash, 2)
+        if snapshot_row:
+            account["runtime_snapshot_as_of"] = str(snapshot_row["as_of"] or "")
+            account["runtime_snapshot_source"] = str(snapshot_row["source"] or "")
+            account["runtime_snapshot_total_asset"] = round(safe_float(snapshot_row["total_asset"], 0), 2)
+            account["runtime_snapshot_return_pct"] = round(safe_float(snapshot_row["return_pct"], 0), 3)
         return account
+
+    def _runtime_summary_for_model(
+        self,
+        conn: sqlite3.Connection,
+        model_id: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        model_id = str(model_id or "").strip()
+        if not model_id:
+            return None
+        params_hash = self._digest("strategy_params", params or {})[:24] if isinstance(params, dict) else ""
+        where = ["model_id = ?", "source LIKE ?"]
+        values: list[Any] = [model_id, "daily_runtime%"]
+        if params_hash:
+            where.append("params_hash = ?")
+            values.append(params_hash)
+        where_sql = " AND ".join(where)
+        latest = conn.execute(
+            f"""
+            SELECT generated_at
+            FROM strategy_runtime_snapshots
+            WHERE {where_sql}
+            ORDER BY generated_at DESC
+            LIMIT 1
+            """,
+            values,
+        ).fetchone()
+        if not latest and params_hash:
+            params_hash = ""
+            where = ["model_id = ?", "source LIKE ?"]
+            values = [model_id, "daily_runtime%"]
+            where_sql = " AND ".join(where)
+            latest = conn.execute(
+                f"""
+                SELECT generated_at
+                FROM strategy_runtime_snapshots
+                WHERE {where_sql}
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """,
+                values,
+            ).fetchone()
+        if not latest:
+            return None
+        generated_at = str(latest["generated_at"] or "")
+        rows = conn.execute(
+            f"""
+            SELECT as_of, start_date, source, initial_cash, total_asset, return_pct, position_count, deal_count
+            FROM strategy_runtime_snapshots
+            WHERE {where_sql} AND generated_at = ?
+            ORDER BY as_of ASC
+            """,
+            [*values, generated_at],
+        ).fetchall()
+        if not rows:
+            return None
+        latest_row = rows[-1]
+        peak = 0.0
+        max_drawdown_pct = 0.0
+        for row in rows:
+            value = safe_float(row["total_asset"], 0)
+            if value <= 0:
+                continue
+            peak = max(peak, value)
+            if peak > 0:
+                drawdown = (value / peak - 1) * 100
+                max_drawdown_pct = min(max_drawdown_pct, drawdown)
+        trade_row = conn.execute(
+            f"""
+            SELECT
+              COUNT(*) AS trade_count,
+              SUM(CASE WHEN UPPER(side) = 'SELL' THEN 1 ELSE 0 END) AS closed_trades,
+              SUM(CASE WHEN UPPER(side) = 'SELL' AND pnl_pct > 0 THEN 1 ELSE 0 END) AS winning_trades
+            FROM strategy_runtime_trades
+            WHERE model_id = ? AND generated_at = ? {("AND params_hash = ?" if params_hash else "")}
+            """,
+            ([model_id, generated_at, params_hash] if params_hash else [model_id, generated_at]),
+        ).fetchone()
+        signal_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS signal_count
+            FROM strategy_daily_signals
+            WHERE model_id = ? AND generated_at = ? {("AND params_hash = ?" if params_hash else "")}
+            """,
+            ([model_id, generated_at, params_hash] if params_hash else [model_id, generated_at]),
+        ).fetchone()
+        trade_count = int((trade_row["trade_count"] if isinstance(trade_row, sqlite3.Row) else trade_row[0]) or 0)
+        closed_trades = int((trade_row["closed_trades"] if isinstance(trade_row, sqlite3.Row) else trade_row[1]) or 0)
+        winning_trades = int((trade_row["winning_trades"] if isinstance(trade_row, sqlite3.Row) else trade_row[2]) or 0)
+        signal_count = int((signal_row["signal_count"] if isinstance(signal_row, sqlite3.Row) else signal_row[0]) or 0)
+        win_rate = round(winning_trades / closed_trades * 100, 3) if closed_trades > 0 else 0.0
+        return_pct = round(safe_float(latest_row["return_pct"], 0), 3)
+        objective = round(return_pct - abs(max_drawdown_pct) * 0.8 + win_rate * 0.03 + min(closed_trades, 60) * 0.02, 4)
+        return {
+            "runtime_data_status": "ok",
+            "has_runtime_data": True,
+            "runtime_generated_at": generated_at,
+            "runtime_start_date": str(latest_row["start_date"] or ""),
+            "runtime_end_date": str(latest_row["as_of"] or ""),
+            "runtime_source": str(latest_row["source"] or ""),
+            "runtime_day_count": len(rows),
+            "signal_count": signal_count,
+            "trade_count": trade_count,
+            "objective": objective,
+            "return_pct": return_pct,
+            "max_drawdown_pct": round(max_drawdown_pct, 3),
+            "win_rate": win_rate,
+            "closed_trades": closed_trades,
+            "final_value": round(safe_float(latest_row["total_asset"], 0), 2),
+            "initial_cash": round(safe_float(latest_row["initial_cash"], 0), 2),
+            "position_count": int(safe_float(latest_row["position_count"], 0)),
+            "deal_count": int(safe_float(latest_row["deal_count"], 0)),
+        }
+
+    def runtime_model_summaries(self, models: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        if not models or not QUANT_DB_FILE.exists():
+            return {}
+        summaries: Dict[str, Dict[str, Any]] = {}
+        try:
+            conn = self._connect_db()
+            try:
+                for model in models:
+                    if not isinstance(model, dict):
+                        continue
+                    model_id = str(model.get("id") or model.get("model_id") or "").strip()
+                    if not model_id:
+                        continue
+                    params = model.get("params") if isinstance(model.get("params"), dict) else None
+                    summary = self._runtime_summary_for_model(conn, model_id, params=params)
+                    if summary:
+                        summaries[model_id] = summary
+            finally:
+                conn.close()
+        except Exception:
+            return {}
+        return summaries
 
     def _runtime_cache_is_fresh(self, generated_at: str) -> bool:
         ttl = self._runtime_cache_ttl_seconds()

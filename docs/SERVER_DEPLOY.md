@@ -254,7 +254,7 @@ proxy_send_timeout 1800;
 proxy_read_timeout 1800;
 ```
 
-如果上传时报 `413 Request Entity Too Large`，说明当前服务器实际生效的 Nginx 上传大小太小；如果报 `504 Gateway Time-out`，说明 Nginx 等后端响应超时。两种情况都执行：
+如果上传时报 `413 Request Entity Too Large`，说明当前服务器实际生效的 Nginx 上传大小太小；如果报 `504 Gateway Time-out`，说明 Nginx 等后端响应超时。上传或导入场景先执行：
 
 ```bash
 qt nginx-upload
@@ -262,6 +262,8 @@ sudo nginx -T | grep -nE "client_max_body_size|proxy_read_timeout|proxy_send_tim
 ```
 
 `qt install` 和 `qt update` 也会自动尝试把指向本服务端口的正式 Nginx 配置更新为 `QT_NGINX_UPLOAD_MAX_SIZE` 和 `QT_NGINX_PROXY_TIMEOUT`，默认 `1024m` 和 `1800` 秒。脚本会跳过 `.qt_upload_backup_*` 历史备份文件，并默认清理 7 天前或重复嵌套的上传配置备份。
+
+v0.2.25 起，后台页面手动触发新闻抓取、AI 分析、行情同步、日K补齐、龙虎榜同步、交易循环、策略复盘和系统启动时，接口默认只提交后台任务并立即返回。普通任务按钮如果仍反复出现 504，优先确认已经执行 `qt update` 或 `qt restart` 让新版后端生效，再查看后台任务日志和服务日志。
 
 正式域名和 TLS 证书按服务器实际情况调整。
 
@@ -352,11 +354,11 @@ curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/a
 - AI 分析：默认每 1 小时增量调用 DeepSeek，将新闻结构化为事件、行业、个股、利好利空和影响强度
 - 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；日 K 补齐使用必盈历史行情并写入 SQLite；周末和非开盘时间不触发盘中行情同步
 - 模拟交易：按当前模型触发买入/卖出，触发后可通过 SMTP 发送邮件
-- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘一次；v0.2.23 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
+- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘一次；v0.2.24 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`、`strategy_runtime_snapshots`、`strategy_runtime_settlements`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
 - 遗传进化：多组参数并行回放，按收益、回撤、胜率选择最优参数，后台可手动应用
 - 模型回放：前台和后台按全周期线性回放计算买入、卖出、收益和交割单
 
-后台管理页可以查看任务状态，也可以手动触发新闻、AI、行情同步。
+后台管理页可以查看任务状态，也可以手动触发新闻、AI、行情同步。手动触发的慢任务默认进入后台运行，页面通过任务状态、进度和日志确认完成情况；需要同步等待旧行为时，可在接口上显式传 `background=false`。
 
 ## 生产注意事项
 

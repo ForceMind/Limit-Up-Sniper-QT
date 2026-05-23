@@ -7,6 +7,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import app.quant.runtime_cache as runtime_cache
+import app.quant.evolution as evolution_module
+from app.quant.evolution import StrategyEvolution
 
 
 def test_frontend_payload_cache_round_trips_and_expires(tmp_path, monkeypatch):
@@ -43,3 +45,43 @@ def test_runtime_cache_status_and_clear(tmp_path, monkeypatch):
     assert result["status"] == "ok"
     assert result["deleted"]["frontend_payload_cache"] == 1
     assert result["cache"]["tables"]["frontend_payload_cache"]["row_count"] == 0
+
+
+def test_runtime_cache_clear_account_keeps_daily_runtime_snapshots(tmp_path, monkeypatch):
+    db_file = tmp_path / "quant_data.sqlite3"
+    monkeypatch.setattr(runtime_cache, "QUANT_DB_FILE", db_file)
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", db_file)
+    evolution = StrategyEvolution()
+    evolution.save_daily_runtime(
+        model={"id": "model-runtime-cache", "run_id": "run-cache"},
+        params={"account_initial_cash": 100000},
+        timeline={
+            "mode": "daily",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-01",
+            "initial_cash": 100000,
+            "trades": [],
+            "days": [
+                {
+                    "date": "2026-05-01",
+                    "cash": 100000,
+                    "market_value": 0,
+                    "total_value": 100000,
+                    "positions": [],
+                    "signals": [],
+                }
+            ],
+            "equity_curve": [{"date": "2026-05-01", "total_value": 100000, "return_pct": 0}],
+        },
+        start_date="2026-05-01",
+        end_date="2026-05-01",
+        mode="daily",
+    )
+
+    status = runtime_cache.runtime_cache_status()
+    assert status["tables"]["strategy_runtime_snapshots"]["daily_runtime_rows"] == 1
+
+    result = runtime_cache.clear_runtime_cache("account")
+    assert result["status"] == "ok"
+    assert result["deleted"]["strategy_runtime_snapshots"] == 0
+    assert result["cache"]["tables"]["strategy_runtime_snapshots"]["daily_runtime_rows"] == 1

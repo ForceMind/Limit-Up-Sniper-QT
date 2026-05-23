@@ -10,7 +10,7 @@ DEFAULT_FRONTEND_STRATEGY_ID = "capital_10000"
 CAPITAL_BANDS: List[Dict[str, Any]] = [
     {
         "id": "capital_10000",
-        "name": "1万小资金策略",
+        "name": "小资金策略",
         "label": "1万",
         "min_cash": 10_000.0,
         "max_cash": 19_999.99,
@@ -19,11 +19,11 @@ CAPITAL_BANDS: List[Dict[str, Any]] = [
         "top_n": 4.0,
         "paper_position_value": 9_000.0,
         "buy_threshold": 75.0,
-        "description": "只允许一只持仓，优先筛掉一手金额过高的股票。",
+        "description": "面向 1 万模拟资金，只允许一只持仓，优先筛掉一手金额过高的股票。",
     },
     {
         "id": "capital_20000_50000",
-        "name": "2万-5万小资金策略",
+        "name": "短线稳健策略",
         "label": "2万-5万",
         "min_cash": 20_000.0,
         "max_cash": 49_999.99,
@@ -32,11 +32,11 @@ CAPITAL_BANDS: List[Dict[str, Any]] = [
         "top_n": 6.0,
         "paper_position_value": 13_000.0,
         "buy_threshold": 73.0,
-        "description": "最多两只持仓，控制单票资金，避免资金被高价股占满。",
+        "description": "面向 2 万-5 万模拟资金，最多两只持仓，控制单票资金，避免资金被高价股占满。",
     },
     {
         "id": "capital_50000_100000",
-        "name": "5万-10万中小资金策略",
+        "name": "均衡轮动策略",
         "label": "5万-10万",
         "min_cash": 50_000.0,
         "max_cash": 99_999.99,
@@ -45,11 +45,11 @@ CAPITAL_BANDS: List[Dict[str, Any]] = [
         "top_n": 8.0,
         "paper_position_value": 24_000.0,
         "buy_threshold": 72.0,
-        "description": "最多三只持仓，在分散和可买一手之间做平衡。",
+        "description": "面向 5 万-10 万模拟资金，最多三只持仓，在分散和可买一手之间做平衡。",
     },
     {
         "id": "capital_100000_plus",
-        "name": "10万以上标准策略",
+        "name": "趋势多仓策略",
         "label": "10万以上",
         "min_cash": 100_000.0,
         "max_cash": 10_000_000.0,
@@ -58,7 +58,7 @@ CAPITAL_BANDS: List[Dict[str, Any]] = [
         "top_n": 10.0,
         "paper_position_value": 30_000.0,
         "buy_threshold": 72.0,
-        "description": "使用标准多仓位配置，适合跟随进化模型。",
+        "description": "面向 10 万以上模拟资金，使用标准多仓位配置，适合跟随进化模型。",
     },
 ]
 
@@ -160,4 +160,3 @@ def recommended_strategy_id(cash: Any, models: Iterable[Dict[str, Any]]) -> str:
         )
         return str(best.get("id") or band["id"])
     return str(band["id"])
-

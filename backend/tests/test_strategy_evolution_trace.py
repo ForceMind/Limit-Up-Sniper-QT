@@ -131,14 +131,80 @@ def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monk
         "2026-05-04",
         50,
         model_version=evolution.runtime_model_version(model),
+        params=params,
     )
 
     assert persisted["status"] == "ok"
     assert persisted["signal_count"] == 2
     assert persisted["trade_count"] == 3
     assert persisted["position_count"] == 2
+    assert persisted["settlement_count"] == 3
+    assert persisted["snapshot_count"] == 2
     assert account
     assert account["strategy_account_source"] == "runtime_tables"
     assert account["follow_start_date"] == "2026-05-02"
     assert account["runtime_signal_count"] == 1
+    assert account["runtime_settlement_count"] == 2
+    assert account["runtime_snapshot_as_of"] == "2026-05-03"
     assert {deal["code"] for deal in account["history_deals"]} == {"600003"}
+
+
+def test_runtime_model_summary_uses_daily_runtime_tables(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    model = {"id": "capital_10000", "name": "小资金策略", "run_id": "capital-band"}
+    params = {"account_initial_cash": 10000, "max_positions": 1, "paper_position_value": 9000}
+    timeline = {
+        "mode": "daily",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-03",
+        "initial_cash": 10000,
+        "trades": [
+            {"date": "2026-05-01", "time": "09:30:00", "side": "BUY", "code": "600000", "name": "浦发银行", "qty": 100, "price": 10, "score": 81},
+            {"date": "2026-05-03", "time": "14:55:00", "side": "SELL", "code": "600000", "name": "浦发银行", "qty": 100, "price": 11, "pnl_pct": 10},
+        ],
+        "days": [
+            {
+                "date": "2026-05-01",
+                "total_value": 10000,
+                "cash": 9000,
+                "market_value": 1000,
+                "signals": [{"code": "600000", "name": "浦发银行", "buy_score": 81, "sell_score": 16, "reason": "测试信号"}],
+                "positions": [{"code": "600000", "name": "浦发银行", "qty": 100, "entry_date": "2026-05-01", "entry_price": 10, "last_price": 10, "market_value": 1000, "pnl_pct": 0}],
+            },
+            {
+                "date": "2026-05-02",
+                "total_value": 10050,
+                "cash": 9000,
+                "market_value": 1050,
+                "signals": [],
+                "positions": [{"code": "600000", "name": "浦发银行", "qty": 100, "entry_date": "2026-05-01", "entry_price": 10, "last_price": 10.5, "market_value": 1050, "pnl_pct": 5}],
+            },
+            {
+                "date": "2026-05-03",
+                "total_value": 10100,
+                "cash": 10100,
+                "market_value": 0,
+                "signals": [],
+                "positions": [],
+            },
+        ],
+    }
+
+    persisted = evolution.save_daily_runtime(
+        model=model,
+        params=params,
+        timeline=timeline,
+        start_date="2026-05-01",
+        end_date="2026-05-03",
+        mode="daily",
+    )
+    summaries = evolution.runtime_model_summaries([{**model, "params": params}])
+
+    assert persisted["status"] == "ok"
+    assert summaries["capital_10000"]["has_runtime_data"] is True
+    assert summaries["capital_10000"]["runtime_day_count"] == 3
+    assert summaries["capital_10000"]["trade_count"] == 2
+    assert summaries["capital_10000"]["closed_trades"] == 1
+    assert summaries["capital_10000"]["win_rate"] == 100
+    assert summaries["capital_10000"]["return_pct"] == 1

@@ -233,6 +233,7 @@ required = {
     "strategy_daily_signals": ["signal_id", "model_id", "date", "code", "raw_json"],
     "strategy_runtime_positions": ["position_id", "model_id", "as_of", "code", "raw_json"],
     "strategy_runtime_trades": ["trade_id", "model_id", "date", "side", "code", "raw_json"],
+    "strategy_runtime_settlements": ["settlement_id", "model_id", "date", "deal_count", "raw_json"],
     "frontend_payload_cache": ["cache_key", "payload_type", "expires_at", "payload_json"],
     "paper_accounts": ["as_of", "cash", "raw_json"],
     "paper_positions": ["position_id", "code", "raw_json"],

@@ -1831,7 +1831,7 @@
             if (res.status === 524) {
               message = 'Cloudflare 等待源站超时：服务器首屏接口或后台任务执行太久。系统已改为轻量首屏，当前模块请稍后重试。';
             } else if (res.status === 504) {
-              message = 'Nginx 等待后端超时：任务可能执行太久或后端正忙。请稍后刷新，必要时在服务器执行 qt nginx-upload 并查看服务日志。';
+              message = 'Nginx 等待后端超时：当前版本会把重任务转入后台运行；如果仍反复出现，请部署最新代码并重启后端，再查看任务日志。';
             } else if (res.status === 413) {
               message = '请求被 Nginx 拒绝：数据太大。请在服务器执行 qt nginx-upload 后重试。';
             }
@@ -2337,6 +2337,7 @@
               ai_items: '20',
               market_codes: String(this.dataFillForm.max_codes || 200),
               notify: 'true',
+              background: 'true',
             });
             if (this.dataFillForm.start_date || this.dataStartDate) q.set('start_date', this.dataFillForm.start_date || this.dataStartDate);
             if (this.dataFillForm.end_date || this.asOf) q.set('end_date', this.dataFillForm.end_date || this.asOf);
@@ -2353,7 +2354,7 @@
           if (this.isJobRunning('news_fetch') || this.isJobPaused('news_fetch')) return this.pauseOrResumeJob('news_fetch');
           this.newsFetching = true;
           try {
-            await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20', { method: 'POST' });
+            await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20&background=true', { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
           } finally {
@@ -2364,7 +2365,7 @@
           if (this.isJobRunning('ai_analysis') || this.isJobPaused('ai_analysis')) return this.pauseOrResumeJob('ai_analysis');
           this.aiAnalyzing = true;
           try {
-            const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4' });
+            const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4', background: 'true' });
             await this.api(`/api/jobs/ai/analyze?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
@@ -2382,6 +2383,7 @@
               max_codes: String(this.syncForm.max_codes || 80),
               force: String(Boolean(this.syncForm.force)),
               include_latest: 'true',
+              background: 'true',
             });
             const result = await this.api(`/api/jobs/market/sync?${q.toString()}`, { method: 'POST' });
             this.syncResult = (result.job || {}).last_result || result;
@@ -2400,6 +2402,7 @@
               end_date: this.dataFillForm.end_date || this.asOf || '',
               max_codes: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
+              background: 'true',
             });
             const result = await this.api(`/api/data/kline/fill?${q.toString()}`, { method: 'POST' });
             this.dataManageResult = (result.job || {}).last_result || result;
@@ -2420,6 +2423,7 @@
               end_date: this.dataFillForm.end_date || this.asOf || '',
               max_stock_days: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
+              background: 'true',
             });
             const result = await this.api(`/api/data/lhb/sync?${q.toString()}`, { method: 'POST' });
             this.dataManageResult = (result.job || {}).last_result || result;
@@ -2435,8 +2439,9 @@
           if (this.isJobRunning('trade_cycle') || this.isJobPaused('trade_cycle')) return this.pauseOrResumeJob('trade_cycle');
           this.runningTrade = true;
           try {
-            const q = this.asOf ? `?date=${this.asOf}&notify=true` : '?notify=true';
-            await this.api(`/api/jobs/trading/run${q}`, { method: 'POST' });
+            const q = new URLSearchParams({ notify: 'true', background: 'true' });
+            if (this.asOf) q.set('date', this.asOf);
+            await this.api(`/api/jobs/trading/run?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
           } finally {
@@ -2447,7 +2452,7 @@
           if (this.isJobRunning('strategy_replay') || this.isJobPaused('strategy_replay')) return this.pauseOrResumeJob('strategy_replay');
           this.replayingStrategy = true;
           try {
-            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday' });
+            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday', background: 'true' });
             if (this.asOf) q.set('end_date', this.asOf);
             await this.api(`/api/jobs/strategy/replay?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();

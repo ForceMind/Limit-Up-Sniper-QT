@@ -18,6 +18,9 @@ def test_capital_presets_cover_small_cash_bands():
     ids = [item["id"] for item in presets]
 
     assert ids[:3] == ["capital_10000", "capital_20000_50000", "capital_50000_100000"]
+    assert presets[0]["name"] == "小资金策略"
+    assert presets[1]["name"] == "短线稳健策略"
+    assert presets[2]["name"] == "均衡轮动策略"
     assert presets[0]["params"]["max_positions"] == 1
     assert presets[0]["params"]["paper_position_value"] <= 10000
 
@@ -41,4 +44,3 @@ def test_recommended_strategy_prefers_capital_band_for_small_cash():
 
     assert recommended_strategy_id(10000, models) == "capital_10000"
     assert recommended_strategy_id(30000, models) == "capital_20000_50000"
-

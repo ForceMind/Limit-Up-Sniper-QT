@@ -671,11 +671,36 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
         payload = {"status": "ok", "active": _active_strategy_model(), "items": [], "count": 0}
     base_params = quant_engine.strategy_params()
     presets = capital_presets(base_params)
+    runtime_summaries = strategy_evolution.runtime_model_summaries(presets)
+    enriched_presets: list[Dict[str, Any]] = []
+    for preset in presets:
+        model_id = str(preset.get("id") or "")
+        summary = runtime_summaries.get(model_id)
+        if summary:
+            enriched = {**preset, **summary}
+            enriched["runtime_data_note"] = (
+                f"已复盘 {summary.get('runtime_start_date') or '-'} 至 "
+                f"{summary.get('runtime_end_date') or '-'}，"
+                f"{int(safe_float(summary.get('trade_count'), 0))} 笔成交"
+            )
+        else:
+            enriched = {
+                **preset,
+                "runtime_data_status": "missing",
+                "has_runtime_data": False,
+                "runtime_data_note": "等待本地或服务器策略复盘生成数据",
+            }
+        enriched_presets.append(enriched)
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
     payload["active"]["name"] = "后台基准参数（非跟随策略）"
-    payload["capital_presets"] = presets
+    payload["capital_presets"] = enriched_presets
     payload["capital_bands"] = CAPITAL_BANDS
-    payload["count"] = int(safe_float(payload.get("count"), 0)) + len(presets)
+    payload["capital_runtime_summary"] = {
+        "total": len(enriched_presets),
+        "ready": sum(1 for item in enriched_presets if item.get("has_runtime_data")),
+        "missing": sum(1 for item in enriched_presets if not item.get("has_runtime_data")),
+    }
+    payload["count"] = int(safe_float(payload.get("count"), 0)) + len(enriched_presets)
     return payload
 
 
@@ -927,6 +952,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
         effective_as_of,
         limit,
         model_version=model_version,
+        params=params,
     )
     if runtime_account:
         strategy_evolution.save_account_cache(
@@ -1148,6 +1174,13 @@ def _find_strategy_model(model_id: str) -> Dict[str, Any]:
     model = strategy_evolution.model(model_id, include_records=True)
     if model:
         return model
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    catalog_model = next(
+        (item for item in _strategy_catalog_items(models_payload) if str(item.get("id") or "") == model_id),
+        None,
+    )
+    if catalog_model:
+        return catalog_model
     raise HTTPException(status_code=404, detail="strategy model not found")
 
 
@@ -1718,11 +1751,15 @@ def jobs_news_fetch(
     hours: int = Query(default=12, ge=1, le=168),
     pages: int = Query(default=5, ge=1, le=30),
     page_size: int = Query(default=20, ge=10, le=100),
+    background: bool = Query(default=True),
 ):
-    result = job_manager.run_news_fetch(hours=hours, pages=pages, page_size=page_size)
-    if result.get("status") == "ok":
-        quant_engine.events(force=True)
-    return result
+    return job_manager.run_news_fetch(
+        hours=hours,
+        pages=pages,
+        page_size=page_size,
+        refresh_events=True,
+        background=background,
+    )
 
 
 @app.post("/api/jobs/market/sync")
@@ -1732,6 +1769,7 @@ def jobs_market_sync(
     max_codes: int = Query(default=80, ge=1, le=500),
     force: bool = Query(default=False),
     include_latest: bool = Query(default=True),
+    background: bool = Query(default=True),
 ):
     return job_manager.run_market_sync(
         date=date,
@@ -1739,6 +1777,7 @@ def jobs_market_sync(
         max_codes=max_codes,
         force=force,
         include_latest=include_latest,
+        background=background,
     )
 
 
@@ -1747,16 +1786,18 @@ def jobs_ai_analyze(
     as_of: Optional[str] = Query(default=None),
     max_items: int = Query(default=8, ge=1, le=50),
     batch_size: int = Query(default=4, ge=1, le=10),
+    background: bool = Query(default=True),
 ):
-    return job_manager.run_ai_analysis(as_of=as_of, max_items=max_items, batch_size=batch_size)
+    return job_manager.run_ai_analysis(as_of=as_of, max_items=max_items, batch_size=batch_size, background=background)
 
 
 @app.post("/api/jobs/trading/run")
 def jobs_trading_run(
     date: Optional[str] = Query(default=None),
     notify: bool = Query(default=True),
+    background: bool = Query(default=True),
 ):
-    return job_manager.run_trade_cycle(date=date, notify=notify)
+    return job_manager.run_trade_cycle(date=date, notify=notify, background=background)
 
 
 @app.post("/api/jobs/strategy/replay")
@@ -1764,16 +1805,18 @@ def jobs_strategy_replay(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     mode: str = Query(default="intraday"),
+    background: bool = Query(default=True),
 ):
-    return job_manager.run_strategy_replay(start_date=start_date, end_date=end_date, mode=mode)
+    return job_manager.run_strategy_replay(start_date=start_date, end_date=end_date, mode=mode, background=background)
 
 
 @app.post("/api/jobs/daily/run")
 def jobs_daily_run(
     date: Optional[str] = Query(default=None),
     notify: bool = Query(default=True),
+    background: bool = Query(default=True),
 ):
-    return job_manager.run_trade_cycle(date=date, notify=notify)
+    return job_manager.run_trade_cycle(date=date, notify=notify, background=background)
 
 
 def _run_system_startup_flow(
@@ -1853,6 +1896,7 @@ def admin_system_startup(
     ai_items: int = Query(default=20, ge=1, le=80),
     market_codes: int = Query(default=200, ge=1, le=1000),
     notify: bool = Query(default=True),
+    background: bool = Query(default=True),
 ):
     target_date = str(end_date or date or quant_engine.latest_event_date() or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
     replay_start_date = str(start_date or quant_engine.first_data_date() or "2026-03-01").strip()
@@ -1866,9 +1910,8 @@ def admin_system_startup(
         "market_codes": market_codes,
         "notify": notify,
     }
-    return job_manager.run_job(
-        "system_startup",
-        lambda: _run_system_startup_flow(
+    def runner() -> Dict[str, Any]:
+        return _run_system_startup_flow(
             target_date=target_date,
             replay_start_date=replay_start_date,
             news_hours=news_hours,
@@ -1876,7 +1919,17 @@ def admin_system_startup(
             ai_items=ai_items,
             market_codes=market_codes,
             notify=notify,
-        ),
+        )
+    if background:
+        return job_manager.run_job_background(
+            "system_startup",
+            runner,
+            payload=payload,
+            message="系统启动流程已转入后台运行，请查看任务状态和右侧日志",
+        )
+    return job_manager.run_job(
+        "system_startup",
+        runner,
         payload=payload,
     )
 
@@ -2146,12 +2199,14 @@ def data_kline_fill(
     end_date: Optional[str] = Query(default=None),
     max_codes: int = Query(default=300, ge=1, le=5000),
     force: bool = Query(default=False),
+    background: bool = Query(default=True),
 ):
     return job_manager.run_kline_fill(
         start_date=start_date,
         end_date=end_date,
         max_codes=max_codes,
         force=force,
+        background=background,
     )
 
 
@@ -2166,16 +2221,16 @@ def data_lhb_sync(
     end_date: Optional[str] = Query(default=None),
     max_stock_days: int = Query(default=300, ge=1, le=2000),
     force: bool = Query(default=False),
+    background: bool = Query(default=True),
 ):
-    result = job_manager.run_lhb_sync(
+    return job_manager.run_lhb_sync(
         start_date=start_date,
         end_date=end_date,
         max_stock_days=max_stock_days,
         force=force,
+        refresh_events=True,
+        background=background,
     )
-    if result.get("status") == "ok":
-        quant_engine.events(force=True)
-    return result
 
 
 @app.post("/api/data/biying/sync_intraday")
