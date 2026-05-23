@@ -43,8 +43,9 @@
 现有 `strategy_models`、`strategy_model_records`、`strategy_candidates` 是基础。下一步应补齐：
 
 - `strategy_runtime_snapshots`：每个策略每日账户快照。
-- `strategy_runtime_positions`：每个策略每日持仓。
-- `strategy_runtime_trades`：每个策略运行成交。
+- `strategy_daily_signals`：每个策略每日信号，v0.2.23 已完成第一版。
+- `strategy_runtime_positions`：每个策略每日持仓，v0.2.23 已完成第一版。
+- `strategy_runtime_trades`：每个策略运行成交，v0.2.23 已完成第一版。
 - `user_follow_accounts`：用户跟随账户快照。
 - `user_follow_trades`：用户跟随成交和交割单。
 
@@ -65,14 +66,16 @@
 - 用户切换策略时重置跟随开始时间。
 - 前台交易账户按跟随开始日期运行，不继承旧历史持仓。
 - 前台交易账户增加 `strategy_runtime_snapshots` SQLite 缓存，同一策略、参数、资金、日期和返回条数在缓存有效期内不重复回放。
+- 后台策略复盘任务会按资金档预设和策略库模型批量运行，并写入 `strategy_daily_signals`、`strategy_runtime_positions`、`strategy_runtime_trades`。
+- 前台交易账户会优先读取 `strategy_runtime_trades`，按用户 `follow_start_date` 和模拟资金派生账户；没有运行表数据时回退短缓存、模型记录或即时回放。
 - 前台推荐和日计划增加 `frontend_payload_cache` SQLite 短缓存，减少登录后连续拉取慢接口造成的等待和服务器压力。
 - 后台数据库管理页增加缓存状态和清理入口，可以看到推荐/日计划缓存、账户回放缓存、过期缓存数量，并清理过期或全部缓存。
 - 后台文案把“系统运行策略”降级为“后台基准参数/诊断账户”。
 
 ## 后续开发顺序
 
-1. 将 `strategy_runtime_snapshots` 从短期缓存升级为每日策略运行快照，按策略保存账户、持仓、成交、交割单。
-2. 前台用户账户从策略运行结果增量派生，不再每次完整回放。
+1. 将 `strategy_runtime_snapshots` 从短期缓存升级为每日策略运行快照，补齐账户和资金流水。
+2. 新增 `strategy_runtime_settlements`，按策略保存每日清算结果。
 3. 后台增加“策略运行矩阵”，能看到每个策略是否运行、进度、最新信号、收益。
 4. 用户管理页展示用户跟随策略、跟随开始日、当前账户快照和最近访问。
 5. 慢接口全部改为后台任务 + 进度查询 + 缓存读取。

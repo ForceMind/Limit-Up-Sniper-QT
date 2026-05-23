@@ -920,6 +920,28 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
     replay_start_date = _frontend_follow_start_date(context, effective_as_of)
     model_version = _frontend_followed_model_version(context)
 
+    runtime_account = None if force else strategy_evolution.load_runtime_account(
+        followed_id,
+        target_cash,
+        replay_start_date,
+        effective_as_of,
+        limit,
+        model_version=model_version,
+    )
+    if runtime_account:
+        strategy_evolution.save_account_cache(
+            followed_id,
+            params,
+            target_cash,
+            replay_start_date,
+            effective_as_of,
+            limit,
+            runtime_account,
+            model_version=model_version,
+            source="runtime_tables",
+        )
+        return runtime_account
+
     sqlite_cached = None if force else strategy_evolution.load_account_cache(
         followed_id,
         params,

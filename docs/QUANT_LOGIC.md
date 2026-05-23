@@ -141,7 +141,8 @@ GET /api/front/trading_account
 
 后续架构重点：
 
-- 策略运行状态入库，当前已先用 `strategy_runtime_snapshots` 缓存前台账户回放结果，下一步按策略保存每日信号、账户快照、持仓、成交和交割单。
+- 策略运行状态入库，当前已用 `strategy_runtime_snapshots` 缓存前台账户回放结果，并在 v0.2.23 新增 `strategy_daily_signals`、`strategy_runtime_positions`、`strategy_runtime_trades` 保存每个策略的每日信号、持仓和成交。
+- 前台账户优先读取 `strategy_runtime_trades`，再按用户跟随开始日和模拟资金派生账户；没有落库结果时才回退短缓存或即时回放。
 - 前台推荐和日计划已先用 `frontend_payload_cache` 做短缓存，避免登录后重复计算同一策略和同一日期的买入信号。
 - 后台数据库管理页可以查看并清理上述缓存，便于排查服务器接口变慢或缓存失效问题。
 - 用户跟随账户入库，避免每次页面打开都重放完整历史。

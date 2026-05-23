@@ -417,6 +417,82 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
 
+        CREATE TABLE IF NOT EXISTS strategy_daily_signals (
+            signal_id TEXT PRIMARY KEY,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            start_date TEXT,
+            date TEXT,
+            execute_on TEXT,
+            mode TEXT,
+            code TEXT,
+            name TEXT,
+            action TEXT,
+            buy_score REAL,
+            sell_score REAL,
+            reason TEXT,
+            source TEXT,
+            generated_at TEXT,
+            initial_cash REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_model_date ON strategy_daily_signals(model_id, date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_code_date ON strategy_daily_signals(code, date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_generated ON strategy_daily_signals(generated_at);
+
+        CREATE TABLE IF NOT EXISTS strategy_runtime_trades (
+            trade_id TEXT PRIMARY KEY,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            start_date TEXT,
+            date TEXT,
+            time TEXT,
+            mode TEXT,
+            side TEXT,
+            code TEXT,
+            name TEXT,
+            qty REAL,
+            price REAL,
+            amount REAL,
+            score REAL,
+            pnl_pct REAL,
+            reason TEXT,
+            source TEXT,
+            generated_at TEXT,
+            initial_cash REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_model_date ON strategy_runtime_trades(model_id, date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_code_date ON strategy_runtime_trades(code, date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_generated ON strategy_runtime_trades(generated_at);
+
+        CREATE TABLE IF NOT EXISTS strategy_runtime_positions (
+            position_id TEXT PRIMARY KEY,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            start_date TEXT,
+            as_of TEXT,
+            mode TEXT,
+            code TEXT,
+            name TEXT,
+            qty REAL,
+            entry_date TEXT,
+            entry_price REAL,
+            last_price REAL,
+            market_value REAL,
+            pnl_pct REAL,
+            source TEXT,
+            generated_at TEXT,
+            initial_cash REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_model_date ON strategy_runtime_positions(model_id, as_of);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_code_date ON strategy_runtime_positions(code, as_of);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_generated ON strategy_runtime_positions(generated_at);
+
         CREATE TABLE IF NOT EXISTS frontend_payload_cache (
             cache_key TEXT PRIMARY KEY,
             payload_type TEXT,

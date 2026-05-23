@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
+from app.quant.capital_strategy import capital_presets
 from app.quant.engine import DATA_DIR, quant_engine, read_json, write_json
 from app.quant.evolution import strategy_evolution
 from app.quant.lhb_sync import lhb_status, sync_lhb
@@ -545,6 +546,7 @@ class QuantJobManager:
         payload = {"start_date": start_date, "end_date": end_date, "mode": mode}
 
         def execute() -> Dict[str, Any]:
+            targets = self._strategy_replay_targets()
             fill_result = quant_engine.ensure_daily_kline_for_events(
                 start_date=start_date,
                 end_date=end_date,
@@ -552,14 +554,76 @@ class QuantJobManager:
                 max_codes=self._auto_backfill_max_codes(),
                 force=False,
             )
-            if mode == "daily":
-                result = quant_engine.walk_forward(start_date=start_date, end_date=end_date)
-            else:
-                result = quant_engine.walk_forward_intraday(
+            model_results = []
+            aggregate = {
+                "signal_count": 0,
+                "trade_count": 0,
+                "position_count": 0,
+                "day_count": 0,
+                "closed_trades": 0,
+            }
+            first_result: Dict[str, Any] = {}
+            for model in targets:
+                params = model.get("params") if isinstance(model.get("params"), dict) else {}
+                with quant_engine.temporary_strategy_params(params):
+                    if mode == "daily":
+                        result = quant_engine.walk_forward(
+                            start_date=start_date,
+                            end_date=end_date,
+                            initial_cash=params.get("account_initial_cash"),
+                            max_positions=int(params.get("max_positions", 5)),
+                            hold_days=int(params.get("max_hold_days", 3)),
+                            top_n=int(params.get("top_n", 5)),
+                            auto_fill=False,
+                        )
+                    else:
+                        result = quant_engine.walk_forward_intraday(
+                            start_date=start_date,
+                            end_date=end_date,
+                            initial_cash=params.get("account_initial_cash"),
+                            max_positions=int(params.get("max_positions", 5)),
+                            hold_days=int(params.get("max_hold_days", 3)),
+                            top_n=int(params.get("top_n", 5)),
+                            auto_fill=False,
+                            use_daily_fallback=True,
+                        )
+                if not first_result:
+                    first_result = result
+                persisted = strategy_evolution.save_daily_runtime(
+                    model=model,
+                    params=params,
+                    timeline=result,
                     start_date=start_date,
                     end_date=end_date,
-                    use_daily_fallback=True,
+                    mode=mode,
+                    source="strategy_replay",
                 )
+                days = result.get("days") if isinstance(result.get("days"), list) else []
+                trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+                row = {
+                    "model_id": model.get("id"),
+                    "model_name": model.get("name"),
+                    "source": model.get("source"),
+                    "mode": result.get("mode") or mode,
+                    "start_date": result.get("start_date") or start_date,
+                    "end_date": result.get("end_date") or end_date,
+                    "initial_cash": result.get("initial_cash", 0),
+                    "final_value": result.get("final_value", 0),
+                    "return_pct": result.get("return_pct", 0),
+                    "max_drawdown_pct": result.get("max_drawdown_pct", 0),
+                    "closed_trades": result.get("closed_trades", 0),
+                    "win_rate": result.get("win_rate", 0),
+                    "day_count": len(days),
+                    "trade_count": len(trades),
+                    "runtime_persist": persisted,
+                }
+                model_results.append(row)
+                aggregate["signal_count"] += int(persisted.get("signal_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["trade_count"] += int(persisted.get("trade_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["position_count"] += int(persisted.get("position_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["day_count"] += len(days)
+                aggregate["closed_trades"] += int(result.get("closed_trades", 0) or 0)
+            result = first_result or {}
             days = result.get("days") if isinstance(result.get("days"), list) else []
             trades = result.get("trades") if isinstance(result.get("trades"), list) else []
             return {
@@ -578,6 +642,9 @@ class QuantJobManager:
                 "latest_day": days[-1] if days else {},
                 "generated_at": _iso_now(),
                 "data_fill": fill_result,
+                "model_count": len(model_results),
+                "models": model_results,
+                "runtime_tables": aggregate,
             }
 
         return self.run_job("strategy_replay", execute, payload=payload)
@@ -684,6 +751,43 @@ class QuantJobManager:
 
     def _strategy_replay_interval_seconds(self) -> int:
         return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
+
+    def _strategy_replay_max_models(self) -> int:
+        return max(1, min(_env_int("QT_STRATEGY_REPLAY_MAX_MODELS", 24), 200))
+
+    def _strategy_replay_targets(self) -> list[Dict[str, Any]]:
+        max_models = self._strategy_replay_max_models()
+        base_params = quant_engine.strategy_params()
+        targets: list[Dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add(item: Dict[str, Any]) -> None:
+            if not isinstance(item, dict):
+                return
+            model_id = str(item.get("id") or item.get("model_id") or "").strip()
+            if not model_id or model_id in seen or len(targets) >= max_models:
+                return
+            params = item.get("params") if isinstance(item.get("params"), dict) else {}
+            targets.append({**item, "id": model_id, "params": quant_engine.strategy_params(params)})
+            seen.add(model_id)
+
+        for preset in capital_presets(base_params):
+            add(preset)
+        models_payload = strategy_evolution.models(limit=max_models, include_records=False)
+        for model in models_payload.get("items") if isinstance(models_payload.get("items"), list) else []:
+            if isinstance(model, dict) and model.get("reusable", True):
+                add(model)
+        if not targets:
+            add(
+                {
+                    "id": "active",
+                    "name": "后台基准参数（非跟随策略）",
+                    "source": "baseline",
+                    "reusable": False,
+                    "params": base_params,
+                }
+            )
+        return targets
 
     def _strategy_evolution_interval_seconds(self) -> int:
         return _env_int("STRATEGY_EVOLUTION_INTERVAL_SECONDS", 6 * 3600)
