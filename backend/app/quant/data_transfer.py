@@ -356,71 +356,72 @@ def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes, progress: ProgressCallback | None = None) -> tuple[str, int]:
+def _merge_sqlite_path(target_file: Path, incoming_file: Path, progress: ProgressCallback | None = None) -> tuple[str, int]:
     if not target_file.exists():
-        target_file.write_bytes(incoming_bytes)
+        shutil.copy2(incoming_file, target_file)
         return "created", 1
+    target = sqlite3.connect(target_file)
+    try:
+        target.execute("ATTACH DATABASE ? AS incoming", (str(incoming_file),))
+        source_tables = [
+            row[0]
+            for row in target.execute("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        ]
+        changed = 0
+        total_tables = len(source_tables)
+        for index, table in enumerate(source_tables, start=1):
+            if progress:
+                progress(
+                    {
+                        "stage": "sqlite_merge",
+                        "sqlite_table": table,
+                        "sqlite_table_index": index,
+                        "sqlite_table_count": total_tables,
+                        "message": f"正在合并 SQLite 表 {table} ({index}/{total_tables})",
+                    }
+                )
+            table_q = _quote_identifier(table)
+            target_exists = target.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
+            if not target_exists:
+                ddl = target.execute("SELECT sql FROM incoming.sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
+                if ddl and ddl[0]:
+                    target.execute(str(ddl[0]))
+            source_cols = [row[1] for row in target.execute(f"PRAGMA incoming.table_info({table_q})")]
+            target_cols = [row[1] for row in target.execute(f"PRAGMA table_info({table_q})")]
+            cols = [col for col in source_cols if col in target_cols]
+            if not cols:
+                continue
+            cols_sql = ", ".join(_quote_identifier(col) for col in cols)
+            before = target.total_changes
+            target.execute(f"INSERT OR REPLACE INTO {table_q} ({cols_sql}) SELECT {cols_sql} FROM incoming.{table_q}")
+            changed += target.total_changes - before
+            if progress:
+                progress(
+                    {
+                        "stage": "sqlite_merge",
+                        "sqlite_table": table,
+                        "sqlite_table_index": index,
+                        "sqlite_table_count": total_tables,
+                        "sqlite_changed_rows": changed,
+                        "message": f"已合并 SQLite 表 {table} ({index}/{total_tables})",
+                    }
+                )
+        target.commit()
+        target.execute("DETACH DATABASE incoming")
+        return "merged", changed
+    finally:
+        target.close()
+
+
+def _merge_sqlite_file(target_file: Path, incoming_bytes: bytes, progress: ProgressCallback | None = None) -> tuple[str, int]:
     fd, temp_name = tempfile.mkstemp(prefix="qt_import_db_", suffix=".sqlite3")
     os.close(fd)
+    temp_path = Path(temp_name)
     try:
-        with Path(temp_name).open("wb") as handle:
-            handle.write(incoming_bytes)
-        target = sqlite3.connect(target_file)
-        try:
-            target.execute("ATTACH DATABASE ? AS incoming", (temp_name,))
-            source_tables = [
-                row[0]
-                for row in target.execute("SELECT name FROM incoming.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            ]
-            changed = 0
-            total_tables = len(source_tables)
-            for index, table in enumerate(source_tables, start=1):
-                if progress:
-                    progress(
-                        {
-                            "stage": "sqlite_merge",
-                            "sqlite_table": table,
-                            "sqlite_table_index": index,
-                            "sqlite_table_count": total_tables,
-                            "message": f"正在合并 SQLite 表 {table} ({index}/{total_tables})",
-                        }
-                    )
-                table_q = _quote_identifier(table)
-                target_exists = target.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
-                if not target_exists:
-                    ddl = target.execute("SELECT sql FROM incoming.sqlite_master WHERE type='table' AND name = ?", (table,)).fetchone()
-                    if ddl and ddl[0]:
-                        target.execute(str(ddl[0]))
-                source_cols = [row[1] for row in target.execute(f"PRAGMA incoming.table_info({table_q})")]
-                target_cols = [row[1] for row in target.execute(f"PRAGMA table_info({table_q})")]
-                cols = [col for col in source_cols if col in target_cols]
-                if not cols:
-                    continue
-                cols_sql = ", ".join(_quote_identifier(col) for col in cols)
-                before = target.total_changes
-                target.execute(f"INSERT OR REPLACE INTO {table_q} ({cols_sql}) SELECT {cols_sql} FROM incoming.{table_q}")
-                changed += target.total_changes - before
-                if progress:
-                    progress(
-                        {
-                            "stage": "sqlite_merge",
-                            "sqlite_table": table,
-                            "sqlite_table_index": index,
-                            "sqlite_table_count": total_tables,
-                            "sqlite_changed_rows": changed,
-                            "message": f"已合并 SQLite 表 {table} ({index}/{total_tables})",
-                        }
-                    )
-            target.commit()
-            target.execute("DETACH DATABASE incoming")
-            return "merged", changed
-        finally:
-            target.close()
+        temp_path.write_bytes(incoming_bytes)
+        return _merge_sqlite_path(target_file, temp_path, progress=progress)
     finally:
-        try:
-            Path(temp_name).unlink(missing_ok=True)
-        except Exception:
-            pass
+        temp_path.unlink(missing_ok=True)
 
 
 def _merge_member(
@@ -451,6 +452,26 @@ def _merge_member(
         return "kept_existing", 0
     target_file.write_bytes(incoming_bytes)
     return "created", 1
+
+
+def _merge_member_stream(
+    target_file: Path,
+    rel_path: PurePosixPath,
+    source: Any,
+    progress: ProgressCallback | None = None,
+) -> tuple[str, int]:
+    if target_file.name != "quant_data.sqlite3":
+        return _merge_member(target_file, rel_path, source.read(), progress=progress)
+
+    fd, temp_name = tempfile.mkstemp(prefix="qt_import_db_", suffix=".sqlite3")
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        with temp_path.open("wb") as handle:
+            shutil.copyfileobj(source, handle, length=1024 * 1024)
+        return _merge_sqlite_path(target_file, temp_path, progress=progress)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def validate_data_package(package_file: Path) -> Dict[str, Any]:
@@ -519,7 +540,7 @@ def import_data_package(
                             "message": f"正在合并 {rel_path}",
                         }
                     )
-                action, added = _merge_member(target_file, rel_path, source.read(), progress=progress)
+                action, added = _merge_member_stream(target_file, rel_path, source, progress=progress)
             actions[action] = actions.get(action, 0) + 1
             added_records += int(added or 0)
             imported_names.add(rel_path.name)
