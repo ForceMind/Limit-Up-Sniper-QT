@@ -266,6 +266,8 @@ sudo nginx -T | grep -nE "client_max_body_size|proxy_read_timeout|proxy_send_tim
 
 v0.2.25 起，后台页面手动触发新闻抓取、AI 分析、行情同步、日K补齐、龙虎榜同步、交易循环、策略复盘和系统启动时，接口默认只提交后台任务并立即返回。普通任务按钮如果仍反复出现 504，优先确认已经执行 `qt update` 或 `qt restart` 让新版后端生效，再查看后台任务日志和服务日志。
 
+v0.2.30 起，后台手动触发的策略复盘和策略进化默认使用独立 Python 子进程运行。API 进程只负责鉴权、记录任务状态和启动子进程；子进程继续写入 `quant_job_state.json` 和运行日志。需要临时回到线程模式时，可在接口上显式传 `process=false`，或设置 `QT_HEAVY_JOB_PROCESS_ENABLED=false` 后重启。
+
 v0.2.29 起，后台上传合并数据包时，`quant_data.sqlite3` 不再一次性读入内存，而是流式写入临时 SQLite 后再合并。58MB 这类压缩包本身没有超过上传限制；如果旧版本合并失败，先更新到 v0.2.29 再重新上传。
 
 如果只是迁移本地跑好的策略运行结果，优先使用 `python scripts/package_strategy_runtime_export.py` 生成小包。该小包只包含 `strategy_runtime_*` 运行表，不包含新闻、行情、K 线 JSON 和账号配置，适合把本地资金档复盘结果合并到服务器。

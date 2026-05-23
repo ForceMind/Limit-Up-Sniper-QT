@@ -2452,7 +2452,7 @@
           if (this.isJobRunning('strategy_replay') || this.isJobPaused('strategy_replay')) return this.pauseOrResumeJob('strategy_replay');
           this.replayingStrategy = true;
           try {
-            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday', background: 'true' });
+            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday', background: 'true', process: 'true' });
             if (this.asOf) q.set('end_date', this.asOf);
             await this.api(`/api/jobs/strategy/replay?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
@@ -2744,7 +2744,7 @@
           if (this.isEvolutionPaused) return this.resumeEvolution();
           this.evolving = true;
           try {
-            const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false', mode: this.tradeMode || 'intraday' });
+            const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false', mode: this.tradeMode || 'intraday', background: 'true', process: 'true' });
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.asOf) q.set('end_date', this.asOf);
             this.evolutionStatus = await this.api(`/api/quant/evolve_strategy?${q.toString()}`, { method: 'POST' });

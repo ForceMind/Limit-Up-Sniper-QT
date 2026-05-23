@@ -1648,12 +1648,22 @@ def quant_evolve_strategy(
     apply_best: bool = Query(default=False),
     mode: str = Query(default="intraday"),
     background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_HEAVY_JOB_PROCESS_ENABLED", True)),
 ):
+    current = strategy_evolution.status()
+    if current.get("status") == "running":
+        return current
+    if process:
+        return job_manager.run_strategy_evolution(
+            start_date=start_date,
+            end_date=end_date,
+            mode=mode,
+            generations=generations,
+            population_size=population_size,
+            apply_best=apply_best,
+            process=True,
+        )
     if background:
-        current = strategy_evolution.status()
-        if current.get("status") == "running":
-            return current
-
         def worker() -> None:
             job_manager.run_strategy_evolution(
                 start_date=start_date,
@@ -1808,6 +1818,7 @@ def jobs_strategy_replay(
     batch_days: Optional[int] = Query(default=None, ge=1, le=366),
     use_cursor: bool = Query(default=False),
     background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_HEAVY_JOB_PROCESS_ENABLED", True)),
 ):
     return job_manager.run_strategy_replay(
         start_date=start_date,
@@ -1816,6 +1827,7 @@ def jobs_strategy_replay(
         background=background,
         batch_days=batch_days,
         use_cursor=use_cursor,
+        process=process,
     )
 
 

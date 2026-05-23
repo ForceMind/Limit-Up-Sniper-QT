@@ -4,10 +4,14 @@ import asyncio
 import gc
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -133,6 +137,8 @@ class QuantJobManager:
             "status",
             "job",
             "stage",
+            "process",
+            "process_pid",
             "started_at",
             "finished_at",
             "updated_at",
@@ -451,6 +457,108 @@ class QuantJobManager:
             "message": progress_message,
         }
 
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parents[3]
+
+    def _process_worker_script(self) -> Path:
+        return self._project_root() / "scripts" / "run_quant_job.py"
+
+    def _state_job_running(self, name: str) -> bool:
+        state = self._load_state()
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        current = jobs.get(name) if isinstance(jobs.get(name), dict) else {}
+        return current.get("status") == "running"
+
+    def run_job_process(
+        self,
+        name: str,
+        payload: Optional[Dict[str, Any]] = None,
+        message: str = "",
+    ) -> Dict[str, Any]:
+        name = str(name or "").strip()
+        payload = payload or {}
+        if self.is_paused(name):
+            paused_message = f"{_job_label(name)}已暂停，跳过本次运行"
+            self._append_log("warning", paused_message, job=name, stage="paused", payload=payload)
+            return {"status": "paused", "job": name, "process": True, "message": paused_message}
+        with self._lock:
+            if self._running.get(name) or self._state_job_running(name):
+                running_message = f"{_job_label(name)}正在运行，已跳过重复请求"
+                self._append_log("warning", running_message, job=name, stage="skip", payload=payload)
+                return {"status": "running", "job": name, "process": True, "message": running_message}
+        worker_script = self._process_worker_script()
+        if not worker_script.exists():
+            message_text = f"找不到独立任务进程入口：{worker_script}"
+            self._append_log("error", message_text, job=name, stage="process_start", payload=payload)
+            return {"status": "error", "job": name, "process": True, "message": message_text}
+        process_payload = {
+            "job": name,
+            "payload": payload,
+            "request_id": uuid.uuid4().hex[:16],
+            "queued_at": _iso_now(),
+        }
+        progress_message = str(message or f"{_job_label(name)}已转入独立进程运行").strip()
+        self._record_job_start(name, payload)
+        self.update_progress(name, 1, progress_message, {"process": True})
+        command = [
+            sys.executable,
+            str(worker_script),
+            "--job",
+            name,
+            "--payload-json",
+            json.dumps(process_payload, ensure_ascii=False, default=str),
+        ]
+        env = os.environ.copy()
+        backend_dir = str(self._project_root() / "backend")
+        env["PYTHONPATH"] = backend_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        popen_kwargs: Dict[str, Any] = {
+            "cwd": str(self._project_root()),
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        else:
+            popen_kwargs["start_new_session"] = True
+        try:
+            process = subprocess.Popen(command, **popen_kwargs)
+        except Exception as exc:
+            self._record_job_finish(name, time.time(), {}, error=str(exc))
+            return {"status": "error", "job": name, "process": True, "message": str(exc)}
+        with self._state_lock:
+            state = self._load_state()
+            jobs = state.setdefault("jobs", {})
+            current = jobs.setdefault(name, {})
+            current.update(
+                {
+                    "process": True,
+                    "process_pid": process.pid,
+                    "process_request_id": process_payload["request_id"],
+                    "progress_message": progress_message,
+                    "updated_at": _iso_now(),
+                }
+            )
+            self._save_state(state)
+        self._append_log(
+            "info",
+            f"{_job_label(name)}已启动独立进程",
+            job=name,
+            stage="process_start",
+            payload={"pid": process.pid, "request_id": process_payload["request_id"]},
+        )
+        return {
+            "status": "running",
+            "job": name,
+            "process": True,
+            "process_pid": process.pid,
+            "background": True,
+            "progress_pct": 1,
+            "message": progress_message,
+        }
+
     def run_news_fetch(
         self,
         hours: int = 12,
@@ -621,6 +729,7 @@ class QuantJobManager:
         background: bool = False,
         batch_days: Optional[int] = None,
         use_cursor: bool = False,
+        process: bool = False,
     ) -> Dict[str, Any]:
         requested_start_date = str(start_date or self._default_backfill_start_date()).strip()
         requested_end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
@@ -643,6 +752,8 @@ class QuantJobManager:
             "batch_days": replay_cursor.get("batch_days"),
             "cursor_enabled": replay_cursor.get("enabled"),
         }
+        if process:
+            return self.run_job_process("strategy_replay", payload=payload, message="策略复盘已转入独立进程运行")
 
         def execute() -> Dict[str, Any]:
             targets = self._strategy_replay_targets()
@@ -767,6 +878,7 @@ class QuantJobManager:
         generations: Optional[int] = None,
         population_size: Optional[int] = None,
         apply_best: Optional[bool] = None,
+        process: bool = False,
     ) -> Dict[str, Any]:
         start_date = str(start_date or self._default_backfill_start_date()).strip()
         end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
@@ -790,6 +902,8 @@ class QuantJobManager:
             message = "服务器内存压力过高，已跳过策略进化"
             self._append_log("warning", message, job="strategy_evolution", stage="memory_guard", payload=payload)
             return {"status": "skipped", "message": message, "memory_guard": memory_guard}
+        if process:
+            return self.run_job_process("strategy_evolution", payload=payload, message="策略进化已转入独立进程运行")
 
         def execute() -> Dict[str, Any]:
             fill_result = quant_engine.ensure_daily_kline_for_events(
