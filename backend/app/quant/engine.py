@@ -98,6 +98,24 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def env_int(name: str, default: int, minimum: int = 0, maximum: Optional[int] = None) -> int:
+    try:
+        value = int(float(os.getenv(name, "") or default))
+    except Exception:
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = str(os.getenv(name, "") or "").strip().lower()
+    if not value:
+        return default
+    return value not in {"0", "false", "no", "off"}
+
+
 def digits6(value: Any) -> str:
     text = "".join(ch for ch in str(value or "") if ch.isdigit())
     if len(text) > 6:
@@ -384,6 +402,93 @@ class QuantEngine:
         self._lhb_by_code_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self._thread_local = threading.local()
 
+    def _cache_limit(self, name: str, default: int, maximum: Optional[int] = None) -> int:
+        return env_int(name, default, minimum=0, maximum=maximum)
+
+    def _prune_cache(self, cache: Dict[Any, Any], limit: int) -> int:
+        if limit <= 0:
+            removed = len(cache)
+            cache.clear()
+            return removed
+        removed = 0
+        while len(cache) > limit:
+            try:
+                first_key = next(iter(cache))
+            except StopIteration:
+                break
+            cache.pop(first_key, None)
+            removed += 1
+        return removed
+
+    def _remember_kline(self, code: str, rows: List[Dict[str, Any]]) -> None:
+        self._kline_cache[code] = rows
+        limit = self._cache_limit("QT_KLINE_CACHE_MAX_CODES", 480, maximum=3000)
+        while limit > 0 and len(self._kline_cache) > limit:
+            try:
+                evicted = next(iter(self._kline_cache))
+            except StopIteration:
+                break
+            self._kline_cache.pop(evicted, None)
+            self._kline_row_map_cache.pop(evicted, None)
+        if limit <= 0:
+            self._kline_cache.clear()
+            self._kline_row_map_cache.clear()
+
+    def _remember_intraday(self, cache_key: Tuple[str, str], rows: List[Dict[str, Any]]) -> None:
+        self._intraday_cache[cache_key] = rows
+        self._prune_cache(self._intraday_cache, self._cache_limit("QT_INTRADAY_CACHE_MAX_KEYS", 120, maximum=2000))
+
+    def _remember_future_return(self, cache_key: Tuple[str, str, int], value: Optional[Dict[str, Any]]) -> None:
+        self._future_return_cache[cache_key] = value
+        self._prune_cache(self._future_return_cache, self._cache_limit("QT_FUTURE_RETURN_CACHE_MAX_ITEMS", 12000, maximum=200000))
+
+    def _remember_factor(self, cache_key: Tuple[str, str], value: Dict[str, Any]) -> None:
+        self._factor_cache[cache_key] = value
+        self._prune_cache(self._factor_cache, self._cache_limit("QT_FACTOR_CACHE_MAX_ITEMS", 6000, maximum=200000))
+
+    def _remember_lhb_cache(self, rows_key: str, rows: List[Dict[str, Any]], by_code_key: str, by_code: Dict[str, List[Dict[str, Any]]]) -> None:
+        self._lhb_rows_cache[rows_key] = rows
+        self._lhb_by_code_cache[by_code_key] = by_code
+        limit = self._cache_limit("QT_LHB_CACHE_MAX_DATES", 3, maximum=30)
+        self._prune_cache(self._lhb_rows_cache, limit)
+        self._prune_cache(self._lhb_by_code_cache, limit)
+
+    def trim_runtime_caches(self, aggressive: bool = False) -> Dict[str, Any]:
+        before = self.cache_stats()
+        if aggressive:
+            self._kline_cache.clear()
+            self._kline_row_map_cache.clear()
+            self._intraday_cache.clear()
+            self._factor_cache.clear()
+            self._future_return_cache.clear()
+            self._correlation_cache.clear()
+            self._lhb_rows_cache.clear()
+            self._lhb_by_code_cache.clear()
+        else:
+            self._prune_cache(self._intraday_cache, self._cache_limit("QT_INTRADAY_CACHE_MAX_KEYS", 120, maximum=2000))
+            self._prune_cache(self._factor_cache, self._cache_limit("QT_FACTOR_CACHE_MAX_ITEMS", 6000, maximum=200000))
+            self._prune_cache(self._future_return_cache, self._cache_limit("QT_FUTURE_RETURN_CACHE_MAX_ITEMS", 12000, maximum=200000))
+            self._prune_cache(self._correlation_cache, self._cache_limit("QT_CORRELATION_CACHE_MAX_ITEMS", 200, maximum=5000))
+            self._prune_cache(self._lhb_rows_cache, self._cache_limit("QT_LHB_CACHE_MAX_DATES", 3, maximum=30))
+            self._prune_cache(self._lhb_by_code_cache, self._cache_limit("QT_LHB_CACHE_MAX_DATES", 3, maximum=30))
+            self._remember_kline("__cache_trim_probe__", [])
+            self._kline_cache.pop("__cache_trim_probe__", None)
+            self._kline_row_map_cache.pop("__cache_trim_probe__", None)
+        return {"before": before, "after": self.cache_stats(), "aggressive": bool(aggressive)}
+
+    def cache_stats(self) -> Dict[str, Any]:
+        return {
+            "events": len(self._events_cache),
+            "kline_codes": len(self._kline_cache),
+            "kline_row_maps": len(self._kline_row_map_cache),
+            "intraday_keys": len(self._intraday_cache),
+            "future_return_items": len(self._future_return_cache),
+            "correlation_items": len(self._correlation_cache),
+            "factor_items": len(self._factor_cache),
+            "lhb_rows_keys": len(self._lhb_rows_cache),
+            "lhb_by_code_keys": len(self._lhb_by_code_cache),
+        }
+
     def _sqlite_rows(self, query: str, params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
         if not QUANT_DB_FILE.exists():
             return []
@@ -551,6 +656,47 @@ class QuantEngine:
         rows.sort(key=lambda item: (item["trade_date"], item["stock_code"], item["buy_amount"]), reverse=True)
         return rows[:limit]
 
+    def lhb_summary(self, end_date: Optional[str] = None, recent_limit: int = 20) -> Dict[str, Any]:
+        end_date = str(end_date or "").strip()[:10]
+        recent_limit = max(1, min(int(recent_limit or 20), 120))
+        if QUANT_DB_FILE.exists():
+            rows = self._sqlite_rows(
+                """
+                SELECT COUNT(*) AS rows_count,
+                       COUNT(DISTINCT stock_code) AS stock_count,
+                       MAX(trade_date) AS latest_date
+                FROM lhb_records
+                WHERE (? = '' OR trade_date <= ?)
+                """,
+                (end_date, end_date),
+            )
+            recent_rows = self._sqlite_rows(
+                """
+                SELECT trade_date, COUNT(*) AS rows_count
+                FROM lhb_records
+                WHERE (? = '' OR trade_date <= ?)
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT ?
+                """,
+                (end_date, end_date, recent_limit),
+            )
+            row = rows[0] if rows else {}
+            return {
+                "rows": int(safe_float(row.get("rows_count"), 0)),
+                "stock_count": int(safe_float(row.get("stock_count"), 0)),
+                "latest_date": str(row.get("latest_date") or ""),
+                "recent_dates": [str(item.get("trade_date") or "") for item in recent_rows if item.get("trade_date")],
+            }
+        records = self.load_lhb_records(end_date=end_date or None, limit=200000)
+        dates = sorted({row.get("trade_date", "") for row in records if row.get("trade_date")}, reverse=True)
+        return {
+            "rows": len(records),
+            "stock_count": len({row.get("stock_code") for row in records}),
+            "latest_date": dates[0] if dates else "",
+            "recent_dates": dates[:recent_limit],
+        }
+
     def load_kline(self, code: str) -> List[Dict[str, Any]]:
         code = digits6(code)
         if not code:
@@ -582,10 +728,6 @@ class QuantEngine:
                 }
             )
 
-        payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
-        rows = payload if isinstance(payload, list) else []
-        for row in rows:
-            add_row(row)
         for row in self._sqlite_rows(
             """
             SELECT date, open, close, high, low, volume, amount
@@ -596,9 +738,14 @@ class QuantEngine:
             (code,),
         ):
             add_row(row)
+        if not clean_rows or env_bool("QT_READ_LEGACY_KLINE_JSON_CACHE", False):
+            payload = read_json(KLINE_DAY_DIR / f"{code}.json", [])
+            rows = payload if isinstance(payload, list) else []
+            for row in rows:
+                add_row(row)
         by_date = {row["date"]: row for row in clean_rows}
         merged_rows = [by_date[key] for key in sorted(by_date.keys())]
-        self._kline_cache[code] = merged_rows
+        self._remember_kline(code, merged_rows)
         return merged_rows
 
     def load_intraday_bars(self, code: str, date: str) -> List[Dict[str, Any]]:
@@ -609,7 +756,7 @@ class QuantEngine:
         if cached is not None:
             return cached
         if not code or not date:
-            self._intraday_cache[cache_key] = []
+            self._remember_intraday(cache_key, [])
             return []
         path = KLINE_MIN_DIR / f"{code}_{date}.csv"
         bars: List[Dict[str, Any]] = []
@@ -658,22 +805,50 @@ class QuantEngine:
 
         by_time = {row["time"]: row for row in bars}
         bars = [by_time[key] for key in sorted(by_time.keys())]
-        self._intraday_cache[cache_key] = bars
+        self._remember_intraday(cache_key, bars)
         return bars
 
-    def _available_intraday_dates(self) -> Dict[str, set]:
+    def _available_intraday_dates(
+        self,
+        codes: Optional[List[str]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, set]:
         out: Dict[str, set] = {}
+        code_set = {digits6(code) for code in (codes or []) if digits6(code)}
         if KLINE_MIN_DIR.exists():
             for path in KLINE_MIN_DIR.glob("*.csv"):
                 match = re.match(r"^(\d{6})_(\d{4}-\d{2}-\d{2})\.csv$", path.name)
                 if not match:
                     continue
+                if code_set and match.group(1) not in code_set:
+                    continue
+                if start_date and match.group(2) < start_date:
+                    continue
+                if end_date and match.group(2) > end_date:
+                    continue
                 out.setdefault(match.group(2), set()).add(match.group(1))
-        for row in self._sqlite_rows("SELECT DISTINCT date, code FROM market_minute_bars WHERE date IS NOT NULL AND code IS NOT NULL"):
-            date = str(row.get("date") or "").strip()[:10]
-            code = digits6(row.get("code"))
-            if date and code:
-                out.setdefault(date, set()).add(code)
+        query = "SELECT DISTINCT date, code FROM market_minute_bars WHERE date IS NOT NULL AND code IS NOT NULL"
+        params: List[Any] = []
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+        code_chunks = [sorted(code_set)[idx : idx + 400] for idx in range(0, len(code_set), 400)] if code_set else [[]]
+        for chunk in code_chunks:
+            chunk_query = query
+            chunk_params = list(params)
+            if chunk:
+                placeholders = ",".join("?" for _ in chunk)
+                chunk_query += f" AND code IN ({placeholders})"
+                chunk_params.extend(chunk)
+            for row in self._sqlite_rows(chunk_query, tuple(chunk_params)):
+                date = str(row.get("date") or "").strip()[:10]
+                code = digits6(row.get("code"))
+                if date and code:
+                    out.setdefault(date, set()).add(code)
         return out
 
     def _first_intraday_bar(self, code: str, date: str) -> Optional[Dict[str, Any]]:
@@ -950,6 +1125,7 @@ class QuantEngine:
                         continue
                     cached_events.append(event)
                 if cached_events:
+                    cached_events = cached_events[: self._cache_limit("QT_EVENTS_CACHE_MAX_ITEMS", 30000, maximum=500000)]
                     self._events_cache_key = key
                     self._events_cache = cached_events
                     return list(cached_events)
@@ -964,6 +1140,7 @@ class QuantEngine:
             seen.add(dedupe)
             events.append(event)
         events.sort(key=lambda item: (item.date, item.timestamp, item.code), reverse=True)
+        events = events[: self._cache_limit("QT_EVENTS_CACHE_MAX_ITEMS", 30000, maximum=500000)]
         self._events_cache_key = key
         self._events_cache = events
         write_json(
@@ -1144,7 +1321,7 @@ class QuantEngine:
             return dict(cached) if isinstance(cached, dict) else cached
         rows = self.load_kline(code)
         if not rows:
-            self._future_return_cache[cache_key] = None
+            self._remember_future_return(cache_key, None)
             return None
         start_idx = None
         for idx, row in enumerate(rows):
@@ -1152,18 +1329,18 @@ class QuantEngine:
                 start_idx = idx
                 break
         if start_idx is None:
-            self._future_return_cache[cache_key] = None
+            self._remember_future_return(cache_key, None)
             return None
         exit_idx = start_idx + max(1, hold_days) - 1
         if exit_idx >= len(rows):
-            self._future_return_cache[cache_key] = None
+            self._remember_future_return(cache_key, None)
             return None
         entry = rows[start_idx]
         exit_row = rows[exit_idx]
         entry_price = safe_float(entry.get("open") or entry.get("close"), 0)
         exit_price = safe_float(exit_row.get("close"), 0)
         if entry_price <= 0 or exit_price <= 0:
-            self._future_return_cache[cache_key] = None
+            self._remember_future_return(cache_key, None)
             return None
         payload = {
             "entry_date": entry["date"],
@@ -1172,9 +1349,7 @@ class QuantEngine:
             "exit_price": round(exit_price, 3),
             "return_pct": round((exit_price / entry_price - 1) * 100, 3),
         }
-        if len(self._future_return_cache) > 20000:
-            self._future_return_cache.clear()
-        self._future_return_cache[cache_key] = payload
+        self._remember_future_return(cache_key, payload)
         return dict(payload)
 
     def ensure_daily_kline_for_events(
@@ -1592,17 +1767,23 @@ class QuantEngine:
         cache_key = f"lhb-by-code:{as_of}"
         by_code = self._lhb_by_code_cache.get(cache_key)
         if by_code is None:
-            rows_cache_key = f"lhb-rows:{as_of}"
+            lookback_days = self._cache_limit("QT_LHB_FACTOR_LOOKBACK_DAYS", 45, maximum=365)
+            as_dt = parse_time(as_of)
+            start_date = (as_dt - timedelta(days=max(1, lookback_days))).strftime("%Y-%m-%d") if as_dt else None
+            rows_cache_key = f"lhb-rows:{start_date or ''}:{as_of}"
             rows_all = self._lhb_rows_cache.get(rows_cache_key)
             if rows_all is None:
-                rows_all = self.load_lhb_records(end_date=as_of, limit=200000)
-                self._lhb_rows_cache[rows_cache_key] = rows_all
+                rows_all = self.load_lhb_records(
+                    start_date=start_date,
+                    end_date=as_of,
+                    limit=self._cache_limit("QT_LHB_FACTOR_MAX_ROWS", 50000, maximum=200000),
+                )
             by_code = {}
             for row in rows_all:
                 row_code = digits6(row.get("stock_code"))
                 if row_code:
                     by_code.setdefault(row_code, []).append(row)
-            self._lhb_by_code_cache[cache_key] = by_code
+            self._remember_lhb_cache(rows_cache_key, rows_all, cache_key, by_code)
         rows = by_code.get(code, [])[:120]
         if not rows:
             return {"score": 50.0, "risk": 50.0, "net_buy_amount": 0.0, "hot_seat_count": 0, "sample_count": 0}
@@ -1683,7 +1864,7 @@ class QuantEngine:
             "lhb_score": round(lhb_score, 2),
             "lhb": lhb,
         }
-        self._factor_cache[cache_key] = payload
+        self._remember_factor(cache_key, payload)
         return payload
 
     def _agent_scores(self, event_bundle: Dict[str, Any], corr: Dict[str, Any], as_of: str) -> Dict[str, Any]:
@@ -1832,15 +2013,44 @@ class QuantEngine:
             "strategy_params": params,
         }
 
-    def _all_trading_dates_for_codes(self, codes: List[str]) -> List[str]:
+    def _all_trading_dates_for_codes(
+        self,
+        codes: List[str],
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> List[str]:
+        clean_codes = sorted({digits6(code) for code in codes if digits6(code)})
         dates = set()
-        for code in codes:
-            for row in self.load_kline(code):
-                date = str(row.get("date") or "")
-                if date:
+        if clean_codes and QUANT_DB_FILE.exists():
+            for table, date_column in (("market_daily_bars", "date"), ("market_minute_bars", "date")):
+                for offset in range(0, len(clean_codes), 400):
+                    chunk = clean_codes[offset : offset + 400]
+                    placeholders = ",".join("?" for _ in chunk)
+                    query = f"SELECT DISTINCT {date_column} AS date FROM {table} WHERE code IN ({placeholders}) AND {date_column} IS NOT NULL"
+                    params: List[Any] = list(chunk)
+                    if start_date:
+                        query += f" AND {date_column} >= ?"
+                        params.append(start_date)
+                    if end_date:
+                        query += f" AND {date_column} <= ?"
+                        params.append(end_date)
+                    for row in self._sqlite_rows(query, tuple(params)):
+                        date = str(row.get("date") or "").strip()[:10]
+                        if date:
+                            dates.add(date)
+        if not dates:
+            for code in clean_codes:
+                for row in self.load_kline(code):
+                    date = str(row.get("date") or "").strip()[:10]
+                    if not date:
+                        continue
+                    if start_date and date < start_date:
+                        continue
+                    if end_date and date > end_date:
+                        continue
                     dates.add(date)
-        available_intraday = self._available_intraday_dates()
-        code_set = {digits6(code) for code in codes}
+        available_intraday = self._available_intraday_dates(clean_codes, start_date, end_date)
+        code_set = set(clean_codes)
         for date, date_codes in available_intraday.items():
             if code_set.intersection(date_codes):
                 dates.add(date)
@@ -1854,6 +2064,7 @@ class QuantEngine:
         if row_map is None:
             row_map = {row["date"]: row for row in self.load_kline(code)}
             self._kline_row_map_cache[code] = row_map
+            self._prune_cache(self._kline_row_map_cache, self._cache_limit("QT_KLINE_CACHE_MAX_CODES", 480, maximum=3000))
         return row_map.get(date)
 
     def _next_trading_date(self, dates: List[str], current_date: str) -> str:
@@ -1959,6 +2170,56 @@ class QuantEngine:
             "turnover_ratio": round(turnover_amount / initial_cash, 4),
         }
 
+    def _historical_outcomes_for_replay(
+        self,
+        scoped_events: List[NewsEvent],
+        start_date: Optional[str],
+        end_date: Optional[str],
+        hold_days: int,
+    ) -> List[Dict[str, Any]]:
+        if not scoped_events:
+            return []
+        codes = {event.code for event in scoped_events if event.code}
+        industries = {event.industry for event in scoped_events if event.industry}
+        event_types = {event.event_type for event in scoped_events if event.event_type}
+        history_start_date = ""
+        if start_date:
+            try:
+                history_start_date = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
+            except Exception:
+                history_start_date = ""
+        candidates: List[NewsEvent] = []
+        for event in self.events():
+            if self._is_sample_event(event):
+                continue
+            if end_date and event.date >= end_date:
+                continue
+            if history_start_date and event.date < history_start_date:
+                continue
+            if codes and event.code not in codes and event.industry not in industries and event.event_type not in event_types:
+                continue
+            candidates.append(event)
+        history_limit = self._cache_limit("QT_REPLAY_HISTORY_EVENT_LIMIT", 800, maximum=100000)
+        if history_limit <= 0:
+            return []
+        candidates.sort(key=lambda item: (item.date, item.timestamp, item.impact_score), reverse=True)
+        candidates = candidates[:history_limit]
+
+        historical_outcomes = []
+        for event in candidates:
+            realized = self.future_return(event.code, event.date, hold_days=hold_days)
+            if not realized:
+                continue
+            historical_outcomes.append(
+                {
+                    "exit_date": realized["exit_date"],
+                    "event": event,
+                    "return_pct": safe_float(realized.get("return_pct"), 0),
+                }
+            )
+        historical_outcomes.sort(key=lambda item: item["exit_date"])
+        return historical_outcomes
+
     def walk_forward(
         self,
         start_date: Optional[str] = None,
@@ -2006,7 +2267,7 @@ class QuantEngine:
         codes = sorted({event.code for event in all_events})
         trading_dates = [
             date
-            for date in self._all_trading_dates_for_codes(codes)
+            for date in self._all_trading_dates_for_codes(codes, start_date=start_date, end_date=end_date)
             if start_date <= date <= end_date
         ]
         if not trading_dates:
@@ -2032,31 +2293,7 @@ class QuantEngine:
         days: List[Dict[str, Any]] = []
         equity_curve: List[Dict[str, Any]] = []
         prev_total = float(initial_cash)
-        historical_outcomes = []
-        history_start_date = ""
-        if start_date:
-            try:
-                history_start_date = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
-            except Exception:
-                history_start_date = ""
-        for event in self.events():
-            if self._is_sample_event(event):
-                continue
-            if end_date and event.date > end_date:
-                continue
-            if history_start_date and event.date < history_start_date:
-                continue
-            realized = self.future_return(event.code, event.date, hold_days=hold_days)
-            if not realized:
-                continue
-            historical_outcomes.append(
-                {
-                    "exit_date": realized["exit_date"],
-                    "event": event,
-                    "return_pct": safe_float(realized.get("return_pct"), 0),
-                }
-            )
-        historical_outcomes.sort(key=lambda item: item["exit_date"])
+        historical_outcomes = self._historical_outcomes_for_replay(all_events, start_date, end_date, hold_days)
         outcome_idx = 0
         global_returns: List[float] = []
         code_returns: Dict[str, List[float]] = {}
@@ -2507,7 +2744,7 @@ class QuantEngine:
         codes = sorted({event.code for event in all_events})
         trading_dates = [
             date
-            for date in self._all_trading_dates_for_codes(codes)
+            for date in self._all_trading_dates_for_codes(codes, start_date=start_date, end_date=end_date)
             if start_date <= date <= end_date
         ]
         if not trading_dates:
@@ -2523,36 +2760,12 @@ class QuantEngine:
                 "equity_curve": [],
             }
 
-        intraday_dates = self._available_intraday_dates()
+        intraday_dates = self._available_intraday_dates(codes, start_date, end_date)
         events_by_date: Dict[str, List[NewsEvent]] = {}
         for event in all_events:
             events_by_date.setdefault(event.date, []).append(event)
 
-        historical_outcomes = []
-        history_start_date = ""
-        if start_date:
-            try:
-                history_start_date = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
-            except Exception:
-                history_start_date = ""
-        for event in self.events():
-            if self._is_sample_event(event):
-                continue
-            if end_date and event.date > end_date:
-                continue
-            if history_start_date and event.date < history_start_date:
-                continue
-            realized = self.future_return(event.code, event.date, hold_days=hold_days)
-            if not realized:
-                continue
-            historical_outcomes.append(
-                {
-                    "exit_date": realized["exit_date"],
-                    "event": event,
-                    "return_pct": safe_float(realized.get("return_pct"), 0),
-                }
-            )
-        historical_outcomes.sort(key=lambda item: item["exit_date"])
+        historical_outcomes = self._historical_outcomes_for_replay(all_events, start_date, end_date, hold_days)
         outcome_idx = 0
         global_returns: List[float] = []
         code_returns: Dict[str, List[float]] = {}
@@ -4218,6 +4431,7 @@ class QuantEngine:
         timeline = self.walk_forward(end_date=as_of) if include_heavy else {}
         portfolio = self.paper_portfolio(as_of=as_of)
         events = self.events()
+        lhb_summary = self.lhb_summary(end_date=as_of)
         state = self._load_state()
         kline_codes = {path.stem for path in KLINE_DAY_DIR.glob("*.json")} if KLINE_DAY_DIR.exists() else set()
         for row in self._sqlite_rows("SELECT DISTINCT code FROM market_daily_bars WHERE code IS NOT NULL AND code != ''"):
@@ -4234,7 +4448,7 @@ class QuantEngine:
                 "event_count": len(events),
                 "stock_count": len(self.universe.code_to_name),
                 "kline_stock_count": len(kline_codes),
-                "lhb_record_count": len(self.load_lhb_records(limit=200000)),
+                "lhb_record_count": lhb_summary.get("rows", 0),
             },
             "recommendations": recs,
             "backtest": backtest,

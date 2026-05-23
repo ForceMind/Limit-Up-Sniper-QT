@@ -106,8 +106,7 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
     day_files = list(KLINE_DAY_DIR.glob("*.json")) if KLINE_DAY_DIR.exists() else []
     minute_files = list(KLINE_MIN_DIR.glob("*.csv")) if KLINE_MIN_DIR.exists() else []
     events = quant_engine.events()
-    lhb_rows = quant_engine.load_lhb_records(limit=200000)
-    lhb_dates = sorted({row.get("trade_date", "") for row in lhb_rows if row.get("trade_date")}, reverse=True)
+    lhb_summary = quant_engine.lhb_summary(end_date=as_of, recent_limit=20)
     event_dates: Dict[str, int] = {}
     for event in events:
         event_dates[event.date] = event_dates.get(event.date, 0) + 1
@@ -123,9 +122,9 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
             "day_kline_files": len(day_files),
             "minute_kline_files": len(minute_files),
             "target_count": len(targets),
-            "lhb_rows": len(lhb_rows),
-            "lhb_stock_count": len({row.get("stock_code") for row in lhb_rows}),
-            "latest_lhb_date": lhb_dates[0] if lhb_dates else "",
+            "lhb_rows": lhb_summary.get("rows", 0),
+            "lhb_stock_count": lhb_summary.get("stock_count", 0),
+            "latest_lhb_date": lhb_summary.get("latest_date", ""),
         },
         "daily_coverage": {
             "covered": daily_covered,
@@ -147,10 +146,10 @@ def data_coverage(as_of: Optional[str] = None, top_n: int = 80) -> Dict[str, Any
         "ai": ai_state,
         "biying": biying_minute_sync.status(),
         "lhb": {
-            "rows": len(lhb_rows),
-            "stock_count": len({row.get("stock_code") for row in lhb_rows}),
-            "latest_date": lhb_dates[0] if lhb_dates else "",
-            "recent_dates": lhb_dates[:20],
+            "rows": lhb_summary.get("rows", 0),
+            "stock_count": lhb_summary.get("stock_count", 0),
+            "latest_date": lhb_summary.get("latest_date", ""),
+            "recent_dates": lhb_summary.get("recent_dates", []),
         },
         "targets": target_rows,
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import os
 import threading
@@ -22,6 +23,7 @@ from app.quant.notifier import trade_notifier
 JOB_STATE_FILE = DATA_DIR / "quant_job_state.json"
 JOB_LOG_FILE = DATA_DIR / "quant_runtime_logs.jsonl"
 SENSITIVE_KEY_PARTS = ("key", "token", "password", "secret", "license", "authorization", "cookie")
+HEAVY_CACHE_TRIM_JOBS = {"kline_fill", "lhb_sync", "trade_cycle", "strategy_replay", "strategy_evolution", "system_startup"}
 JOB_LABELS = {
     "scheduler": "调度器",
     "news_fetch": "新闻抓取",
@@ -132,6 +134,7 @@ class QuantJobManager:
         state["ai_analyzer"] = ai_analyzer.status()
         state["biying"] = biying_minute_sync.status()
         state["lhb"] = lhb_status()
+        state["runtime"] = {"memory": self._process_memory_snapshot(), "cache": quant_engine.cache_stats()}
         return {"status": "ok", **state}
 
     def _append_log(
@@ -154,6 +157,46 @@ class QuantJobManager:
             JOB_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with JOB_LOG_FILE.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+    def _process_memory_snapshot(self) -> Dict[str, Any]:
+        status_path = "/proc/self/status"
+        if not os.path.exists(status_path):
+            return {"status": "unsupported"}
+        keys = {"VmRSS": "rss_kb", "VmHWM": "peak_rss_kb", "VmSize": "vms_kb", "Threads": "threads"}
+        out: Dict[str, Any] = {"status": "ok"}
+        try:
+            with open(status_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    name, _, rest = line.partition(":")
+                    if name not in keys:
+                        continue
+                    parts = rest.strip().split()
+                    if not parts:
+                        continue
+                    value = float(parts[0])
+                    out[keys[name]] = int(value)
+                    if name != "Threads":
+                        out[keys[name].replace("_kb", "_mb")] = round(value / 1024, 2)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+        return out
+
+    def _post_job_maintenance(self, name: str) -> Dict[str, Any]:
+        guard = self._memory_guard()
+        aggressive = name in HEAVY_CACHE_TRIM_JOBS or bool(guard.get("pressure"))
+        if not aggressive:
+            return {"memory": self._process_memory_snapshot(), "cache": quant_engine.cache_stats()}
+        try:
+            cache_trim = quant_engine.trim_runtime_caches(aggressive=True)
+        except Exception as exc:
+            cache_trim = {"status": "error", "error": str(exc)}
+        collected = gc.collect()
+        return {
+            "memory_guard": guard,
+            "memory": self._process_memory_snapshot(),
+            "cache_trim": cache_trim,
+            "gc_collected": collected,
+        }
 
     def logs(self, limit: int = 200, level: Optional[str] = None, job: Optional[str] = None) -> Dict[str, Any]:
         limit = max(1, min(int(limit or 200), 1000))
@@ -199,6 +242,9 @@ class QuantJobManager:
         self._append_log("info", f"{_job_label(name)}已开始", job=name, stage="start", payload=payload)
 
     def _record_job_finish(self, name: str, started: float, result: Dict[str, Any], error: str = "") -> Dict[str, Any]:
+        maintenance = self._post_job_maintenance(name)
+        if isinstance(result, dict):
+            result.setdefault("maintenance", maintenance)
         with self._state_lock:
             state = self._load_state()
             jobs = state.setdefault("jobs", {})
@@ -463,7 +509,7 @@ class QuantJobManager:
                 start_date=start_date,
                 end_date=end_date,
                 hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
-                max_codes=500,
+                max_codes=self._auto_backfill_max_codes(),
                 force=False,
             )
             if mode == "daily":
@@ -603,10 +649,12 @@ class QuantJobManager:
         return _env_int("STRATEGY_EVOLUTION_INTERVAL_SECONDS", 6 * 3600)
 
     def _strategy_evolution_generations(self) -> int:
-        return max(1, min(_env_int("STRATEGY_EVOLUTION_GENERATIONS", 1), 30))
+        max_generations = max(1, min(_env_int("QT_STRATEGY_EVOLUTION_MAX_GENERATIONS", 8), 30))
+        return max(1, min(_env_int("STRATEGY_EVOLUTION_GENERATIONS", 1), max_generations))
 
     def _strategy_evolution_population_size(self) -> int:
-        return max(6, min(_env_int("STRATEGY_EVOLUTION_POPULATION_SIZE", 16), 80))
+        max_population = max(6, min(_env_int("QT_STRATEGY_EVOLUTION_MAX_POPULATION", 32), 80))
+        return max(6, min(_env_int("STRATEGY_EVOLUTION_POPULATION_SIZE", 16), max_population))
 
     def _kline_fill_interval_seconds(self) -> int:
         return _env_int("KLINE_FILL_INTERVAL_SECONDS", 6 * 3600)
@@ -615,7 +663,7 @@ class QuantJobManager:
         return _env_int("LHB_SYNC_INTERVAL_SECONDS", 12 * 3600)
 
     def _auto_backfill_max_codes(self) -> int:
-        return max(1, min(_env_int("DATA_BACKFILL_MAX_CODES", 500), 2000))
+        return max(1, min(_env_int("DATA_BACKFILL_MAX_CODES", 160), 2000))
 
     def _memory_guard(self) -> Dict[str, Any]:
         threshold_pct = max(50.0, min(_env_float("QT_MEMORY_GUARD_PERCENT", 88.0), 99.0))
@@ -756,16 +804,14 @@ class QuantJobManager:
             if _env_bool("STRATEGY_EVOLUTION_ENABLED", False) and now_ts >= next_strategy_evolution:
                 evolution_state = strategy_evolution.status()
                 if evolution_state.get("status") not in {"running", "paused"}:
-                    asyncio.create_task(
-                        asyncio.to_thread(
-                            self.run_strategy_evolution,
-                            None,
-                            None,
-                            os.getenv("STRATEGY_EVOLUTION_MODE", "intraday"),
-                            self._strategy_evolution_generations(),
-                            self._strategy_evolution_population_size(),
-                            None,
-                        )
+                    await asyncio.to_thread(
+                        self.run_strategy_evolution,
+                        None,
+                        None,
+                        os.getenv("STRATEGY_EVOLUTION_MODE", "intraday"),
+                        self._strategy_evolution_generations(),
+                        self._strategy_evolution_population_size(),
+                        None,
                     )
                     next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
                     ran_task = True

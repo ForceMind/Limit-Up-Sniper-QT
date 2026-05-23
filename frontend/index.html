@@ -156,6 +156,29 @@
         </div>
       </form>
     </div>
+    <div v-if="onboarding.visible" class="fixed inset-0 z-[125] bg-black/45 flex items-center justify-center p-4">
+      <form @submit.prevent="finishOnboarding()" class="w-full max-w-md bg-white border border-neutral-300 p-5 space-y-4 shadow-xl">
+        <div>
+          <h1 class="text-xl font-semibold">设置模拟资金</h1>
+          <p class="mt-1 text-sm text-neutral-500">新账号先确认资金规模，系统会按资金档推荐策略，并用该策略展示持仓。</p>
+        </div>
+        <label class="block text-sm">
+          <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
+          <input v-model.number="onboarding.cash" type="number" min="10000" step="1000" class="w-full h-10 px-3 border border-neutral-300 outline-none focus:border-neutral-900">
+        </label>
+        <div class="grid grid-cols-3 gap-2 text-xs">
+          <button type="button" @click="onboarding.cash = 10000" class="h-9 border border-neutral-300 bg-white">1万</button>
+          <button type="button" @click="onboarding.cash = 30000" class="h-9 border border-neutral-300 bg-white">3万</button>
+          <button type="button" @click="onboarding.cash = 80000" class="h-9 border border-neutral-300 bg-white">8万</button>
+        </div>
+        <div class="border border-neutral-200 bg-neutral-50 p-3 text-sm">
+          <div class="text-xs text-neutral-500">推荐策略</div>
+          <div class="font-semibold mt-1">{{ recommendedStrategyForCash(onboarding.cash).name || '-' }}</div>
+          <div class="text-xs text-neutral-500 mt-1">{{ recommendedStrategyForCash(onboarding.cash).description || '保存后会重算单票资金、可买数量和持仓。' }}</div>
+        </div>
+        <button type="submit" :disabled="profileSaving" class="w-full h-10 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存并查看持仓' }}</button>
+      </form>
+    </div>
     <div class="mobile-app">
       <div class="mobile-topbar">
         <div>
@@ -309,7 +332,7 @@
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">买入信号</div>
-              <div class="mobile-panel-sub">买入阈值 {{ fixed(rules.buy_threshold) }} · 单票资金 {{ money(rules.paper_position_value) }}<span v-if="capitalFilter.small_cash_mode"> · 小资金模式</span></div>
+              <div class="mobile-panel-sub">0-100 评分，不是上涨概率 · 买入阈值 {{ fixed(rules.buy_threshold) }} · 单票资金 {{ money(rules.paper_position_value) }}<span v-if="capitalFilter.small_cash_mode"> · 小资金模式</span></div>
             </div>
             <span class="mobile-link">候选 {{ buyList.length }}</span>
           </div>
@@ -333,8 +356,8 @@
                 </div>
               </div>
               <div>
-                <div class="score-buy">买 {{ fixed(item.buy_score) }}</div>
-                <div class="score-sell">卖 {{ fixed(item.sell_score) }}</div>
+                <div class="score-buy">买入评分 {{ fixed(item.buy_score) }}/100</div>
+                <div class="score-sell">卖出评分 {{ fixed(item.sell_score) }}/100</div>
                 <div class="score-sell mt-2">{{ item.affordable === false ? money(item.min_lot_amount) + '/手' : (item.event_type || '事件') }}</div>
               </div>
             </div>
@@ -441,7 +464,7 @@
           <div class="mobile-panel-head">
             <div>
               <div class="mobile-panel-title">多策略模型</div>
-              <div class="mobile-panel-sub">遗传进化生成的可复用策略，前台只展示不修改</div>
+              <div class="mobile-panel-sub">按资金档推荐策略，进化模型作为可跟随策略</div>
             </div>
             <span class="mobile-link">共 {{ strategyItems.length }}</span>
           </div>
@@ -453,14 +476,20 @@
               </label>
               <button @click="saveProfile()" :disabled="profileSaving" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ profileSaving ? '保存中' : '保存' }}</button>
             </div>
-            <div class="mt-2 text-xs text-neutral-500">当前跟随：{{ followedModelName }}</div>
+            <div class="mt-2 grid grid-cols-3 gap-2 text-xs">
+              <button @click="setProfileCash(10000)" class="h-8 border border-neutral-300 bg-white">1万</button>
+              <button @click="setProfileCash(30000)" class="h-8 border border-neutral-300 bg-white">3万</button>
+              <button @click="setProfileCash(80000)" class="h-8 border border-neutral-300 bg-white">8万</button>
+            </div>
+            <div class="mt-2 text-xs text-neutral-500">当前跟随：{{ followedModelName }} · {{ followedModelDescription }}</div>
+            <div class="mt-1 text-xs text-neutral-500">修改资金会自动切换匹配资金档，并重算单票资金、买入信号和持仓。</div>
             <div v-if="profileMessage" class="mt-2 text-xs text-emerald-700">{{ profileMessage }}</div>
           </div>
           <article v-for="model in strategyItems" :key="'m-model-' + model.id" class="signal-row">
             <div class="row-main">
               <div>
                 <div class="stock-name">{{ model.name || model.id }}</div>
-                <div class="stock-code">排名 {{ model.rank || '-' }} 路 {{ shortTime(model.generated_at) }}</div>
+                <div class="stock-code">{{ model.is_capital_preset ? '资金档' : '排名' }} {{ model.rank || '-' }} <span v-if="!model.is_capital_preset">路 {{ shortTime(model.generated_at) }}</span></div>
                 <div class="tag-line">
                   <span class="tag">持仓 {{ fixed((model.params || {}).max_positions, 0) }}</span>
                   <span class="tag">单票 {{ money((model.params || {}).paper_position_value) }}</span>
@@ -469,14 +498,14 @@
               <div>
                 <div class="row-desc line-clamp-2">买入阈值 {{ fixed((model.params || {}).buy_threshold) }}，止损 {{ fixed((model.params || {}).stop_loss_pct) }}%，止盈 {{ fixed((model.params || {}).take_profit_pct) }}%</div>
                 <div class="mini-metrics">
-                  <span>目标<strong>{{ fixed(model.objective) }}</strong></span>
-                  <span>收益<strong>{{ pct(model.return_pct) }}</strong></span>
-                  <span>回撤<strong>{{ pct(model.max_drawdown_pct) }}</strong></span>
+                  <span>目标<strong>{{ metricNumber(model.objective) }}</strong></span>
+                  <span>收益<strong>{{ metricPct(model.return_pct) }}</strong></span>
+                  <span>回撤<strong>{{ metricPct(model.max_drawdown_pct) }}</strong></span>
                 </div>
               </div>
               <div>
-                <div class="score-buy" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</div>
-                <div class="score-sell">{{ pct(model.win_rate) }}</div>
+                <div class="score-buy" :class="numClass(model.return_pct)">{{ metricPct(model.return_pct) }}</div>
+                <div class="score-sell">{{ metricPct(model.win_rate) }}</div>
                 <button @click="followStrategy(model)" :disabled="profileSaving" class="score-sell mt-2 border border-neutral-300 px-2 py-1 bg-white">
                   {{ isFollowing(model) ? '跟随中' : '跟随' }}
                 </button>
@@ -637,7 +666,7 @@
         <div class="grid grid-cols-1 lg:grid-cols-[1fr_220px_180px] gap-3 items-end">
           <div>
             <h2 class="font-semibold">我的跟随设置</h2>
-            <div class="text-xs text-neutral-500 mt-1">每个账号单独保存模拟资金和跟随策略，保存后买入信号会按所选策略参数刷新。</div>
+            <div class="text-xs text-neutral-500 mt-1">每个账号单独保存模拟资金和跟随策略；保存资金会自动推荐资金档，持仓和买入信号都会按该资金重算。</div>
           </div>
           <label class="text-sm">
             <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
@@ -649,14 +678,21 @@
           <div class="border border-neutral-200 p-3">
             <div class="text-xs text-neutral-500">当前跟随</div>
             <div class="font-semibold mt-1">{{ followedModelName }}</div>
+            <div class="text-xs text-neutral-500 mt-1">{{ followedModelDescription }}</div>
           </div>
           <div class="border border-neutral-200 p-3">
             <div class="text-xs text-neutral-500">模拟资金</div>
             <div class="font-semibold mt-1">{{ money(userProfile.simulated_cash) }}</div>
+            <div class="mt-2 flex flex-wrap gap-2 text-xs">
+              <button @click="setProfileCash(10000)" class="px-2 py-1 border border-neutral-300 bg-white">1万</button>
+              <button @click="setProfileCash(30000)" class="px-2 py-1 border border-neutral-300 bg-white">3万</button>
+              <button @click="setProfileCash(80000)" class="px-2 py-1 border border-neutral-300 bg-white">8万</button>
+            </div>
           </div>
           <div class="border border-neutral-200 p-3">
             <div class="text-xs text-neutral-500">可选策略</div>
             <div class="font-semibold mt-1">{{ strategyItems.length }} 个</div>
+            <div class="text-xs text-neutral-500 mt-1">买入信号后的数字是 0-100 评分，不是上涨概率。</div>
           </div>
         </div>
         <div v-if="profileMessage" class="mt-3 text-sm text-emerald-700">{{ profileMessage }}</div>
@@ -726,12 +762,12 @@
               <tr v-for="model in strategyItems" :key="'model-' + model.id" class="border-b border-neutral-100 hover:bg-neutral-50">
                 <td class="px-3 py-2">
                   <div class="font-semibold">{{ model.name || model.id }}</div>
-                  <div class="text-xs text-neutral-500">{{ model.id }}</div>
+                  <div class="text-xs text-neutral-500">{{ model.id }}<span v-if="model.description"> · {{ model.description }}</span></div>
                 </td>
-                <td class="px-3 py-2 text-right">{{ fixed(model.objective) }}</td>
-                <td class="px-3 py-2 text-right" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</td>
-                <td class="px-3 py-2 text-right">{{ pct(model.max_drawdown_pct) }}</td>
-                <td class="px-3 py-2 text-right">{{ pct(model.win_rate) }}</td>
+                <td class="px-3 py-2 text-right">{{ metricNumber(model.objective) }}</td>
+                <td class="px-3 py-2 text-right" :class="numClass(model.return_pct)">{{ metricPct(model.return_pct) }}</td>
+                <td class="px-3 py-2 text-right">{{ metricPct(model.max_drawdown_pct) }}</td>
+                <td class="px-3 py-2 text-right">{{ metricPct(model.win_rate) }}</td>
                 <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
                 <td class="px-3 py-2 text-right">{{ fixed((model.params || {}).buy_threshold) }}</td>
                 <td class="px-3 py-2 text-right">{{ money((model.params || {}).paper_position_value) }}</td>
@@ -806,7 +842,7 @@
           <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 class="font-semibold">今日买入计划</h2>
-              <div class="text-xs text-neutral-500">达到买入阈值的股票，按评分排序</div>
+              <div class="text-xs text-neutral-500">达到买入阈值的股票，按 0-100 买入评分排序；评分不是上涨概率</div>
             </div>
             <div class="text-xs text-neutral-500">买入阈值 {{ fixed(rules.buy_threshold) }}，单票资金 {{ money(rules.paper_position_value) }}</div>
           </div>
@@ -818,8 +854,8 @@
                   <div class="text-xs text-neutral-500">{{ item.code }} · {{ item.industry || '-' }}</div>
                 </div>
                 <div class="text-right shrink-0">
-                  <div class="text-red-600 font-semibold">买 {{ fixed(item.buy_score) }}</div>
-                  <div class="text-xs text-neutral-500">卖 {{ fixed(item.sell_score) }}</div>
+                  <div class="text-red-600 font-semibold">买入评分 {{ fixed(item.buy_score) }}/100</div>
+                  <div class="text-xs text-neutral-500">卖出评分 {{ fixed(item.sell_score) }}/100</div>
                 </div>
               </div>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">
@@ -849,8 +885,8 @@
               <thead class="sticky top-0 bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
                 <tr>
                   <th class="text-left px-3 py-2 w-28">证券</th>
-                  <th class="text-right px-3 py-2 w-20">买入分</th>
-                  <th class="text-right px-3 py-2 w-20">卖出分</th>
+                  <th class="text-right px-3 py-2 w-24">买入评分</th>
+                  <th class="text-right px-3 py-2 w-24">卖出评分</th>
                   <th class="text-left px-3 py-2 w-32">行业</th>
                   <th class="text-left px-3 py-2 w-28">事件</th>
                   <th class="text-left px-3 py-2 min-w-[320px]">买入逻辑</th>
@@ -863,8 +899,8 @@
                     <div class="font-semibold">{{ item.name }}</div>
                     <div class="text-xs text-neutral-500">{{ item.code }}</div>
                   </td>
-                  <td class="px-3 py-3 text-right font-semibold text-red-600">{{ fixed(item.buy_score) }}</td>
-                  <td class="px-3 py-3 text-right">{{ fixed(item.sell_score) }}</td>
+                  <td class="px-3 py-3 text-right font-semibold text-red-600">{{ fixed(item.buy_score) }}/100</td>
+                  <td class="px-3 py-3 text-right">{{ fixed(item.sell_score) }}/100</td>
                   <td class="px-3 py-3">{{ item.industry || '-' }}</td>
                   <td class="px-3 py-3">{{ item.event_type || '-' }}</td>
                   <td class="px-3 py-3">
@@ -1119,7 +1155,7 @@
                 <thead class="bg-neutral-100 border-b border-neutral-300 text-xs text-neutral-600">
                   <tr>
                     <th class="text-left px-3 py-2">证券</th>
-                    <th class="text-right px-3 py-2">评分</th>
+                    <th class="text-right px-3 py-2">买入评分</th>
                     <th class="text-left px-3 py-2">计划买入</th>
                     <th class="text-left px-3 py-2">实际买入</th>
                     <th class="text-left px-3 py-2">卖出</th>
@@ -1131,7 +1167,7 @@
                 <tbody>
                   <tr v-for="sig in day.signals" :key="day.date + sig.code" class="border-b border-neutral-100 hover:bg-neutral-50">
                     <td class="px-3 py-2">{{ sig.name }} <span class="text-xs text-neutral-500">{{ sig.code }}</span></td>
-                    <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(sig.buy_score) }}</td>
+                    <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(sig.buy_score) }}/100</td>
                     <td class="px-3 py-2">{{ sig.execute_on || '-' }}</td>
                     <td class="px-3 py-2">{{ (sig.outcome || {}).buy_date || '-' }} <span class="text-xs text-neutral-500">{{ fixed((sig.outcome || {}).buy_price) }}</span></td>
                     <td class="px-3 py-2">{{ (sig.outcome || {}).sell_date || '-' }} <span class="text-xs text-neutral-500">{{ fixed((sig.outcome || {}).sell_price || (sig.outcome || {}).last_price) }}</span></td>
@@ -1179,6 +1215,10 @@
             visible: false,
             mode: 'login',
           },
+          onboarding: {
+            visible: false,
+            cash: 10000,
+          },
           loading: false,
           syncing: false,
           activeTab: 'deals',
@@ -1191,8 +1231,8 @@
           jobLogs: {},
           recommendations: {},
           strategyModels: {},
-          userProfile: { simulated_cash: 10000, strategy_model_id: 'active' },
-          profileForm: { simulated_cash: 10000, strategy_model_id: 'active' },
+          userProfile: { simulated_cash: 10000, strategy_model_id: 'capital_10000' },
+          profileForm: { simulated_cash: 10000, strategy_model_id: 'capital_10000' },
           followedModel: {},
           profileSaving: false,
           profileMessage: '',
@@ -1272,20 +1312,36 @@
         historyDays() { return this.plan.history_days || []; },
         strategyItems() {
           const items = [];
-          if (this.strategyModels.active) items.push({ ...this.strategyModels.active, id: this.strategyModels.active.id || 'active', rank: '当前' });
+          for (const item of (this.strategyModels.capital_presets || [])) items.push(item);
           for (const item of (this.strategyModels.items || [])) items.push(item);
           const seen = new Set();
           return items.filter(item => {
             const id = String((item || {}).id || '');
-            if (!id || seen.has(id)) return false;
+            if (!id || id === 'active' || seen.has(id)) return false;
             seen.add(id);
             return true;
           });
         },
         followedModelName() {
-          const id = String(this.userProfile.strategy_model_id || 'active');
+          const id = String(this.userProfile.strategy_model_id || 'capital_10000');
           const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
-          return model.name || model.id || this.account.follow_model_name || '当前运行策略';
+          if (model.name || model.id) return model.name || model.id;
+          return this.account.follow_model_name || '系统当前参数';
+        },
+        followedModelDescription() {
+          const id = String(this.userProfile.strategy_model_id || 'capital_10000');
+          const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
+          if (model.description) return model.description;
+          if (id === 'active') return '后台系统参数，不是专门为该账号资金规模生成的策略。';
+          return `资金档 ${this.userProfile.capital_label || '-'}，单票资金 ${this.money(this.rules.paper_position_value)}`;
+        },
+        capitalBands() {
+          return this.strategyModels.capital_bands || [
+            { id: 'capital_10000', name: '1万小资金策略', min_cash: 10000, max_cash: 19999.99 },
+            { id: 'capital_20000_50000', name: '2万-5万小资金策略', min_cash: 20000, max_cash: 49999.99 },
+            { id: 'capital_50000_100000', name: '5万-10万中小资金策略', min_cash: 50000, max_cash: 99999.99 },
+            { id: 'capital_100000_plus', name: '10万以上标准策略', min_cash: 100000, max_cash: 10000000 },
+          ];
         },
         capitalFilter() {
           return this.recommendations.capital_filter || this.plan.capital_filter || { small_cash_mode: false };
@@ -1411,6 +1467,8 @@
             this.auth.visible = false;
             this.auth.password = '';
             await this.loadAll();
+            this.onboarding.cash = Number(this.userProfile.simulated_cash || 10000);
+            this.onboarding.visible = true;
           } catch (err) {
             this.auth.error = String(err.message || err);
           } finally {
@@ -1426,21 +1484,33 @@
           this.loadAll();
         },
         isFollowing(model) {
-          return String((model || {}).id || '') === String(this.userProfile.strategy_model_id || 'active');
+          return String((model || {}).id || '') === String(this.userProfile.strategy_model_id || 'capital_10000');
         },
         async followStrategy(model) {
           if (!model || !model.id) return;
           this.profileForm.strategy_model_id = model.id;
           await this.saveProfile(model.id);
         },
-        async saveProfile(modelId = null) {
+        setProfileCash(value) {
+          this.profileForm.simulated_cash = Number(value || 10000);
+          this.profileMessage = `已选择 ${this.money(this.profileForm.simulated_cash)}，保存后推荐 ${this.recommendedStrategyForCash(this.profileForm.simulated_cash).name || '匹配策略'}`;
+        },
+        async finishOnboarding() {
+          this.profileForm.simulated_cash = Number(this.onboarding.cash || 10000);
+          await this.saveProfile(null, { autoRecommend: true });
+          this.onboarding.visible = false;
+          this.setMobileView('positions');
+          await this.loadMarketData(true);
+        },
+        async saveProfile(modelId = null, options = {}) {
           if (!this.isLoggedIn) return this.openAuth('login');
           this.profileSaving = true;
           this.profileMessage = '';
           try {
             const payload = {
               simulated_cash: Number(this.profileForm.simulated_cash || this.userProfile.simulated_cash || 10000),
-              strategy_model_id: String(modelId || this.profileForm.strategy_model_id || this.userProfile.strategy_model_id || 'active'),
+              strategy_model_id: String(modelId || this.profileForm.strategy_model_id || this.userProfile.strategy_model_id || 'capital_10000'),
+              auto_recommend: Boolean(options.autoRecommend || !modelId),
             };
             const result = await this.api('/api/front/profile', {
               method: 'POST',
@@ -1449,7 +1519,9 @@
             });
             this.userProfile = { ...this.userProfile, ...(result.profile || {}) };
             this.profileForm = { ...this.profileForm, ...this.userProfile };
-            this.profileMessage = '已保存';
+            this.followedModel = result.followed_model || this.followedModel;
+            if (result.strategy_models) this.strategyModels = result.strategy_models;
+            this.profileMessage = `已保存，当前跟随：${this.followedModelName}`;
             await this.loadAll();
           } catch (err) {
             this.profileMessage = String(err.message || err);
@@ -1585,6 +1657,15 @@
         isPublicView(view) {
           return ['overview', 'news'].includes(String(view || ''));
         },
+        recommendedStrategyForCash(value) {
+          const cash = Number(value || 10000);
+          const bands = this.capitalBands;
+          const band = bands.find(item => cash >= Number(item.min_cash || 0) && cash <= Number(item.max_cash || 10000000))
+            || bands[bands.length - 1]
+            || { id: 'capital_10000', name: '1万小资金策略' };
+          const model = this.strategyItems.find(item => String(item.id) === String(band.id));
+          return model || band;
+        },
         updateClock() {
           this.clockText = new Intl.DateTimeFormat('zh-CN', {
             timeZone: 'Asia/Shanghai',
@@ -1613,6 +1694,16 @@
         fixed(value, digits = 2) {
           const n = Number(value || 0);
           return Number.isFinite(n) ? n.toFixed(digits) : '-';
+        },
+        metricNumber(value, digits = 2) {
+          if (value === null || value === undefined || value === '') return '-';
+          const n = Number(value);
+          return Number.isFinite(n) ? n.toFixed(digits) : '-';
+        },
+        metricPct(value) {
+          if (value === null || value === undefined || value === '') return '-';
+          const n = Number(value);
+          return Number.isFinite(n) ? `${n.toFixed(2)}%` : '-';
         },
         pct(value) {
           return `${this.fixed(value)}%`;

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import sqlite3
 import threading
@@ -21,6 +22,17 @@ MODEL_RECORD_TYPE_KEYS = {
     "delivery": "delivery_records",
     "settlement": "daily_settlements",
 }
+
+
+def _env_int(name: str, default: int, minimum: int = 1, maximum: Optional[int] = None) -> int:
+    try:
+        value = int(float(os.getenv(name, "") or default))
+    except Exception:
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 GENES: Dict[str, tuple[float, float]] = {
@@ -592,7 +604,7 @@ class StrategyEvolution:
             "status": "ok",
             "active": {
                 "id": "active",
-                "name": "当前运行策略",
+                "name": "系统当前参数",
                 "source": "runtime",
                 "reusable": True,
                 "params": active_params,
@@ -607,7 +619,7 @@ class StrategyEvolution:
         if model_id == "active":
             return {
                 "id": "active",
-                "name": "当前运行策略",
+                "name": "系统当前参数",
                 "source": "runtime",
                 "reusable": True,
                 "params": quant_engine.strategy_params(),
@@ -648,8 +660,9 @@ class StrategyEvolution:
         apply_best: bool = False,
         mode: str = "intraday",
     ) -> Dict[str, Any]:
-        generations = max(1, min(int(generations or 4), 30))
-        population_size = max(6, min(int(population_size or 16), 80))
+        generations = max(1, min(int(generations or 4), _env_int("QT_STRATEGY_EVOLUTION_MAX_GENERATIONS", 8, minimum=1, maximum=30)))
+        population_cap = _env_int("QT_STRATEGY_EVOLUTION_MAX_POPULATION", 32, minimum=6, maximum=80)
+        population_size = max(6, min(int(population_size or 16), population_cap))
         start_date = start_date or quant_engine.first_data_date()
         end_date = end_date or quant_engine.latest_event_date()
         mode = str(mode or "intraday").strip().lower()

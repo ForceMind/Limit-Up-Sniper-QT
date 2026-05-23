@@ -258,6 +258,22 @@ QT_MEMORY_GUARD_AVAILABLE_MB=1024
 
 ## 5. 近期验收命令
 
+### 5.1 内存与回测性能基线
+
+2026-05-23 本轮优化后，回测不再为了发现交易日期加载全量 K 线；交易日期改由 SQLite `DISTINCT date` 查询获取。进程内 K 线、分时、龙虎榜、因子和未来收益缓存都有默认上限，重型任务完成后会主动清理缓存并触发 GC。
+
+当前本地基线：
+- 单日分时回测 `2026-05-19`：约 5.7 秒。
+- 1 代 6 个候选的分时进化：约 6.5 秒。
+- 完整 `test_quant_engine.py`：8 个测试约 2 分 37 秒。
+
+服务器小内存默认值：
+- `DATA_BACKFILL_MAX_CODES=160`
+- `QT_REPLAY_HISTORY_EVENT_LIMIT=800`
+- `QT_KLINE_CACHE_MAX_CODES=480`
+- `QT_INTRADAY_CACHE_MAX_KEYS=120`
+- `QT_STRATEGY_EVOLUTION_MAX_POPULATION=32`
+
 ```bash
 python scripts/architecture_report.py
 python scripts/server_data_audit.py

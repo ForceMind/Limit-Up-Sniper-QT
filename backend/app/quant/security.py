@@ -22,7 +22,7 @@ TOKEN_TTL_SECONDS = int(safe_float(os.getenv("QT_AUTH_TOKEN_TTL_SECONDS"), 12 * 
 DEFAULT_FRONTEND_SIMULATED_CASH = 10_000.0
 DEFAULT_FRONTEND_PROFILE = {
     "simulated_cash": DEFAULT_FRONTEND_SIMULATED_CASH,
-    "strategy_model_id": "active",
+    "strategy_model_id": "capital_10000",
 }
 DEFAULT_ADMIN_ENTRY_PREFIX = "/admin-"
 ADMIN_ENTRY_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9_-]{5,63}$")
@@ -180,7 +180,7 @@ def _normalize_frontend_profile(raw: Optional[Dict[str, Any]] = None) -> Dict[st
     raw = raw if isinstance(raw, dict) else {}
     cash = safe_float(raw.get("simulated_cash"), DEFAULT_FRONTEND_SIMULATED_CASH)
     cash = max(10_000.0, min(10_000_000.0, cash))
-    model_id = str(raw.get("strategy_model_id") or "active").strip() or "active"
+    model_id = str(raw.get("strategy_model_id") or DEFAULT_FRONTEND_PROFILE["strategy_model_id"]).strip() or DEFAULT_FRONTEND_PROFILE["strategy_model_id"]
     return {
         "simulated_cash": round(cash, 2),
         "strategy_model_id": model_id[:120],

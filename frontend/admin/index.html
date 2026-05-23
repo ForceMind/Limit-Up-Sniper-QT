@@ -1265,7 +1265,6 @@
               <label class="block text-sm">
                 <span class="block text-xs text-neutral-500 mb-1">跟随策略</span>
                 <select v-model="userForm.strategy_model_id" class="w-full h-10 px-3 border border-neutral-300 bg-white">
-                  <option value="active">当前运行策略</option>
                   <option v-for="model in evolutionModels" :key="'user-model-' + model.id" :value="model.id">{{ model.name || model.id }}</option>
                 </select>
               </label>
@@ -1472,7 +1471,12 @@
           selectedFrontendUser: null,
           userSaving: false,
           userMessage: '',
-          userForm: { username: '', password: '', simulated_cash: 10000, strategy_model_id: 'active' },
+          userForm: {
+            username: '',
+            password: '',
+            simulated_cash: 10000,
+            strategy_model_id: 'capital_10000',
+          },
           passwordForm: { password: '' },
           banForm: { reason: '' },
           fitResult: {},
@@ -1618,7 +1622,15 @@
         },
         evolutionModels() {
           const direct = this.evolutionStatus.models || [];
-          return direct.length ? direct : (this.strategyModels.items || []);
+          const capital = this.strategyModels.capital_presets || [];
+          const models = direct.length ? direct : (this.strategyModels.items || []);
+          const seen = new Set();
+          return [...capital, ...models].filter((item) => {
+            const id = String((item || {}).id || '');
+            if (!id || id === 'active' || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          });
         },
         minuteCacheCount() {
           const dates = this.biyingStatus.cache_dates || {};
@@ -2027,7 +2039,7 @@
             username: user ? user.username : '',
             password: '',
             simulated_cash: Number(profile.simulated_cash || 10000),
-            strategy_model_id: String(profile.strategy_model_id || 'active'),
+            strategy_model_id: String(profile.strategy_model_id || 'capital_10000'),
           };
           this.passwordForm = { password: '' };
           this.banForm = { reason: '' };
@@ -2048,7 +2060,7 @@
               password: this.userForm.password,
               profile: {
                 simulated_cash: Number(this.userForm.simulated_cash || 10000),
-                strategy_model_id: this.userForm.strategy_model_id || 'active',
+                strategy_model_id: this.userForm.strategy_model_id || 'capital_10000',
               },
             };
             if (this.selectedFrontendUser) {
