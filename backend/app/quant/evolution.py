@@ -182,6 +182,26 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_strategy_records_model ON strategy_model_records(model_id, record_type);
             CREATE INDEX IF NOT EXISTS idx_strategy_records_code_date ON strategy_model_records(code, date);
+
+            CREATE TABLE IF NOT EXISTS strategy_runtime_snapshots (
+                cache_key TEXT PRIMARY KEY,
+                model_id TEXT,
+                model_version TEXT,
+                params_hash TEXT,
+                start_date TEXT,
+                as_of TEXT,
+                initial_cash REAL,
+                record_limit INTEGER,
+                source TEXT,
+                generated_at TEXT,
+                total_asset REAL,
+                return_pct REAL,
+                position_count INTEGER,
+                deal_count INTEGER,
+                account_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
             """
         )
 
@@ -598,6 +618,156 @@ class StrategyEvolution:
             items.append(item)
         return items
 
+    def _runtime_cache_ttl_seconds(self) -> int:
+        return _env_int("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400)
+
+    def _runtime_cache_key(
+        self,
+        model_id: str,
+        params: Dict[str, Any],
+        initial_cash: Any,
+        start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        model_version: str = "",
+    ) -> tuple[str, str]:
+        clean_model_id = str(model_id or "active").strip() or "active"
+        params_hash = self._digest("strategy_params", params or {})[:24]
+        key = self._digest(
+            "strategy_runtime_snapshot",
+            clean_model_id,
+            str(model_version or ""),
+            params_hash,
+            round(safe_float(initial_cash, 0), 2),
+            str(start_date or ""),
+            str(as_of or ""),
+            int(limit or 0),
+        )[:32]
+        return key, params_hash
+
+    def _runtime_cache_is_fresh(self, generated_at: str) -> bool:
+        ttl = self._runtime_cache_ttl_seconds()
+        if ttl <= 0:
+            return False
+        try:
+            generated = datetime.fromisoformat(str(generated_at or ""))
+        except Exception:
+            return False
+        return (datetime.now() - generated).total_seconds() <= ttl
+
+    def load_account_cache(
+        self,
+        model_id: str,
+        params: Dict[str, Any],
+        initial_cash: Any,
+        start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        model_version: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not QUANT_DB_FILE.exists():
+            return None
+        cache_key, _params_hash = self._runtime_cache_key(
+            model_id,
+            params,
+            initial_cash,
+            start_date,
+            as_of,
+            limit,
+            model_version=model_version,
+        )
+        try:
+            conn = self._connect_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT generated_at, account_json
+                    FROM strategy_runtime_snapshots
+                    WHERE cache_key = ?
+                    LIMIT 1
+                    """,
+                    (cache_key,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return None
+        if not row or not self._runtime_cache_is_fresh(str(row["generated_at"] or "")):
+            return None
+        try:
+            payload = json.loads(str(row["account_json"] or "{}"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["strategy_account_cache"] = "hit"
+        payload["strategy_account_cache_key"] = cache_key
+        payload["strategy_account_cache_generated_at"] = str(row["generated_at"] or "")
+        return payload
+
+    def save_account_cache(
+        self,
+        model_id: str,
+        params: Dict[str, Any],
+        initial_cash: Any,
+        start_date: Optional[str],
+        as_of: Optional[str],
+        limit: int,
+        account: Dict[str, Any],
+        model_version: str = "",
+        source: str = "",
+    ) -> None:
+        if not isinstance(account, dict):
+            return
+        cache_key, params_hash = self._runtime_cache_key(
+            model_id,
+            params,
+            initial_cash,
+            start_date,
+            as_of,
+            limit,
+            model_version=model_version,
+        )
+        account_payload = dict(account)
+        account_payload.pop("strategy_account_cache", None)
+        account_payload.pop("strategy_account_cache_key", None)
+        generated_at = datetime.now().isoformat(timespec="seconds")
+        summary = account_payload.get("account") if isinstance(account_payload.get("account"), dict) else {}
+        try:
+            conn = self._connect_db()
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO strategy_runtime_snapshots
+                    (cache_key, model_id, model_version, params_hash, start_date, as_of, initial_cash,
+                     record_limit, source, generated_at, total_asset, return_pct, position_count,
+                     deal_count, account_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cache_key,
+                        str(model_id or "active"),
+                        str(model_version or ""),
+                        params_hash,
+                        str(start_date or ""),
+                        str(as_of or ""),
+                        safe_float(initial_cash, 0),
+                        int(limit or 0),
+                        str(source or account_payload.get("strategy_account_source") or ""),
+                        generated_at,
+                        safe_float(summary.get("total_asset"), 0),
+                        safe_float(summary.get("return_pct"), 0),
+                        int(safe_float(summary.get("position_count"), 0)),
+                        int(safe_float(summary.get("deal_count"), 0)),
+                        self._json_text(account_payload),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            return
+
     def status(self) -> Dict[str, Any]:
         archived = self._archive_oversized_state_file()
         if archived:
@@ -670,9 +840,9 @@ class StrategyEvolution:
             "status": "ok",
             "active": {
                 "id": "active",
-                "name": "系统当前参数",
-                "source": "runtime",
-                "reusable": True,
+                "name": "后台基准参数（非跟随策略）",
+                "source": "baseline",
+                "reusable": False,
                 "params": active_params,
             },
             "items": items,
@@ -685,9 +855,9 @@ class StrategyEvolution:
         if model_id == "active":
             return {
                 "id": "active",
-                "name": "系统当前参数",
-                "source": "runtime",
-                "reusable": True,
+                "name": "后台基准参数（非跟随策略）",
+                "source": "baseline",
+                "reusable": False,
                 "params": quant_engine.strategy_params(),
             }
         candidates = self.models(limit=500, include_records=False).get("items", [])
@@ -908,7 +1078,7 @@ class StrategyEvolution:
                     "type": "strategy_model",
                     "model_id": str(model.get("id") or ""),
                     "name": str(model.get("name") or model.get("id") or ""),
-                    "description": "来自策略库模型应用。",
+                    "description": "来自策略库模型设为后台基准参数。",
                     "objective": model.get("objective"),
                     "return_pct": model.get("return_pct"),
                     "max_drawdown_pct": model.get("max_drawdown_pct"),
@@ -1069,7 +1239,7 @@ class StrategyEvolution:
                         "type": "strategy_model",
                         "model_id": str(models[0].get("id") or ""),
                         "name": str(models[0].get("name") or models[0].get("id") or ""),
-                        "description": "来自策略进化完成后自动应用最佳模型。",
+                        "description": "来自策略进化完成后自动设为后台基准参数。",
                         "objective": models[0].get("objective"),
                         "return_pct": models[0].get("return_pct"),
                         "max_drawdown_pct": models[0].get("max_drawdown_pct"),

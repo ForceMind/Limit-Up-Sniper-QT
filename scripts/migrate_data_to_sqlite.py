@@ -397,6 +397,37 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_records_model ON strategy_model_records(model_id, record_type);
         CREATE INDEX IF NOT EXISTS idx_strategy_records_code_date ON strategy_model_records(code, date);
 
+        CREATE TABLE IF NOT EXISTS strategy_runtime_snapshots (
+            cache_key TEXT PRIMARY KEY,
+            model_id TEXT,
+            model_version TEXT,
+            params_hash TEXT,
+            start_date TEXT,
+            as_of TEXT,
+            initial_cash REAL,
+            record_limit INTEGER,
+            source TEXT,
+            generated_at TEXT,
+            total_asset REAL,
+            return_pct REAL,
+            position_count INTEGER,
+            deal_count INTEGER,
+            account_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
+        CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
+
+        CREATE TABLE IF NOT EXISTS frontend_payload_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_type TEXT,
+            params_hash TEXT,
+            generated_at TEXT,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_frontend_payload_cache_type ON frontend_payload_cache(payload_type, generated_at);
+        CREATE INDEX IF NOT EXISTS idx_frontend_payload_cache_expires ON frontend_payload_cache(expires_at);
+
         CREATE TABLE IF NOT EXISTS access_logs (
             access_id TEXT PRIMARY KEY,
             ts TEXT,

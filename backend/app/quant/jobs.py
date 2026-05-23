@@ -125,8 +125,48 @@ class QuantJobManager:
         with self._state_lock:
             write_json(self.state_file, state)
 
-    def status(self) -> Dict[str, Any]:
+    def _compact_job_item(self, item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        keep_keys = (
+            "status",
+            "job",
+            "stage",
+            "started_at",
+            "finished_at",
+            "updated_at",
+            "duration_ms",
+            "progress_pct",
+            "progress_message",
+            "message",
+            "error",
+            "exit_code",
+        )
+        compact = {key: item.get(key) for key in keep_keys if key in item}
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        if payload:
+            compact["payload_summary"] = {
+                key: value
+                for key, value in payload.items()
+                if key in {"status", "as_of", "date", "start_date", "end_date", "count", "processed", "fetched", "added_rows", "updated_rows"}
+            }
+        return compact
+
+    def _compact_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        compact = {
+            "scheduler": state.get("scheduler", {}),
+            "jobs": {},
+            "paused_jobs": state.get("paused_jobs", {}),
+            "updated_at": state.get("updated_at", ""),
+        }
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        compact["jobs"] = {name: self._compact_job_item(item) for name, item in jobs.items()}
+        return compact
+
+    def status(self, light: bool = False) -> Dict[str, Any]:
         state = self._load_state()
+        if light:
+            state = self._compact_state(state)
         with self._lock:
             running = {name: value for name, value in self._running.items() if value}
         state["running"] = running

@@ -49,6 +49,9 @@ from app.quant.news_fetcher import news_fetcher
 from app.quant.news_repository import latest_news_time as latest_sqlite_news_time
 from app.quant.news_repository import lightweight_news_feed
 from app.quant.notifier import trade_notifier
+from app.quant.runtime_cache import env_int as cache_env_int
+from app.quant.runtime_cache import clear_runtime_cache, runtime_cache_status
+from app.quant.runtime_cache import load_payload_cache, save_payload_cache
 from app.quant.security import (
     admin_create_frontend_user,
     admin_delete_frontend_user,
@@ -548,7 +551,7 @@ def status():
         "latest_news_time": latest_news_time,
         "data_date": data_date,
         "ai_model": DEFAULT_AI_MODEL,
-        "jobs": job_manager.status(),
+        "jobs": job_manager.status(light=True),
     }
 
 
@@ -650,10 +653,10 @@ def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, An
 def _active_strategy_model() -> Dict[str, Any]:
     return {
         "id": "active",
-        "name": "系统运行策略（当前参数）",
-        "source": "runtime",
-        "reusable": True,
-        "description": "后台任务正在使用的全局参数，会驱动系统运行账户；策略库模型是训练/回测后保存的参数组合。",
+        "name": "后台基准参数（非跟随策略）",
+        "source": "baseline",
+        "reusable": False,
+        "description": "后台用于人工调参和默认计算的基准参数，不代表用户正在跟随的策略。",
         "params": quant_engine.strategy_params(),
         "strategy_source": quant_engine.strategy_source(),
     }
@@ -669,7 +672,7 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
     base_params = quant_engine.strategy_params()
     presets = capital_presets(base_params)
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
-    payload["active"]["name"] = "系统运行策略（当前参数）"
+    payload["active"]["name"] = "后台基准参数（非跟随策略）"
     payload["capital_presets"] = presets
     payload["capital_bands"] = CAPITAL_BANDS
     payload["count"] = int(safe_float(payload.get("count"), 0)) + len(presets)
@@ -721,6 +724,8 @@ def _frontend_profile_context(request: Request, include_catalog: bool = True) ->
     models_payload["recommended_model_id"] = recommended_id
     return {
         "username": username,
+        "created_at": str(profile_payload.get("created_at") or ""),
+        "profile_updated_at": str(profile_payload.get("profile_updated_at") or ""),
         "profile": profile,
         "models_payload": models_payload,
         "followed_model": selected or {},
@@ -857,13 +862,75 @@ def _frontend_replay_start_date(end_date: Optional[str]) -> Optional[str]:
         return first or None
 
 
+def _frontend_follow_start_date(context: Dict[str, Any], end_date: Optional[str]) -> Optional[str]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    candidates = [
+        str(profile.get("follow_start_date") or "").strip()[:10],
+        str(profile.get("follow_started_at") or "").strip()[:10],
+        str(context.get("created_at") or "").strip()[:10],
+    ]
+    first = str(quant_engine.first_data_date() or "").strip()
+    latest = str(end_date or quant_engine.latest_event_date() or "").strip()[:10]
+    start = next((item for item in candidates if item), "")
+    if not start:
+        start = latest or first
+    if first and start < first:
+        start = first
+    if latest and start > latest:
+        start = latest
+    return start or first or latest or None
+
+
+def _frontend_followed_model_version(context: Dict[str, Any]) -> str:
+    model = context.get("followed_model") if isinstance(context.get("followed_model"), dict) else {}
+    record_counts = model.get("record_counts") if isinstance(model.get("record_counts"), dict) else {}
+    return "|".join(
+        [
+            str(model.get("id") or ""),
+            str(model.get("run_id") or ""),
+            str(model.get("generated_at") or ""),
+            str(model.get("rank") or ""),
+            json.dumps(record_counts, ensure_ascii=False, sort_keys=True, default=str),
+        ]
+    )
+
+
+def _frontend_payload_cache_parts(context: Dict[str, Any], payload_type: str, extra: Dict[str, Any]) -> Dict[str, Any]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    return {
+        "payload_type": payload_type,
+        "strategy_model_id": str(profile.get("strategy_model_id") or ""),
+        "simulated_cash": round(safe_float(profile.get("simulated_cash"), 0), 2),
+        "model_version": _frontend_followed_model_version(context),
+        "strategy_params": context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {},
+        **extra,
+    }
+
+
+def _frontend_payload_cache_ttl(name: str, default: int) -> int:
+    return cache_env_int(name, default, minimum=0, maximum=86400)
+
+
 def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int, force: bool = False) -> Dict[str, Any]:
     profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
     params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
     target_cash = safe_float(params.get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
     effective_as_of = _frontend_account_as_of(as_of)
-    replay_start_date = _frontend_replay_start_date(effective_as_of)
+    replay_start_date = _frontend_follow_start_date(context, effective_as_of)
+    model_version = _frontend_followed_model_version(context)
+
+    sqlite_cached = None if force else strategy_evolution.load_account_cache(
+        followed_id,
+        params,
+        target_cash,
+        replay_start_date,
+        effective_as_of,
+        limit,
+        model_version=model_version,
+    )
+    if sqlite_cached:
+        return sqlite_cached
 
     if followed_id != "active":
         model = _frontend_full_model(followed_id)
@@ -874,9 +941,24 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
                 trade_records,
                 initial_cash=target_cash,
                 as_of=effective_as_of,
+                start_date=replay_start_date,
                 limit=limit,
+                drop_unmatched_sells=True,
             )
             account["strategy_account_source"] = "model_records"
+            account["follow_start_date"] = replay_start_date
+            account["strategy_account_cache"] = "miss"
+            strategy_evolution.save_account_cache(
+                followed_id,
+                params,
+                target_cash,
+                replay_start_date,
+                effective_as_of,
+                limit,
+                account,
+                model_version=model_version,
+                source="model_records",
+            )
             return account
 
         fingerprint = hashlib.sha256(
@@ -914,10 +996,13 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
                 trades,
                 initial_cash=target_cash,
                 as_of=effective_as_of or timeline.get("end_date"),
+                start_date=replay_start_date,
                 limit=limit,
+                drop_unmatched_sells=True,
             )
         account["strategy_account_source"] = "strategy_replay"
         account["strategy_account_cache"] = "miss"
+        account["follow_start_date"] = replay_start_date
         account["strategy_timeline_summary"] = {
             "mode": timeline.get("mode", "daily"),
             "start_date": timeline.get("start_date"),
@@ -928,11 +1013,36 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
             "return_pct": timeline.get("return_pct", 0),
             "max_drawdown_pct": timeline.get("max_drawdown_pct", 0),
         }
-        return _frontend_account_cache_set(cache_key, account)
+        _frontend_account_cache_set(cache_key, account)
+        strategy_evolution.save_account_cache(
+            followed_id,
+            params,
+            target_cash,
+            replay_start_date,
+            effective_as_of,
+            limit,
+            account,
+            model_version=model_version,
+            source="strategy_replay",
+        )
+        return account
 
     with quant_engine.temporary_strategy_params(params):
         account = quant_engine.trading_account(as_of=effective_as_of, limit=limit)
-    account["strategy_account_source"] = "runtime_state"
+    account["strategy_account_source"] = "baseline_replay"
+    account["follow_start_date"] = replay_start_date
+    account["strategy_account_cache"] = "miss"
+    strategy_evolution.save_account_cache(
+        followed_id,
+        params,
+        target_cash,
+        replay_start_date,
+        effective_as_of,
+        limit,
+        account,
+        model_version=model_version,
+        source="baseline_replay",
+    )
     return account
 
 
@@ -994,7 +1104,7 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
     next_account["total_pnl"] = round(safe_float(next_account.get("total_asset"), target_cash) - target_cash, 2)
     next_account["return_pct"] = round(safe_float(next_account.get("total_pnl"), 0) / target_cash * 100, 3) if target_cash > 0 else 0.0
     next_account["follow_model_id"] = str(profile.get("strategy_model_id") or "active")
-    next_account["follow_model_name"] = str((context.get("followed_model") or {}).get("name") or "系统运行策略（当前参数）")
+    next_account["follow_model_name"] = str((context.get("followed_model") or {}).get("name") or "未选择策略")
     next_payload["account"] = next_account
     next_payload["positions"] = [_scale_row(item, scale, position_money_keys) for item in account_payload.get("positions", []) if isinstance(item, dict)]
     next_payload["today_deals"] = [_scale_row(item, scale, deal_money_keys) for item in account_payload.get("today_deals", []) if isinstance(item, dict)]
@@ -1007,6 +1117,7 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
     next_payload["portfolio"] = next_portfolio
     next_payload["frontend_profile"] = profile
     next_payload["followed_model"] = context.get("followed_model") or {}
+    next_payload["follow_start_date"] = account_payload.get("follow_start_date") or profile.get("follow_start_date") or ""
     return next_payload
 
 
@@ -1096,7 +1207,7 @@ def frontend_public_snapshot(
     light: bool = Query(default=True),
 ):
     news_limit = 12 if mobile or light else 80
-    jobs_payload = job_manager.status()
+    jobs_payload = job_manager.status(light=True)
     light_jobs = _frontend_light_jobs(jobs_payload)
     news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     return {
@@ -1117,7 +1228,7 @@ def frontend_snapshot(
 ):
     news_limit = 12 if mobile or light else 80
     top_n = 12 if mobile else 30
-    jobs_payload = job_manager.status()
+    jobs_payload = job_manager.status(light=True)
     visible_jobs = _frontend_light_jobs(jobs_payload) if light else jobs_payload
     news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
     context = _frontend_profile_context(request, include_catalog=True)
@@ -1168,11 +1279,29 @@ def frontend_recommendations(
     as_of: Optional[str] = Query(default=None),
     lookback_days: int = Query(default=2, ge=1, le=20),
     top_n: int = Query(default=30, ge=1, le=100),
+    force: bool = Query(default=False),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
+    effective_as_of = _frontend_account_as_of(as_of)
+    cache_parts = _frontend_payload_cache_parts(
+        context,
+        "front_recommendations",
+        {
+            "as_of": effective_as_of,
+            "lookback_days": lookback_days,
+            "top_n": top_n,
+        },
+    )
+    ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900)
+    cached = None if force else load_payload_cache("front_recommendations", cache_parts, ttl)
+    if cached:
+        return cached
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
-        payload = quant_engine.recommendations(as_of=as_of, lookback_days=lookback_days, top_n=top_n)
-    return _affordable_payload(payload, context, as_of)
+        payload = quant_engine.recommendations(as_of=effective_as_of, lookback_days=lookback_days, top_n=top_n)
+    payload = _affordable_payload(payload, context, effective_as_of)
+    payload["frontend_payload_cache"] = "miss"
+    save_payload_cache("front_recommendations", cache_parts, payload, ttl)
+    return payload
 
 
 @app.get("/api/front/daily_plan")
@@ -1181,19 +1310,36 @@ def frontend_daily_plan(
     as_of: Optional[str] = Query(default=None),
     start_date: Optional[str] = Query(default=None),
     limit_days: int = Query(default=120, ge=1, le=500),
+    force: bool = Query(default=False),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
     effective_as_of = _frontend_account_as_of(as_of)
     effective_start = start_date or _frontend_replay_start_date(effective_as_of)
+    cache_parts = _frontend_payload_cache_parts(
+        context,
+        "front_daily_plan",
+        {
+            "as_of": effective_as_of,
+            "start_date": effective_start,
+            "limit_days": limit_days,
+        },
+    )
+    ttl = _frontend_payload_cache_ttl("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800)
+    cached = None if force else load_payload_cache("front_daily_plan", cache_parts, ttl)
+    if cached:
+        return cached
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
         payload = quant_engine.daily_plan(as_of=effective_as_of, start_date=effective_start, limit_days=limit_days)
-    return _affordable_payload(payload, context, effective_as_of)
+    payload = _affordable_payload(payload, context, effective_as_of)
+    payload["frontend_payload_cache"] = "miss"
+    save_payload_cache("front_daily_plan", cache_parts, payload, ttl)
+    return payload
 
 
 @app.get("/api/admin/snapshot")
 def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Query(default=True)):
     if light:
-        jobs_payload = job_manager.status()
+        jobs_payload = job_manager.status(light=True)
         dashboard = {
             "status": "ok",
             "as_of": as_of,
@@ -1216,7 +1362,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
     return {
         "status": "ok",
         "status_payload": status(),
-        "jobs": job_manager.status(),
+        "jobs": job_manager.status(light=True),
         "biying": biying_minute_sync.status(),
         "lhb": lhb_status(),
         "ai_usage": ai_usage_summary(),
@@ -1242,7 +1388,7 @@ def admin_trading_account(
     payload = quant_engine.trading_account(as_of=as_of, limit=limit)
     payload["strategy_account_source"] = "runtime_state"
     payload["strategy_scope"] = "system_runtime"
-    payload["strategy_name"] = "系统运行账户（系统运行策略）"
+    payload["strategy_name"] = "后台基准账户（仅用于诊断）"
     return payload
 
 
@@ -1262,7 +1408,7 @@ async def admin_live(websocket: WebSocket):
     biying_fp = ""
     try:
         while True:
-            jobs_payload = job_manager.status()
+            jobs_payload = job_manager.status(light=True)
             status_payload = _light_status_payload(jobs_payload=jobs_payload)
             biying_payload = biying_minute_sync.status()
             logs_payload = job_manager.logs(limit=120)
@@ -1421,7 +1567,7 @@ def quant_apply_strategy_model(model_id: str = Query(...)):
             "type": source_type,
             "model_id": str(model.get("id") or ""),
             "name": str(model.get("name") or model.get("id") or ""),
-            "description": "来自资金档策略应用。" if source_type == "capital_preset" else "来自策略库模型应用。",
+            "description": "来自资金档策略设为后台基准参数。" if source_type == "capital_preset" else "来自策略库模型设为后台基准参数。",
             "objective": model.get("objective"),
             "return_pct": model.get("return_pct"),
             "max_drawdown_pct": model.get("max_drawdown_pct"),
@@ -1513,8 +1659,8 @@ def quant_news(
 
 
 @app.get("/api/jobs/status")
-def jobs_status():
-    return job_manager.status()
+def jobs_status(light: bool = Query(default=True)):
+    return job_manager.status(light=light)
 
 
 @app.get("/api/jobs/logs")
@@ -1759,6 +1905,16 @@ def admin_database_table(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/cache/status")
+def admin_cache_status():
+    return runtime_cache_status()
+
+
+@app.post("/api/admin/cache/clear")
+def admin_cache_clear(scope: str = Query(default="expired")):
+    return clear_runtime_cache(scope=scope)
 
 
 @app.post("/api/admin/data/import")

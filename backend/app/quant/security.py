@@ -239,9 +239,13 @@ def _normalize_frontend_profile(raw: Optional[Dict[str, Any]] = None) -> Dict[st
     cash = safe_float(raw.get("simulated_cash"), DEFAULT_FRONTEND_SIMULATED_CASH)
     cash = max(10_000.0, min(10_000_000.0, cash))
     model_id = str(raw.get("strategy_model_id") or DEFAULT_FRONTEND_PROFILE["strategy_model_id"]).strip() or DEFAULT_FRONTEND_PROFILE["strategy_model_id"]
+    follow_started_at = str(raw.get("follow_started_at") or raw.get("created_at") or "").strip()
+    follow_start_date = str(raw.get("follow_start_date") or follow_started_at[:10] or "").strip()[:10]
     return {
         "simulated_cash": round(cash, 2),
         "strategy_model_id": model_id[:120],
+        "follow_started_at": follow_started_at,
+        "follow_start_date": follow_start_date,
     }
 
 
@@ -281,13 +285,14 @@ def setup_auth(payload: Dict[str, Any]) -> Dict[str, Any]:
     if frontend_password:
         if len(frontend_username) < 3 or len(frontend_password) < 6:
             raise HTTPException(status_code=400, detail="frontend username or password is too short")
+        created_at = _now_iso()
         auth["users"]["frontend_users"][frontend_username] = {
             "username": frontend_username,
             "password": _hash_password(frontend_password),
-            "created_at": _now_iso(),
+            "created_at": created_at,
             "last_login_at": "",
             "login_count": 0,
-            "profile": _normalize_frontend_profile(None),
+            "profile": _normalize_frontend_profile({"follow_started_at": created_at}),
         }
     _save_auth(auth)
     return {
@@ -363,17 +368,19 @@ def register_frontend_user(payload: Dict[str, Any], request: Optional[Request] =
     frontend_users = _ensure_frontend_users(auth)
     if _frontend_user_record(auth, username):
         raise HTTPException(status_code=409, detail="username already exists")
+    created_at = _now_iso()
+    profile_payload = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
     frontend_users[username] = {
         "username": username,
         "password": _hash_password(password),
-        "created_at": _now_iso(),
-        "last_login_at": _now_iso(),
+        "created_at": created_at,
+        "last_login_at": created_at,
         "login_count": 1,
         "registered_ip": _request_ip(request) if request else "",
         "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
         "last_login_ip": _request_ip(request) if request else "",
         "last_login_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
-        "profile": _normalize_frontend_profile(payload.get("profile") if isinstance(payload.get("profile"), dict) else None),
+        "profile": _normalize_frontend_profile({**profile_payload, "follow_started_at": created_at}),
     }
     auth["updated_at"] = _now_iso()
     _save_auth(auth)
@@ -419,16 +426,18 @@ def admin_create_frontend_user(payload: Dict[str, Any], request: Optional[Reques
     frontend_users = _ensure_frontend_users(auth)
     if _frontend_user_record(auth, username):
         raise HTTPException(status_code=409, detail="username already exists")
+    created_at = _now_iso()
+    profile_payload = payload.get("profile") if isinstance(payload.get("profile"), dict) else payload
     frontend_users[username] = {
         "username": username,
         "password": _hash_password(password),
-        "created_at": _now_iso(),
+        "created_at": created_at,
         "created_by": "admin",
         "last_login_at": "",
         "login_count": 0,
         "registered_ip": _request_ip(request) if request else "",
         "registered_user_agent": str((request.headers.get("user-agent") if request else "") or "")[:500],
-        "profile": _normalize_frontend_profile(payload.get("profile") if isinstance(payload.get("profile"), dict) else payload),
+        "profile": _normalize_frontend_profile({**profile_payload, "follow_started_at": created_at}),
     }
     auth["updated_at"] = _now_iso()
     _save_auth(auth)
@@ -445,7 +454,14 @@ def admin_update_frontend_user(username: str, payload: Dict[str, Any]) -> Dict[s
     updates = payload if isinstance(payload, dict) else {}
     current = record.get("profile") if isinstance(record.get("profile"), dict) else {}
     profile_payload = updates.get("profile") if isinstance(updates.get("profile"), dict) else updates
-    record["profile"] = _normalize_frontend_profile({**current, **profile_payload})
+    merged = {**current, **profile_payload}
+    old_model = str(current.get("strategy_model_id") or "")
+    new_model = str(merged.get("strategy_model_id") or old_model)
+    if new_model and new_model != old_model:
+        merged["follow_started_at"] = _now_iso()
+    if not str(merged.get("follow_started_at") or "").strip():
+        merged["follow_started_at"] = str(record.get("created_at") or _now_iso())
+    record["profile"] = _normalize_frontend_profile(merged)
     record["profile_updated_at"] = _now_iso()
     if username not in frontend_users:
         frontend_users[username] = record
@@ -512,7 +528,13 @@ def frontend_user_profile(username: str) -> Dict[str, Any]:
         record["profile"] = profile
         auth["updated_at"] = _now_iso()
         _save_auth(auth)
-    return {"status": "ok", "username": username, "profile": profile}
+    return {
+        "status": "ok",
+        "username": username,
+        "created_at": str(record.get("created_at") or ""),
+        "profile_updated_at": str(record.get("profile_updated_at") or ""),
+        "profile": profile,
+    }
 
 
 def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -523,7 +545,14 @@ def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict
         raise HTTPException(status_code=404, detail="frontend user not found")
     current = record.get("profile") if isinstance(record.get("profile"), dict) else {}
     updates = payload if isinstance(payload, dict) else {}
-    profile = _normalize_frontend_profile({**current, **updates})
+    merged = {**current, **updates}
+    old_model = str(current.get("strategy_model_id") or "")
+    new_model = str(merged.get("strategy_model_id") or old_model)
+    if new_model and new_model != old_model:
+        merged["follow_started_at"] = _now_iso()
+    if not str(merged.get("follow_started_at") or "").strip():
+        merged["follow_started_at"] = str(record.get("created_at") or _now_iso())
+    profile = _normalize_frontend_profile(merged)
     record["profile"] = profile
     record["profile_updated_at"] = _now_iso()
     auth["updated_at"] = _now_iso()

@@ -99,6 +99,29 @@ def test_trading_account_exposes_positions_deals_and_delivery_records():
         assert "net_amount" in deal
 
 
+def test_account_from_trades_can_start_from_follow_date_without_old_positions():
+    engine = QuantEngine()
+    trades = [
+        {"date": "2026-03-01", "time": "09:30:00", "side": "BUY", "code": "600000", "name": "浦发银行", "qty": 100, "price": 10},
+        {"date": "2026-03-05", "time": "14:55:00", "side": "SELL", "code": "600000", "name": "浦发银行", "qty": 100, "price": 12},
+        {"date": "2026-03-06", "time": "09:30:00", "side": "BUY", "code": "600003", "name": "东北高速", "qty": 100, "price": 8},
+        {"date": "2026-03-08", "time": "14:55:00", "side": "SELL", "code": "600003", "name": "东北高速", "qty": 100, "price": 9},
+    ]
+
+    result = engine.account_from_trades(
+        trades,
+        initial_cash=100_000,
+        as_of="2026-03-08",
+        start_date="2026-03-04",
+        drop_unmatched_sells=True,
+    )
+
+    assert result["start_date"] == "2026-03-04"
+    assert result["account"]["deal_count"] == 2
+    assert {deal["code"] for deal in result["history_deals"]} == {"600003"}
+    assert result["positions"] == []
+
+
 def test_monitoring_exposes_data_coverage_and_ai_usage():
     coverage = data_coverage(as_of="2026-05-19", top_n=20)
 

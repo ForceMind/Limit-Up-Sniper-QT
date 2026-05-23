@@ -1500,11 +1500,16 @@ class QuantEngine:
         by_theme: Dict[str, List[float]] = {}
         by_type: Dict[str, List[float]] = {}
         all_returns: List[float] = []
-        for event in self.events():
-            if self._is_sample_event(event):
-                continue
-            if event.date >= as_of:
-                continue
+        events = [
+            event
+            for event in self.events()
+            if not self._is_sample_event(event) and event.date < as_of
+        ]
+        max_events = env_int("QT_CORRELATION_MAX_EVENTS", 1200, minimum=100, maximum=50000)
+        if len(events) > max_events:
+            events.sort(key=lambda item: (item.date, item.timestamp, item.impact_score), reverse=True)
+            events = events[:max_events]
+        for event in events:
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
             if not realized:
                 continue
@@ -1519,6 +1524,8 @@ class QuantEngine:
             "as_of": as_of,
             "realized_by": realized_by,
             "hold_days": hold_days,
+            "sample_limit": max_events,
+            "sample_scanned": len(events),
             "global": self._aggregate_stats(all_returns),
             "by_code": {key: self._aggregate_stats(val) for key, val in by_code.items() if len(val) >= 2},
             "by_theme": {key: self._aggregate_stats(val) for key, val in by_theme.items() if len(val) >= 3},
@@ -3551,7 +3558,9 @@ class QuantEngine:
         trades: List[Dict[str, Any]],
         initial_cash: Optional[float] = None,
         as_of: Optional[str] = None,
+        start_date: Optional[str] = None,
         limit: int = 0,
+        drop_unmatched_sells: bool = False,
     ) -> Dict[str, Any]:
         as_of = as_of or self.latest_event_date()
         params = self.strategy_params()
@@ -3562,6 +3571,12 @@ class QuantEngine:
             for trade in raw_trades
             if not as_of or str(trade.get("date", "")) <= as_of
         ]
+        if start_date:
+            visible_trades = [
+                trade
+                for trade in visible_trades
+                if str(trade.get("date", "")) >= str(start_date)
+            ]
         visible_trades = sorted(
             enumerate(visible_trades, start=1),
             key=lambda pair: (str(pair[1].get("date") or ""), self._trade_clock(pair[1]), pair[0]),
@@ -3617,8 +3632,18 @@ class QuantEngine:
                     }
                 )
             else:
-                sell_qty_left = qty
                 queue = lots_by_code.setdefault(code, [])
+                held_qty = sum(max(0.0, safe_float(lot.get("qty"), 0)) for lot in queue)
+                if drop_unmatched_sells and held_qty <= 0:
+                    total_fees -= fees["total_fee"]
+                    continue
+                if drop_unmatched_sells and held_qty < qty:
+                    total_fees -= fees["total_fee"]
+                    qty = held_qty
+                    amount = qty * price
+                    fees = self._broker_fees(side, amount)
+                    total_fees += fees["total_fee"]
+                sell_qty_left = qty
                 while sell_qty_left > 0 and queue:
                     lot = queue[0]
                     lot_qty = safe_float(lot.get("qty"), 0)
@@ -3757,6 +3782,7 @@ class QuantEngine:
         return {
             "status": "ok",
             "as_of": as_of,
+            "start_date": str(start_date or ""),
             "account": {
                 "initial_cash": round(initial_asset, 2),
                 "total_asset": round(total_asset, 2),
@@ -4159,7 +4185,7 @@ class QuantEngine:
             return {"name": name, "params": self._normalize_strategy_params({**base, **updates})}
 
         candidates = [
-            normalized_candidate("当前参数", {}),
+            normalized_candidate("当前基准参数", {}),
             normalized_candidate(
                 "进攻型",
                 {
@@ -4259,7 +4285,7 @@ class QuantEngine:
                 source={
                     "type": "fit_strategy",
                     "name": f"参数拟合：{best.get('name', '最佳方案')}",
-                    "description": "来自后台参数拟合并应用。",
+                    "description": "来自后台参数拟合并设为基准参数。",
                     "model_id": "",
                 },
             )
@@ -4296,6 +4322,13 @@ class QuantEngine:
         as_of = as_of or self.latest_event_date()
         params = self.strategy_params()
         limit_days = max(1, min(int(limit_days or 80), 500))
+        inferred_start = False
+        if not start_date:
+            event_dates = sorted({event.date for event in self.events() if event.date <= as_of})
+            if event_dates:
+                window = max(limit_days * 3, limit_days + 8)
+                start_date = event_dates[max(0, len(event_dates) - window)]
+                inferred_start = True
         recommendations = self.recommendations(as_of=as_of, lookback_days=2, top_n=100)
         buy_list = [
             item
@@ -4463,6 +4496,7 @@ class QuantEngine:
             "timeline_summary": {
                 "start_date": timeline.get("start_date", ""),
                 "end_date": timeline.get("end_date", ""),
+                "start_date_inferred": inferred_start,
                 "return_pct": timeline.get("return_pct", 0),
                 "closed_trades": timeline.get("closed_trades", 0),
                 "win_rate": timeline.get("win_rate", 0),

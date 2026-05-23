@@ -482,6 +482,7 @@
               <button @click="setProfileCash(80000)" class="h-8 border border-neutral-300 bg-white">8万</button>
             </div>
             <div class="mt-2 text-xs text-neutral-500">当前跟随：{{ followedModelName }} · {{ followedModelDescription }}</div>
+            <div v-if="followStartText" class="mt-1 text-xs text-neutral-500">跟随开始：{{ followStartText }}</div>
             <div class="mt-1 text-xs text-neutral-500">修改资金会自动切换匹配资金档，并重算单票资金、买入信号和持仓。</div>
             <div v-if="profileMessage" class="mt-2 text-xs text-emerald-700">{{ profileMessage }}</div>
           </div>
@@ -679,6 +680,7 @@
             <div class="text-xs text-neutral-500">当前跟随</div>
             <div class="font-semibold mt-1">{{ followedModelName }}</div>
             <div class="text-xs text-neutral-500 mt-1">{{ followedModelDescription }}</div>
+            <div v-if="followStartText" class="text-xs text-neutral-500 mt-1">跟随开始：{{ followStartText }}</div>
           </div>
           <div class="border border-neutral-200 p-3">
             <div class="text-xs text-neutral-500">模拟资金</div>
@@ -1231,8 +1233,8 @@
           jobLogs: {},
           recommendations: {},
           strategyModels: {},
-          userProfile: { simulated_cash: 10000, strategy_model_id: 'capital_10000' },
-          profileForm: { simulated_cash: 10000, strategy_model_id: 'capital_10000' },
+          userProfile: { simulated_cash: 10000, strategy_model_id: 'capital_10000', follow_start_date: '' },
+          profileForm: { simulated_cash: 10000, strategy_model_id: 'capital_10000', follow_start_date: '' },
           followedModel: {},
           profileSaving: false,
           profileMessage: '',
@@ -1326,14 +1328,17 @@
           const id = String(this.userProfile.strategy_model_id || 'capital_10000');
           const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
           if (model.name || model.id) return model.name || model.id;
-          return this.account.follow_model_name || '系统当前参数';
+          return this.account.follow_model_name || '未选择策略';
         },
         followedModelDescription() {
           const id = String(this.userProfile.strategy_model_id || 'capital_10000');
           const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
           if (model.description) return model.description;
-          if (id === 'active') return '后台系统参数，不是专门为该账号资金规模生成的策略。';
+          if (id === 'active') return '后台基准参数仅用于诊断，请选择资金档或策略库模型跟随。';
           return `资金档 ${this.userProfile.capital_label || '-'}，单票资金 ${this.money(this.rules.paper_position_value)}`;
+        },
+        followStartText() {
+          return this.accountView.follow_start_date || this.userProfile.follow_start_date || '';
         },
         capitalBands() {
           return this.strategyModels.capital_bands || [

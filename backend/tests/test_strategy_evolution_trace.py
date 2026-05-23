@@ -7,6 +7,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.quant.evolution import StrategyEvolution
+import app.quant.evolution as evolution_module
 
 
 def test_candidate_records_explain_elite_selection_and_elimination():
@@ -42,3 +43,45 @@ def test_candidate_records_explain_elite_selection_and_elimination():
     assert rows[1]["selection_role"] == "eliminated"
     assert rows[1]["elimination_reason"] == "收益为负"
     assert rows[1]["params_hash"]
+
+
+def test_strategy_account_cache_round_trips_through_sqlite(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    monkeypatch.setenv("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", "3600")
+    evolution = StrategyEvolution()
+    params = {"buy_threshold": 72, "paper_position_value": 9000}
+    account = {
+        "status": "ok",
+        "as_of": "2026-05-19",
+        "follow_start_date": "2026-05-01",
+        "strategy_account_source": "model_records",
+        "account": {"total_asset": 101000, "return_pct": 1.0, "position_count": 1, "deal_count": 2},
+        "positions": [{"code": "600000"}],
+        "history_deals": [{"code": "600000", "side": "BUY"}],
+    }
+
+    evolution.save_account_cache(
+        "model-a",
+        params,
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        account,
+        model_version="run-a",
+        source="model_records",
+    )
+    cached = evolution.load_account_cache(
+        "model-a",
+        params,
+        100000,
+        "2026-05-01",
+        "2026-05-19",
+        50,
+        model_version="run-a",
+    )
+
+    assert cached
+    assert cached["strategy_account_cache"] == "hit"
+    assert cached["account"]["total_asset"] == 101000
+    assert cached["positions"][0]["code"] == "600000"

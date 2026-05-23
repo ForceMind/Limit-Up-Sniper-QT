@@ -359,8 +359,8 @@
         <section v-if="activeTab === 'trading'" class="space-y-4">
           <div class="panel px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div class="font-semibold">{{ tradingAccount.strategy_name || '系统运行账户（系统运行策略）' }}</div>
-              <div class="text-xs text-neutral-500 mt-1">系统运行策略是后台任务当前使用的全局参数；策略库模型是训练/回测后保存的参数组合，每个模型的独立交割单请到“策略库”点击“查看交割单”。</div>
+              <div class="font-semibold">{{ tradingAccount.strategy_name || '后台基准账户（仅用于诊断）' }}</div>
+              <div class="text-xs text-neutral-500 mt-1">正式产品按“用户账号 + 跟随策略”独立运行；这里仅显示后台基准参数跑出的诊断账户，不代表任何用户正在跟随。</div>
             </div>
             <button @click="loadTradingAccount(false)" :disabled="tradingLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ tradingLoading ? '加载中' : '刷新交易账户' }}</button>
           </div>
@@ -650,6 +650,17 @@
               <div class="metric"><div class="text-xs text-neutral-500">进化状态文件</div><div class="mt-2 text-lg font-semibold">{{ databaseStateFiles.length }}</div></div>
               <div class="metric"><div class="text-xs text-neutral-500">更新时间</div><div class="mt-2 text-sm font-semibold">{{ shortTime((database.database || {}).modified_at) }}</div></div>
             </div>
+            <div class="px-4 pb-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 text-sm">
+              <div class="metric"><div class="text-xs text-neutral-500">推荐/日计划缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(((cacheStatus.tables || {}).frontend_payload_cache || {}).row_count) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">账户回放缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(((cacheStatus.tables || {}).strategy_runtime_snapshots || {}).row_count) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">已过期缓存</div><div class="mt-2 text-lg font-semibold">{{ qty(cacheStatus.expired_rows || 0) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">缓存最新生成</div><div class="mt-2 text-sm font-semibold">{{ shortTime(cacheLatestGeneratedAt) }}</div></div>
+              <div class="flex flex-wrap items-end gap-2">
+                <button @click="fetchCacheStatus" :disabled="cacheLoading" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ cacheLoading ? '刷新中' : '刷新缓存' }}</button>
+                <button @click="clearCache('expired')" :disabled="cacheClearing" class="h-9 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">清理过期</button>
+                <button @click="clearCache('all')" :disabled="cacheClearing" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">清空缓存</button>
+              </div>
+            </div>
             <div class="px-4 pb-4 grid gap-3 lg:grid-cols-[minmax(220px,320px)_100px_auto] text-sm">
               <label>
                 <span class="block text-xs text-neutral-500 mb-1">数据表</span>
@@ -747,9 +758,9 @@
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <div class="font-semibold">系统运行策略参数</div>
+                <div class="font-semibold">后台基准参数</div>
                 <div class="text-xs text-neutral-500 mt-1">
-                  当前来源：{{ systemStrategySource.name || '默认系统参数' }} · {{ systemStrategySource.description || '后台任务当前使用的全局参数' }}
+                  当前来源：{{ systemStrategySource.name || '默认基准参数' }} · {{ systemStrategySource.description || '用于生成默认模型和诊断，不代表用户跟随账户' }}
                 </div>
               </div>
               <div class="flex gap-2">
@@ -795,7 +806,7 @@
               <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div class="font-semibold">策略库：回测后的可复用模型</div>
-                <div class="text-xs text-neutral-500 mt-1">每个模型都可以查看该参数组合跑出的成交、交割单和资金流水；点击“应用为系统运行策略”后，后台模拟交易才会使用它。</div>
+                <div class="text-xs text-neutral-500 mt-1">每个模型都可以查看该参数组合跑出的成交、交割单和资金流水；用户选择跟随后，从用户注册或切换策略日期开始独立运行。</div>
               </div>
                 <button @click="evolveStrategy" :disabled="evolutionToggling" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ evolutionActionText }}</button>
               </div>
@@ -830,7 +841,7 @@
                       <td class="px-3 py-2 text-right">
                         <button @click="loadStrategyBacktest(model)" :disabled="strategyBacktestLoading" class="h-8 px-3 border border-neutral-300 bg-white text-xs disabled:opacity-50">查看交割单</button>
                       </td>
-                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">应用为系统运行策略</button></td>
+                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">设为后台基准</button></td>
                     </tr>
                     <tr v-if="!evolutionModels.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
                   </tbody>
@@ -1554,6 +1565,9 @@
           databaseLoading: false,
           databaseRowsLoading: false,
           databaseForm: { table: '', limit: 50, offset: 0 },
+          cacheStatus: {},
+          cacheLoading: false,
+          cacheClearing: false,
           aiUsage: {},
           aiFailures: {},
           aiRecords: {},
@@ -1698,6 +1712,12 @@
         databaseColumns() { return (this.databaseTable.columns || []).map(item => item.name || item); },
         databaseRows() { return this.databaseTable.rows || []; },
         databaseStateFiles() { return this.database.state_files || []; },
+        cacheLatestGeneratedAt() {
+          const tables = this.cacheStatus.tables || {};
+          const payloadLatest = ((tables.frontend_payload_cache || {}).latest_generated_at) || '';
+          const accountLatest = ((tables.strategy_runtime_snapshots || {}).latest_generated_at) || '';
+          return [payloadLatest, accountLatest].filter(Boolean).sort().pop() || '';
+        },
         fitCandidates() { return this.fitResult.candidates || []; },
         evolutionTraceSummary() { return this.evolutionTrace.summary || {}; },
         evolutionTraceRuns() { return this.evolutionTrace.runs || []; },
@@ -2116,6 +2136,7 @@
           this.databaseLoading = true;
           try {
             this.database = await this.api('/api/admin/database/tables');
+            await this.fetchCacheStatus();
             const tables = this.databaseTables;
             if (!this.databaseForm.table && tables.length) {
               const preferred = tables.find(item => item.name === 'strategy_models')
@@ -2129,6 +2150,30 @@
             this.clientError = String(err.message || err);
           } finally {
             this.databaseLoading = false;
+          }
+        },
+        async fetchCacheStatus() {
+          this.cacheLoading = true;
+          try {
+            this.cacheStatus = await this.api('/api/admin/cache/status');
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.cacheLoading = false;
+          }
+        },
+        async clearCache(scope = 'expired') {
+          this.cacheClearing = true;
+          try {
+            const q = new URLSearchParams({ scope: String(scope || 'expired') });
+            const result = await this.api(`/api/admin/cache/clear?${q.toString()}`, { method: 'POST' });
+            this.cacheStatus = result.cache || {};
+            this.adminResult = result;
+            await this.fetchDatabaseOverview(false);
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.cacheClearing = false;
           }
         },
         async fetchDatabaseTable(resetOffset = false) {
@@ -2726,7 +2771,7 @@
         },
         async applyEvolutionModel(model) {
           if (!model || !model.id) return;
-          if (!window.confirm(`确认把「${model.name || model.id}」应用为系统运行策略？后台模拟交易和系统运行账户会改用这组参数。`)) return;
+          if (!window.confirm(`确认把「${model.name || model.id}」设为后台基准参数？这不会改变任何用户已经选择的跟随策略。`)) return;
           const q = new URLSearchParams({ model_id: model.id });
           const result = await this.api(`/api/quant/model/apply?${q.toString()}`, { method: 'POST' });
           this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
