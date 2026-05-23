@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
 from app.quant.engine import DATA_DIR, quant_engine, read_json, write_json
+from app.quant.evolution import strategy_evolution
 from app.quant.lhb_sync import lhb_status, sync_lhb
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
@@ -30,6 +31,7 @@ JOB_LABELS = {
     "lhb_sync": "龙虎榜同步",
     "trade_cycle": "交易循环",
     "strategy_replay": "策略复盘",
+    "strategy_evolution": "策略进化",
     "system_startup": "系统启动",
     "admin_backup": "数据备份",
     "admin_data_export": "数据导出",
@@ -362,7 +364,7 @@ class QuantJobManager:
         )
 
     def _default_backfill_start_date(self) -> str:
-        return str(os.getenv("DATA_BACKFILL_START_DATE") or os.getenv("STRATEGY_REPLAY_START_DATE") or quant_engine.first_data_date() or "2026-03-01").strip()
+        return str(os.getenv("DATA_BACKFILL_START_DATE") or os.getenv("STRATEGY_REPLAY_START_DATE") or "2026-03-01").strip()
 
     def run_kline_fill(
         self,
@@ -487,6 +489,55 @@ class QuantJobManager:
 
         return self.run_job("strategy_replay", execute, payload=payload)
 
+    def run_strategy_evolution(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        mode: str = "intraday",
+        generations: Optional[int] = None,
+        population_size: Optional[int] = None,
+        apply_best: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        start_date = str(start_date or self._default_backfill_start_date()).strip()
+        end_date = str(end_date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        mode = str(mode or os.getenv("STRATEGY_EVOLUTION_MODE") or "intraday").strip().lower()
+        if mode not in {"daily", "intraday"}:
+            mode = "intraday"
+        generations = max(1, min(int(generations or self._strategy_evolution_generations()), 30))
+        population_size = max(6, min(int(population_size or self._strategy_evolution_population_size()), 80))
+        apply_best = _env_bool("STRATEGY_EVOLUTION_APPLY_BEST", False) if apply_best is None else bool(apply_best)
+        payload = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "mode": mode,
+            "generations": generations,
+            "population_size": population_size,
+            "apply_best": apply_best,
+        }
+
+        def execute() -> Dict[str, Any]:
+            fill_result = quant_engine.ensure_daily_kline_for_events(
+                start_date=start_date,
+                end_date=end_date,
+                hold_days=int(quant_engine.strategy_params().get("max_hold_days", 3)),
+                max_codes=self._auto_backfill_max_codes(),
+                force=False,
+            )
+            result = strategy_evolution.run(
+                generations=generations,
+                population_size=population_size,
+                start_date=start_date,
+                end_date=end_date,
+                apply_best=apply_best,
+                mode=mode,
+            )
+            return {
+                **result,
+                "data_fill": fill_result,
+            }
+
+        return self.run_job("strategy_evolution", execute, payload=payload)
+
     def _auto_market_codes(self, date: str, max_codes: int = 80) -> str:
         from app.quant.engine import digits6, quant_engine
 
@@ -535,6 +586,15 @@ class QuantJobManager:
     def _strategy_replay_interval_seconds(self) -> int:
         return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
 
+    def _strategy_evolution_interval_seconds(self) -> int:
+        return _env_int("STRATEGY_EVOLUTION_INTERVAL_SECONDS", 6 * 3600)
+
+    def _strategy_evolution_generations(self) -> int:
+        return max(1, min(_env_int("STRATEGY_EVOLUTION_GENERATIONS", 1), 30))
+
+    def _strategy_evolution_population_size(self) -> int:
+        return max(6, min(_env_int("STRATEGY_EVOLUTION_POPULATION_SIZE", 16), 80))
+
     def _kline_fill_interval_seconds(self) -> int:
         return _env_int("KLINE_FILL_INTERVAL_SECONDS", 6 * 3600)
 
@@ -571,6 +631,7 @@ class QuantJobManager:
         next_market_sync = time.time() + 40
         next_trade_cycle = time.time() + 50
         next_strategy_replay = time.time() + 70
+        next_strategy_evolution = time.time() + 90
         while not self._stop_event.is_set():
             now_ts = time.time()
             now_cn = _now_cn()
@@ -637,6 +698,26 @@ class QuantJobManager:
                 ran_task = True
             elif not _env_bool("STRATEGY_REPLAY_ENABLED", True):
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
+            if _env_bool("STRATEGY_EVOLUTION_ENABLED", True) and now_ts >= next_strategy_evolution:
+                evolution_state = strategy_evolution.status()
+                if evolution_state.get("status") not in {"running", "paused"}:
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            self.run_strategy_evolution,
+                            None,
+                            None,
+                            os.getenv("STRATEGY_EVOLUTION_MODE", "intraday"),
+                            self._strategy_evolution_generations(),
+                            self._strategy_evolution_population_size(),
+                            None,
+                        )
+                    )
+                    next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
+                    ran_task = True
+                else:
+                    next_strategy_evolution = time.time() + 300
+            elif not _env_bool("STRATEGY_EVOLUTION_ENABLED", True):
+                next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
             if ran_task:
                 state = self._load_state()
                 state["scheduler"] = {
@@ -664,6 +745,12 @@ class QuantJobManager:
                     "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
                     "strategy_replay_start_date": self._default_backfill_start_date(),
                     "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", True),
+                    "next_strategy_evolution_at": datetime.fromtimestamp(next_strategy_evolution, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    "strategy_evolution_interval_seconds": self._strategy_evolution_interval_seconds(),
+                    "strategy_evolution_start_date": self._default_backfill_start_date(),
+                    "strategy_evolution_generations": self._strategy_evolution_generations(),
+                    "strategy_evolution_population_size": self._strategy_evolution_population_size(),
+                    "strategy_evolution_enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", True),
                 }
                 self._save_state(state)
                 self._append_log(

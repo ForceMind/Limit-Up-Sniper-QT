@@ -1027,13 +1027,43 @@ def quant_evolve_strategy(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     apply_best: bool = Query(default=False),
+    mode: str = Query(default="intraday"),
+    background: bool = Query(default=True),
 ):
+    if background:
+        current = strategy_evolution.status()
+        if current.get("status") == "running":
+            return current
+
+        def worker() -> None:
+            job_manager.run_strategy_evolution(
+                start_date=start_date,
+                end_date=end_date,
+                mode=mode,
+                generations=generations,
+                population_size=population_size,
+                apply_best=apply_best,
+            )
+
+        threading.Thread(target=worker, name="strategy-evolution", daemon=True).start()
+        return {
+            "status": "running",
+            "progress_pct": 1,
+            "progress_message": "进化任务已启动，后台持续运行",
+            "generations": generations,
+            "population_size": population_size,
+            "start_date": start_date,
+            "end_date": end_date,
+            "mode": mode,
+            "background": True,
+        }
     return strategy_evolution.run(
         generations=generations,
         population_size=population_size,
         start_date=start_date,
         end_date=end_date,
         apply_best=apply_best,
+        mode=mode,
     )
 
 

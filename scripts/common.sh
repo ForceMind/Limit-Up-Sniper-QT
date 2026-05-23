@@ -145,7 +145,76 @@ auto_migrate_sqlite() {
   section "SQLite 数据自动迁移"
   info "数据目录：$data_dir"
   "$python_bin" "$script" --source "$data_dir" --db "$db_file"
+  check_sqlite_schema
   success "SQLite 数据自动迁移完成：$db_file"
+}
+
+check_sqlite_schema() {
+  local skip="${QT_SKIP_AUTO_MIGRATE:-0}"
+  if [[ "$skip" == "1" || "$skip" == "true" || "$skip" == "TRUE" || "$skip" == "yes" || "$skip" == "YES" ]]; then
+    warn "已跳过 SQLite 表结构验证：QT_SKIP_AUTO_MIGRATE=$skip"
+    return 0
+  fi
+
+  local data_dir db_file py
+  data_dir="$(runtime_data_dir)"
+  db_file="$data_dir/quant_data.sqlite3"
+  py="$(check_python_bin)"
+
+  section "SQLite 数据表验证"
+  if [[ ! -f "$db_file" ]]; then
+    warn "未找到 SQLite 数据库，跳过表结构验证：$db_file"
+    return 0
+  fi
+  if [[ -z "$py" ]]; then
+    warn "找不到 Python，跳过 SQLite 表结构验证"
+    return 0
+  fi
+
+  "$py" - "$db_file" <<'PY'
+import sqlite3
+import sys
+
+db_file = sys.argv[1]
+required = {
+    "news_raw": ["id", "date", "text"],
+    "news_events": ["event_id", "date", "code", "impact_score"],
+    "market_daily_bars": ["code", "date", "open", "close", "volume"],
+    "market_minute_bars": ["code", "date", "time", "close"],
+    "lhb_records": ["record_id", "trade_date", "stock_code", "buyer_seat_name"],
+    "strategy_runs": ["run_id", "status", "started_at", "raw_json"],
+    "strategy_model_metrics": ["metric_id", "run_id", "generation", "raw_json"],
+    "strategy_models": ["model_id", "run_id", "params_json", "backtest_json", "raw_json"],
+    "strategy_model_records": ["record_id", "model_id", "record_type", "raw_json"],
+    "paper_accounts": ["as_of", "cash", "raw_json"],
+    "paper_positions": ["position_id", "code", "raw_json"],
+    "paper_trades": ["trade_id", "code", "raw_json"],
+    "access_logs": ["access_id", "ip", "user_agent", "raw_json"],
+    "job_logs": ["log_id", "job", "message", "raw_json"],
+}
+
+conn = sqlite3.connect(db_file)
+try:
+    table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    tables = {row[0] for row in table_rows}
+    errors = []
+    for table, columns in required.items():
+        if table not in tables:
+            errors.append(f"缺少表 {table}")
+            continue
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column not in existing:
+                errors.append(f"{table} 缺少字段 {column}")
+    if errors:
+        print("SQLite 表结构验证失败：")
+        for item in errors:
+            print(f"- {item}")
+        sys.exit(1)
+    print("SQLite 表结构验证通过：策略模型、模型成交记录、行情、新闻、日志表都已存在")
+finally:
+    conn.close()
+PY
 }
 
 refresh_systemd_service() {
@@ -385,7 +454,7 @@ backend_feature_modules() {
   cat <<'EOF'
 version	version	GET:/api/version
 auth	auth	GET:/api/auth/status,POST:/api/auth/setup,POST:/api/auth/login,POST:/api/auth/register
-frontend	frontend	GET:/api/front/public_snapshot,GET:/api/front/snapshot,GET:/api/front/profile,POST:/api/front/profile
+frontend	frontend	GET:/api/front/public_snapshot,GET:/api/front/snapshot,GET:/api/front/profile,POST:/api/front/profile,GET:/api/front/trading_account,GET:/api/front/recommendations,GET:/api/front/daily_plan
 admin	admin	GET:/api/admin/snapshot,POST:/api/admin/system/startup,POST:/api/admin/backup,GET:/api/admin/data/export,POST:/api/admin/data/import,GET:/api/admin/data/import/{job_id},POST:/api/admin/data/clear_sample_state,GET:/api/admin/access_logs,POST:/api/admin/restart
 jobs	jobs	GET:/api/jobs/status,GET:/api/jobs/logs,POST:/api/jobs/{job_name}/pause,POST:/api/jobs/{job_name}/resume,POST:/api/jobs/news/fetch,POST:/api/jobs/market/sync,POST:/api/jobs/ai/analyze,POST:/api/jobs/trading/run,POST:/api/jobs/strategy/replay,POST:/api/jobs/daily/run
 data	data	GET:/api/data/coverage,POST:/api/data/kline/fill,GET:/api/data/lhb/status,POST:/api/data/lhb/sync,GET:/api/data/biying/status,POST:/api/data/biying/sync_intraday
@@ -530,4 +599,5 @@ verify_running_backend() {
   fi
   check_running_version
   check_backend_feature_routes
+  check_sqlite_schema
 }

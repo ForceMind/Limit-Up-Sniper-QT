@@ -334,6 +334,47 @@ def create_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_strategy_metrics_run ON strategy_model_metrics(run_id);
 
+        CREATE TABLE IF NOT EXISTS strategy_models (
+            model_id TEXT PRIMARY KEY,
+            run_id TEXT,
+            generated_at TEXT,
+            rank INTEGER,
+            name TEXT,
+            source TEXT,
+            reusable INTEGER,
+            objective REAL,
+            return_pct REAL,
+            max_drawdown_pct REAL,
+            sharpe_ratio REAL,
+            profit_factor REAL,
+            win_rate REAL,
+            closed_trades INTEGER,
+            params_json TEXT NOT NULL DEFAULT '{}',
+            backtest_json TEXT NOT NULL DEFAULT '{}',
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_models_run ON strategy_models(run_id, rank);
+        CREATE INDEX IF NOT EXISTS idx_strategy_models_generated ON strategy_models(generated_at);
+
+        CREATE TABLE IF NOT EXISTS strategy_model_records (
+            record_id TEXT PRIMARY KEY,
+            model_id TEXT,
+            run_id TEXT,
+            record_type TEXT,
+            seq INTEGER,
+            date TEXT,
+            time TEXT,
+            side TEXT,
+            code TEXT,
+            name TEXT,
+            qty REAL,
+            price REAL,
+            pnl_pct REAL,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_strategy_records_model ON strategy_model_records(model_id, record_type);
+        CREATE INDEX IF NOT EXISTS idx_strategy_records_code_date ON strategy_model_records(code, date);
+
         CREATE TABLE IF NOT EXISTS access_logs (
             access_id TEXT PRIMARY KEY,
             ts TEXT,
@@ -847,9 +888,25 @@ def upsert_quant_state(conn: sqlite3.Connection, source_dir: Path) -> dict[str, 
 def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dict[str, int]:
     state = read_json(source_dir / "strategy_evolution_state.json", {})
     if not isinstance(state, dict) or not state:
-        return {"strategy_runs": 0, "strategy_model_metrics": 0}
+        return {
+            "strategy_runs": 0,
+            "strategy_model_metrics": 0,
+            "strategy_models": 0,
+            "strategy_model_records": 0,
+        }
+    best_model = state.get("best_model") if isinstance(state.get("best_model"), dict) else {}
     best = state.get("best") if isinstance(state.get("best"), dict) else {}
-    run_id = digest("strategy_evolution", state.get("started_at"), state.get("finished_at"), best)
+    best_source = best_model or best
+    run_id = text(state.get("run_id")) or digest(
+        "strategy_evolution",
+        state.get("started_at"),
+        state.get("finished_at") or state.get("updated_at"),
+        state.get("start_date"),
+        state.get("end_date"),
+        state.get("mode"),
+        best_source,
+    )
+    finished_at = text(state.get("finished_at") or state.get("updated_at"))
     conn.execute(
         """
         INSERT OR REPLACE INTO strategy_runs
@@ -862,19 +919,19 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
             run_id,
             text(state.get("status")),
             text(state.get("started_at")),
-            text(state.get("finished_at")),
+            finished_at,
             num(state.get("duration_ms")),
             integer(state.get("generations")),
             integer(state.get("population_size")),
             text(state.get("start_date")),
             text(state.get("end_date")),
             1 if state.get("applied") else 0,
-            num(best.get("objective")),
-            num(best.get("return_pct")),
-            num(best.get("max_drawdown_pct")),
-            num(best.get("win_rate")),
-            integer(best.get("closed_trades")),
-            json_text(best.get("params")),
+            num(best_source.get("objective")),
+            num(best_source.get("return_pct")),
+            num(best_source.get("max_drawdown_pct")),
+            num(best_source.get("win_rate")),
+            integer(best_source.get("closed_trades")),
+            json_text(best_source.get("params")),
             json_text(state),
         ),
     )
@@ -906,7 +963,91 @@ def upsert_strategy_evolution(conn: sqlite3.Connection, source_dir: Path) -> dic
         """,
         metric_rows,
     )
-    return {"strategy_runs": 1, "strategy_model_metrics": len(metric_rows)}
+    models = state.get("models") if isinstance(state.get("models"), list) else []
+    model_rows = []
+    record_rows = []
+    for rank, model in enumerate(models, start=1):
+        if not isinstance(model, dict):
+            continue
+        model_id = text(model.get("id")) or digest("strategy_model", run_id, rank, model)[:24]
+        model_rows.append(
+            (
+                model_id,
+                run_id,
+                text(model.get("generated_at") or finished_at),
+                integer(model.get("rank"), rank),
+                text(model.get("name")) or model_id,
+                text(model.get("source")),
+                1 if model.get("reusable", True) else 0,
+                num(model.get("objective")),
+                num(model.get("return_pct")),
+                num(model.get("max_drawdown_pct")),
+                num(model.get("sharpe_ratio")),
+                num(model.get("profit_factor")),
+                num(model.get("win_rate")),
+                integer(model.get("closed_trades")),
+                json_text(model.get("params") if isinstance(model.get("params"), dict) else {}),
+                json_text(model.get("backtest") if isinstance(model.get("backtest"), dict) else {}),
+                json_text(model),
+            )
+        )
+        for record_type, records in (
+            ("trade", model.get("trade_records")),
+            ("delivery", model.get("delivery_records")),
+            ("settlement", model.get("daily_settlements")),
+        ):
+            if not isinstance(records, list):
+                continue
+            for seq, record in enumerate(records, start=1):
+                if not isinstance(record, dict):
+                    continue
+                record_id = digest("strategy_record", model_id, record_type, seq, record)
+                qty_value = record.get("qty") if "qty" in record else record.get("quantity")
+                price_value = record.get("price") if "price" in record else record.get("close")
+                pnl_value = record.get("pnl_pct") if "pnl_pct" in record else record.get("return_pct")
+                record_rows.append(
+                    (
+                        record_id,
+                        model_id,
+                        run_id,
+                        record_type,
+                        seq,
+                        text(record.get("date") or record.get("trade_date") or record.get("sell_date") or record.get("buy_date")),
+                        text(record.get("time") or record.get("ts") or record.get("created_at")),
+                        text(record.get("side") or record.get("direction") or record.get("action")),
+                        text(record.get("code")),
+                        text(record.get("name")),
+                        num(qty_value),
+                        num(price_value),
+                        num(pnl_value),
+                        json_text(record),
+                    )
+                )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO strategy_models
+        (model_id, run_id, generated_at, rank, name, source, reusable, objective, return_pct,
+         max_drawdown_pct, sharpe_ratio, profit_factor, win_rate, closed_trades,
+         params_json, backtest_json, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        model_rows,
+    )
+    conn.executemany(
+        """
+        INSERT OR REPLACE INTO strategy_model_records
+        (record_id, model_id, run_id, record_type, seq, date, time, side,
+         code, name, qty, price, pnl_pct, raw_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        record_rows,
+    )
+    return {
+        "strategy_runs": 1,
+        "strategy_model_metrics": len(metric_rows),
+        "strategy_models": len(model_rows),
+        "strategy_model_records": len(record_rows),
+    }
 
 
 def upsert_access_logs(conn: sqlite3.Connection, source_dir: Path) -> int:

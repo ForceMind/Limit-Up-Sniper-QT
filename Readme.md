@@ -221,7 +221,7 @@ bash qt.sh install
 bash qt.sh
 ```
 
-`bash qt.sh` 等同于 `bash qt.sh update`，会先备份当前运行数据目录，再 `git pull --ff-only`、安装依赖、自动整理 SQLite 并重启服务。自动迁移使用 `INSERT OR REPLACE` 和业务主键去重，重复更新不会整库覆盖。
+`bash qt.sh` 等同于 `bash qt.sh update`；服务器快捷命令 `qt` 面板里的 `1) 一键更新部署` 也走同一套流程。它会先备份当前运行数据目录，再 `git pull --ff-only`、安装依赖、自动整理 SQLite、验证关键数据表、重启服务并校验前后端版本和模块接口。自动迁移使用 `INSERT OR REPLACE` 和业务主键去重，重复更新不会整库覆盖。
 
 常用运维命令：
 

@@ -2128,7 +2128,7 @@
           if (this.isEvolutionPaused) return this.resumeEvolution();
           this.evolving = true;
           try {
-            const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false' });
+            const q = new URLSearchParams({ generations: '4', population_size: '16', apply_best: 'false', mode: this.tradeMode || 'intraday' });
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.asOf) q.set('end_date', this.asOf);
             this.evolutionStatus = await this.api(`/api/quant/evolve_strategy?${q.toString()}`, { method: 'POST' });
@@ -2298,6 +2298,7 @@
           if (key === 'lhb_sync') return `股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}，新增 ${result.added_rows || 0}`;
           if (key === 'trade_cycle') return `交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
           if (key === 'strategy_replay') return `收益 ${this.pct(result.return_pct)}，交易 ${result.trade_count || 0}，闭环 ${result.closed_trades || 0}`;
+          if (key === 'strategy_evolution') return `模型 ${(result.models || []).length || 0}，最佳收益 ${this.pct(((result.best_model || result.best || {}).return_pct))}`;
           return '-';
         },
         statusPillClass(status) {

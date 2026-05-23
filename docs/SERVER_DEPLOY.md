@@ -99,7 +99,7 @@ cd /opt/qt
 bash qt.sh
 ```
 
-`bash qt.sh` 等同于 `bash qt.sh update`，会先备份当前运行数据目录，再执行 `git pull --ff-only`、更新依赖、自动把 JSON/CSV 运行数据合并进 SQLite，并重启服务。自动迁移可以重复执行，不会整库覆盖；如需临时跳过，设置 `QT_SKIP_AUTO_MIGRATE=true`。
+`bash qt.sh` 等同于 `bash qt.sh update`；服务器快捷命令 `qt` 面板里的 `1) 一键更新部署` 也走同一套流程。它会先备份当前运行数据目录，再执行 `git pull --ff-only`、更新依赖、自动把 JSON/CSV 运行数据合并进 SQLite、验证关键数据表，并重启服务。自动迁移可以重复执行，不会整库覆盖；如需临时跳过，设置 `QT_SKIP_AUTO_MIGRATE=true`。
 
 ## 重启服务
 

@@ -71,6 +71,11 @@ DEFAULT_STRATEGY_PARAMS = {
     "sell_technical_risk_coef": 0.55,
     "negative_sentiment_risk_penalty": 15.0,
     "risk_event_penalty": 20.0,
+    "factor_score_coef": 0.28,
+    "factor_momentum_weight": 0.35,
+    "factor_volume_weight": 0.20,
+    "factor_breakout_weight": 0.20,
+    "factor_lhb_weight": 0.25,
 }
 
 _JSON_WRITE_LOCKS: Dict[str, threading.Lock] = {}
@@ -374,6 +379,9 @@ class QuantEngine:
         self._future_return_cache: Dict[Tuple[str, str, int], Optional[Dict[str, Any]]] = {}
         self._kline_row_map_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._intraday_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._factor_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._lhb_rows_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._lhb_by_code_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
         self._thread_local = threading.local()
 
     def _sqlite_rows(self, query: str, params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
@@ -398,6 +406,9 @@ class QuantEngine:
         self._future_return_cache.clear()
         self._correlation_cache.clear()
         self._intraday_cache.clear()
+        self._factor_cache.clear()
+        self._lhb_rows_cache.clear()
+        self._lhb_by_code_cache.clear()
 
     def _source_mtime_key(self) -> str:
         files = [
@@ -1282,6 +1293,8 @@ class QuantEngine:
             "ret_20d": round(ret_20d * 100, 3),
             "volume_ratio": round(volume_ratio, 3),
             "volatility": round(volatility * 100, 3),
+            "drawdown_from_20d_high_pct": round(drawdown * 100, 3),
+            "near_20d_high": bool(closes[-1] >= window_high * 0.97),
         }
 
     def _aggregate_stats(self, returns: List[float]) -> Dict[str, Any]:
@@ -1438,6 +1451,13 @@ class QuantEngine:
             params["history_score_weight"] = round(params["history_score_weight"] / combo, 4)
         params["negative_sentiment_risk_penalty"] = clamp(params["negative_sentiment_risk_penalty"], 0, 60)
         params["risk_event_penalty"] = clamp(params["risk_event_penalty"], 0, 80)
+        params["factor_score_coef"] = clamp(params["factor_score_coef"], 0, 1)
+        factor_keys = ("factor_momentum_weight", "factor_volume_weight", "factor_breakout_weight", "factor_lhb_weight")
+        for key in factor_keys:
+            params[key] = max(0.0, params[key])
+        factor_total = sum(params[key] for key in factor_keys) or 1.0
+        for key in factor_keys:
+            params[key] = round(params[key] / factor_total, 4)
         return params
 
     def strategy_params(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
@@ -1565,6 +1585,107 @@ class QuantEngine:
         score = 50 * (1 - confidence) + score * confidence
         return clamp(score), stats
 
+    def _lhb_factor_profile(self, code: str, as_of: str) -> Dict[str, Any]:
+        code = digits6(code)
+        if not code or not as_of:
+            return {"score": 50.0, "risk": 50.0, "net_buy_amount": 0.0, "hot_seat_count": 0, "sample_count": 0}
+        cache_key = f"lhb-by-code:{as_of}"
+        by_code = self._lhb_by_code_cache.get(cache_key)
+        if by_code is None:
+            rows_cache_key = f"lhb-rows:{as_of}"
+            rows_all = self._lhb_rows_cache.get(rows_cache_key)
+            if rows_all is None:
+                rows_all = self.load_lhb_records(end_date=as_of, limit=200000)
+                self._lhb_rows_cache[rows_cache_key] = rows_all
+            by_code = {}
+            for row in rows_all:
+                row_code = digits6(row.get("stock_code"))
+                if row_code:
+                    by_code.setdefault(row_code, []).append(row)
+            self._lhb_by_code_cache[cache_key] = by_code
+        rows = by_code.get(code, [])[:120]
+        if not rows:
+            return {"score": 50.0, "risk": 50.0, "net_buy_amount": 0.0, "hot_seat_count": 0, "sample_count": 0}
+        dates = sorted({str(row.get("trade_date") or "") for row in rows if row.get("trade_date")}, reverse=True)[:20]
+        date_set = set(dates)
+        recent = [row for row in rows if str(row.get("trade_date") or "") in date_set]
+        buy_amount = sum(safe_float(row.get("buy_amount"), 0) for row in recent)
+        sell_amount = sum(safe_float(row.get("sell_amount"), 0) for row in recent)
+        net_amount = buy_amount - sell_amount
+        gross_amount = max(1.0, buy_amount + sell_amount)
+        hot_labels = {str(row.get("hot_money") or "").strip() for row in recent if str(row.get("hot_money") or "").strip()}
+        active_seats = {str(row.get("buyer_seat_name") or "").strip() for row in recent if str(row.get("buyer_seat_name") or "").strip()}
+        net_ratio = max(-1.0, min(1.0, net_amount / gross_amount))
+        score = 50 + net_ratio * 24 + min(max(net_amount, 0.0) / 20_000_000, 16) + min(len(hot_labels), 4) * 4 + min(len(date_set), 5) * 1.5
+        risk = 50 - net_ratio * 12 + max(0.0, -net_amount) / 20_000_000 * 8
+        return {
+            "score": round(clamp(score), 2),
+            "risk": round(clamp(risk), 2),
+            "net_buy_amount": round(net_amount, 2),
+            "buy_amount": round(buy_amount, 2),
+            "sell_amount": round(sell_amount, 2),
+            "net_buy_ratio": round(net_ratio, 4),
+            "hot_seat_count": len(hot_labels),
+            "active_seat_count": len(active_seats),
+            "sample_count": len(recent),
+            "date_count": len(date_set),
+        }
+
+    def factor_profile(self, code: str, as_of: str, technical: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        code = digits6(code)
+        params = self.strategy_params()
+        factor_signature = "|".join(
+            str(params.get(key, ""))
+            for key in (
+                "factor_score_coef",
+                "factor_momentum_weight",
+                "factor_volume_weight",
+                "factor_breakout_weight",
+                "factor_lhb_weight",
+            )
+        )
+        cache_key = (code, f"{as_of or ''}|{factor_signature}")
+        cached = self._factor_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        technical = technical if isinstance(technical, dict) else self.technical_profile(code, as_of=as_of)
+        factor_weights = {
+            "momentum": params["factor_momentum_weight"],
+            "volume": params["factor_volume_weight"],
+            "breakout": params["factor_breakout_weight"],
+            "lhb": params["factor_lhb_weight"],
+        }
+        ret_3d = safe_float(technical.get("ret_3d"), 0)
+        ret_5d = safe_float(technical.get("ret_5d"), 0)
+        ret_20d = safe_float(technical.get("ret_20d"), 0)
+        volume_ratio = safe_float(technical.get("volume_ratio"), 1)
+        drawdown = safe_float(technical.get("drawdown_from_20d_high_pct"), 0)
+        momentum_score = clamp(50 + ret_3d * 1.6 + ret_5d * 1.1 + ret_20d * 0.35)
+        volume_score = clamp(50 + (volume_ratio - 1.0) * 18)
+        breakout_score = clamp(58 + max(0.0, 3.0 + drawdown) * 4 if technical.get("near_20d_high") else 48 + drawdown * 0.8)
+        lhb = self._lhb_factor_profile(code, as_of)
+        lhb_score = safe_float(lhb.get("score"), 50)
+        factor_score = (
+            momentum_score * factor_weights["momentum"]
+            + volume_score * factor_weights["volume"]
+            + breakout_score * factor_weights["breakout"]
+            + lhb_score * factor_weights["lhb"]
+        )
+        risk_adjustment = max(0.0, volume_ratio - 3.0) * 2.5 + max(0.0, safe_float(lhb.get("risk"), 50) - 55) * 0.2
+        payload = {
+            "score": round(clamp(factor_score), 2),
+            "technical_adjustment": round((clamp(factor_score) - 50) * params["factor_score_coef"], 2),
+            "risk_adjustment": round(risk_adjustment, 2),
+            "weights": factor_weights,
+            "momentum_score": round(momentum_score, 2),
+            "volume_score": round(volume_score, 2),
+            "breakout_score": round(breakout_score, 2),
+            "lhb_score": round(lhb_score, 2),
+            "lhb": lhb,
+        }
+        self._factor_cache[cache_key] = payload
+        return payload
+
     def _agent_scores(self, event_bundle: Dict[str, Any], corr: Dict[str, Any], as_of: str) -> Dict[str, Any]:
         events: List[NewsEvent] = event_bundle["events"]
         main_event = max(events, key=lambda item: item.impact_score)
@@ -1574,17 +1695,23 @@ class QuantEngine:
         technical = self.technical_profile(main_event.code, as_of=as_of)
         hist_score, hist_stats = self._historical_score(main_event, corr)
         params = self.strategy_params()
+        factors = self.factor_profile(main_event.code, as_of, technical=technical)
 
         sentiment_score = 50 + avg_sentiment * params["sentiment_coef"] + max(0.0, max_ai_score - 5) * params["ai_score_coef"]
         event_score = avg_impact * params["event_impact_weight"] + hist_score * params["history_score_weight"]
-        technical_score = safe_float(technical.get("score"), 50)
-        risk_score = 100 - safe_float(technical.get("risk"), 50)
+        technical_score = safe_float(technical.get("score"), 50) + safe_float(factors.get("technical_adjustment"), 0)
+        risk_score = 100 - safe_float(technical.get("risk"), 50) - safe_float(factors.get("risk_adjustment"), 0)
         if avg_sentiment < -0.2:
             risk_score -= params["negative_sentiment_risk_penalty"]
         if main_event.event_type == "风险事件":
             risk_score -= params["risk_event_penalty"]
         risk_score = clamp(risk_score)
-        weights = self.model_weights()
+        weights = {
+            "sentiment": params["sentiment_weight"],
+            "event": params["event_weight"],
+            "technical": params["technical_weight"],
+            "risk": params["risk_weight"],
+        }
         buy_score = (
             clamp(sentiment_score) * weights["sentiment"]
             + clamp(event_score) * weights["event"]
@@ -1627,6 +1754,7 @@ class QuantEngine:
             "sell_score": round(sell_score, 2),
             "agents": agents,
             "technical": technical,
+            "factors": factors,
             "historical": hist_stats,
             "weights": weights,
             "components": {
@@ -1634,6 +1762,8 @@ class QuantEngine:
                 "event_score": round(clamp(event_score), 2),
                 "technical_score": round(clamp(technical_score), 2),
                 "risk_score": round(risk_score, 2),
+                "factor_score": safe_float(factors.get("score"), 50),
+                "factor_adjustment": safe_float(factors.get("technical_adjustment"), 0),
                 "avg_sentiment": round(avg_sentiment, 4),
                 "avg_impact": round(avg_impact, 2),
                 "max_ai_score": round(max_ai_score, 2),
@@ -1903,8 +2033,18 @@ class QuantEngine:
         equity_curve: List[Dict[str, Any]] = []
         prev_total = float(initial_cash)
         historical_outcomes = []
+        history_start_date = ""
+        if start_date:
+            try:
+                history_start_date = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
+            except Exception:
+                history_start_date = ""
         for event in self.events():
             if self._is_sample_event(event):
+                continue
+            if end_date and event.date > end_date:
+                continue
+            if history_start_date and event.date < history_start_date:
                 continue
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
             if not realized:
@@ -2389,8 +2529,18 @@ class QuantEngine:
             events_by_date.setdefault(event.date, []).append(event)
 
         historical_outcomes = []
+        history_start_date = ""
+        if start_date:
+            try:
+                history_start_date = (datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=180)).strftime("%Y-%m-%d")
+            except Exception:
+                history_start_date = ""
         for event in self.events():
             if self._is_sample_event(event):
+                continue
+            if end_date and event.date > end_date:
+                continue
+            if history_start_date and event.date < history_start_date:
                 continue
             realized = self.future_return(event.code, event.date, hold_days=hold_days)
             if not realized:
