@@ -49,6 +49,7 @@ id_ed25519
 
 ```bash
 python scripts/security_scan.py
+python scripts/server_data_audit.py
 git status --short --ignored
 git ls-files backend/data
 ```
@@ -56,7 +57,7 @@ git ls-files backend/data
 期望结果：
 
 ```text
-No obvious secrets found in tracked files.
+No obvious secrets found in candidate files.
 backend/data/.gitkeep
 backend/data/biying_stock_list.json
 backend/data/config.example.json
@@ -69,6 +70,13 @@ backend/data/news_history.json
 ```
 
 同时确认 `git status --short --ignored` 中的敏感文件只出现在 `!!` 忽略列表里，不出现在 staged 或 tracked 列表里。
+
+`server_data_audit.py` 用于服务器和本地运行目录体检。它会列出 SQLite 大小、主要表行数、敏感配置、旧账号文件、备份包，并在发现 `password_plain` 等明文密码字段时返回非 0。生产服务器上可以直接执行：
+
+```bash
+qt data-audit
+qt data-audit --fix-permissions
+```
 
 ## 重要说明
 

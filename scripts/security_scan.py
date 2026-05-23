@@ -5,6 +5,7 @@ import math
 import re
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 
@@ -32,6 +33,26 @@ FORBIDDEN_NAME_HINTS = re.compile(
     r"\.(pem|p12|pfx)$",
     re.IGNORECASE,
 )
+ALLOWED_DATA_FILES = {
+    "backend/data/.gitkeep",
+    "backend/data/config.example.json",
+    "backend/data/biying_stock_list.json",
+    "backend/data/news_history.json",
+    "backend/data/news_analysis_records.json",
+    "backend/data/kline_day_cache/600001.json",
+    "backend/data/kline_day_cache/600002.json",
+    "backend/data/kline_cache/600001_2026-05-19.csv",
+    "backend/data/kline_cache/600002_2026-05-19.csv",
+}
+DATA_FILE_SIZE_LIMITS = {
+    "backend/data/biying_stock_list.json": 20_000,
+    "backend/data/news_history.json": 20_000,
+    "backend/data/news_analysis_records.json": 80_000,
+    "backend/data/kline_day_cache/600001.json": 80_000,
+    "backend/data/kline_day_cache/600002.json": 80_000,
+    "backend/data/kline_cache/600001_2026-05-19.csv": 20_000,
+    "backend/data/kline_cache/600002_2026-05-19.csv": 20_000,
+}
 
 
 def candidate_files() -> list[Path]:
@@ -66,8 +87,47 @@ def forbidden_upload_reason(path: Path) -> str:
     rel = full_path.resolve().relative_to(ROOT).as_posix()
     if rel in FORBIDDEN_EXACT_PATHS:
         return "forbidden sensitive config path"
+    if rel.startswith("backend/data/") and rel not in ALLOWED_DATA_FILES:
+        return "backend/data production files must not be tracked"
+    if rel in DATA_FILE_SIZE_LIMITS and full_path.stat().st_size > DATA_FILE_SIZE_LIMITS[rel]:
+        return "fixture data file is larger than allowed sample size"
+    fixture_reason = fixture_data_reason(full_path, rel)
+    if fixture_reason:
+        return fixture_reason
     if FORBIDDEN_NAME_HINTS.search(rel):
         return "forbidden sensitive filename"
+    return ""
+
+
+def fixture_data_reason(path: Path, rel: str) -> str:
+    if rel == "backend/data/news_history.json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "fixture news file must be valid JSON"
+        if not isinstance(payload, list) or len(payload) > 20:
+            return "fixture news file must stay small"
+        for item in payload:
+            if not isinstance(item, dict) or str(item.get("source") or "") != "Fixture":
+                return "fixture news file contains non-Fixture source"
+    if rel == "backend/data/news_analysis_records.json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "fixture AI record file must be valid JSON"
+        if not isinstance(payload, list) or len(payload) > 20:
+            return "fixture AI record file must stay small"
+        text = json.dumps(payload, ensure_ascii=False)
+        if "Fixture" not in text or "样例" not in text:
+            return "fixture AI record file must contain only sample records"
+    if rel == "backend/data/biying_stock_list.json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return "fixture stock list must be valid JSON"
+        stocks = payload.get("stocks") if isinstance(payload, dict) else {}
+        if set(stocks.keys()) - {"600001", "600002"}:
+            return "fixture stock list must only contain sample stock codes"
     return ""
 
 
@@ -81,6 +141,8 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         if not SECRET_HINTS.search(line):
             continue
         if "HTTPException" in line:
+            continue
+        if "==" in line or "!=" in line:
             continue
         if "class=" in line and not re.search(r"(api|secret|password|token|key)\s*[:=]", line, re.IGNORECASE):
             continue

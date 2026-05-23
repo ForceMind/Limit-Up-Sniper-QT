@@ -42,6 +42,8 @@ usage() {
   qt backup                  备份 backend/data
   qt restore <tar.gz>        从备份恢复 backend/data
   qt auth                    账号密码管理
+  qt data-audit [--fix-permissions] 服务器数据安全体检
+  qt architecture            项目架构体检
   qt clear-sample            清理样例持仓
   qt fill-kline              补齐有新闻事件股票的日K数据
   qt sync-lhb                拉取龙虎榜席位数据
@@ -87,6 +89,14 @@ run_security_scan() {
     error "$(zh '\xe6\x89\xbe\xe4\xb8\x8d\xe5\x88\xb0')"" Python""$(zh '\xef\xbc\x8c\xe6\x97\xa0\xe6\xb3\x95\xe6\x89\xa7\xe8\xa1\x8c\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f\xe3\x80\x82\xe8\xaf\xb7\xe5\xae\x89\xe8\xa3\x85')"" python3""$(zh '\xef\xbc\x8c\xe6\x88\x96\xe5\x9c\xa8')"" .env ""$(zh '\xe4\xb8\xad\xe8\xae\xbe\xe7\xbd\xae')"" PYTHON_BIN"
     return 1
   fi
+}
+
+run_data_audit() {
+  run_python_tool "服务器数据安全体检" "$ROOT_DIR/scripts/server_data_audit.py" "$@"
+}
+
+run_architecture_report() {
+  run_python_tool "项目架构体检" "$ROOT_DIR/scripts/architecture_report.py" "$@"
 }
 
 run_auth_tool() {
@@ -378,9 +388,11 @@ cmd_panel() {
 11) 拉取龙虎榜席位
 12) 版本和模块验证
 13) GitHub 上传前安全扫描
-14) 部署环境检查
-15) 查看后台入口路径
-16) 修复 Nginx 上传和超时限制
+14) 服务器数据安全体检
+15) 项目架构体检
+16) 部署环境检查
+17) 查看后台入口路径
+18) 修复 Nginx 上传和超时限制
 0) 退出
 
 EOF
@@ -408,9 +420,11 @@ EOF
       11) panel_run "$(zh '\xe6\x8b\x89\xe5\x8f\x96\xe9\xbe\x99\xe8\x99\x8e\xe6\xa6\x9c\xe5\xb8\xad\xe4\xbd\x8d')" bash "$SCRIPT_DIR/qt.sh" sync-lhb ;;
       12) panel_run "$(zh '\xe7\x89\x88\xe6\x9c\xac\xe5\x92\x8c\xe6\xa8\xa1\xe5\x9d\x97\xe9\xaa\x8c\xe8\xaf\x81')" bash "$SCRIPT_DIR/qt.sh" version ;;
       13) panel_run "$(zh '\xe5\xae\x89\xe5\x85\xa8\xe6\x89\xab\xe6\x8f\x8f')" bash "$SCRIPT_DIR/qt.sh" scan ;;
-      14) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
-      15) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
-      16) panel_run "修复 Nginx 上传和超时限制" bash "$SCRIPT_DIR/qt.sh" nginx-upload ;;
+      14) panel_run "服务器数据安全体检" bash "$SCRIPT_DIR/qt.sh" data-audit ;;
+      15) panel_run "项目架构体检" bash "$SCRIPT_DIR/qt.sh" architecture ;;
+      16) panel_run "$(zh '\xe9\x83\xa8\xe7\xbd\xb2\xe7\x8e\xaf\xe5\xa2\x83\xe6\xa3\x80\xe6\x9f\xa5')" bash "$SCRIPT_DIR/qt.sh" doctor ;;
+      17) panel_run "查看后台入口路径" bash "$SCRIPT_DIR/qt.sh" admin-path ;;
+      18) panel_run "修复 Nginx 上传和超时限制" bash "$SCRIPT_DIR/qt.sh" nginx-upload ;;
       0|q|Q)
         echo "$(zh '\xe5\xb7\xb2\xe9\x80\x80\xe5\x87\xba\xe8\xbf\x90\xe7\xbb\xb4\xe9\x9d\xa2\xe6\x9d\xbf')"
         exit 0
@@ -491,6 +505,14 @@ case "$cmd" in
     ;;
   auth|user|users|password|passwd)
     cmd_auth
+    ;;
+  data-audit|audit-data|server-data-audit)
+    require_project_root
+    run_data_audit "${@:2}"
+    ;;
+  architecture|arch|architecture-report)
+    require_project_root
+    run_architecture_report "${@:2}"
     ;;
   clear-sample|clean-sample|sample)
     cmd_clear_sample_state

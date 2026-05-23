@@ -205,6 +205,7 @@ http://127.0.0.1:8000/docs
 
 ```bash
 python scripts/architecture_report.py
+python scripts/server_data_audit.py
 python -m py_compile backend/app/quant/engine.py backend/app/quant/jobs.py backend/app/main.py
 python -m pytest backend/tests/test_database_inspector.py
 python -m pytest backend/tests/test_quant_engine.py
@@ -271,7 +272,10 @@ qt sync-lhb
 qt migrate
 ```
 
-直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、日志、备份、恢复、补齐日K、拉取龙虎榜、安全扫描和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
+直接输入 `qt` 会打开中文交互式运维面板，可执行更新、重启、日志、备份、恢复、补齐日K、拉取龙虎榜、安全扫描、架构体检和账号密码管理。`qt auth` 会直接进入账号密码管理，可以初始化、修改后台账号、修改前台账号，或删除认证文件回到网页首次初始化。
+`qt data-audit` 会检查服务器数据目录、SQLite、敏感配置、旧明文账号文件、备份包和 Git 跟踪风险。
+`qt data-audit --fix-permissions` 会在 Linux 服务器上收紧数据目录、数据库、配置、日志和备份包权限。
+`qt architecture` 会检查大文件、FastAPI 路由集中度、前后端拆分风险和 `backend/data` Git 边界。
 
 详细部署说明见 [docs/SERVER_DEPLOY.md](docs/SERVER_DEPLOY.md)。
 
@@ -283,5 +287,6 @@ qt migrate
 - [买卖与回放逻辑](docs/QUANT_LOGIC.md)
 - [服务器部署说明](docs/SERVER_DEPLOY.md)
 - [数据存储决策](docs/DATA_STORAGE_DECISION.md)
+- [服务器数据安全说明](docs/SERVER_DATA_SECURITY.md)
 - [GitHub 上传安全检查](docs/GITHUB_SECURITY.md)
 - [Codex 交接记录](docs/CODEX_HANDOFF.md)

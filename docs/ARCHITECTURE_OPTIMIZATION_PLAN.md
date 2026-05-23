@@ -260,6 +260,7 @@ QT_MEMORY_GUARD_AVAILABLE_MB=1024
 
 ```bash
 python scripts/architecture_report.py
+python scripts/server_data_audit.py
 python -m compileall backend/app
 python scripts/check_data_coverage.py
 python scripts/security_scan.py
