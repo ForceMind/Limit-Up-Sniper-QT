@@ -22,6 +22,7 @@ from app.quant.biying_sync import biying_minute_sync
 from app.quant.capital_strategy import capital_presets
 from app.quant.engine import DATA_DIR, quant_engine, read_json, write_json
 from app.quant.evolution import strategy_evolution
+from app.quant.frontend_precompute import precompute_frontend_payloads
 from app.quant.lhb_sync import lhb_status, sync_lhb
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
@@ -30,7 +31,15 @@ from app.quant.notifier import trade_notifier
 JOB_STATE_FILE = DATA_DIR / "quant_job_state.json"
 JOB_LOG_FILE = DATA_DIR / "quant_runtime_logs.jsonl"
 SENSITIVE_KEY_PARTS = ("key", "token", "password", "secret", "license", "authorization", "cookie")
-HEAVY_CACHE_TRIM_JOBS = {"kline_fill", "lhb_sync", "trade_cycle", "strategy_replay", "strategy_evolution", "system_startup"}
+HEAVY_CACHE_TRIM_JOBS = {
+    "kline_fill",
+    "lhb_sync",
+    "trade_cycle",
+    "strategy_replay",
+    "strategy_evolution",
+    "frontend_payload_precompute",
+    "system_startup",
+}
 JOB_LABELS = {
     "scheduler": "调度器",
     "news_fetch": "新闻抓取",
@@ -41,6 +50,7 @@ JOB_LABELS = {
     "trade_cycle": "交易循环",
     "strategy_replay": "策略复盘",
     "strategy_evolution": "策略进化",
+    "frontend_payload_precompute": "前台推荐预计算",
     "system_startup": "系统启动",
     "admin_backup": "数据备份",
     "admin_data_export": "数据导出",
@@ -1309,6 +1319,38 @@ class QuantJobManager:
 
         return self.run_job("strategy_evolution", execute, payload=payload)
 
+    def run_frontend_payload_precompute(
+        self,
+        as_of: Optional[str] = None,
+        usernames: Optional[Any] = None,
+        limit_users: Optional[int] = None,
+        force: bool = False,
+        background: bool = True,
+        process: bool = False,
+        lookback_days: int = 2,
+        top_n: int = 30,
+        limit_days: int = 120,
+    ) -> Dict[str, Any]:
+        limit_users = max(1, min(int(limit_users or self._frontend_payload_precompute_limit_users()), 500))
+        payload = {
+            "as_of": as_of,
+            "usernames": usernames,
+            "limit_users": limit_users,
+            "force": bool(force),
+            "lookback_days": max(1, min(int(lookback_days or 2), 20)),
+            "top_n": max(1, min(int(top_n or 30), 100)),
+            "limit_days": max(1, min(int(limit_days or 120), 500)),
+        }
+        if process:
+            return self.run_job_process("frontend_payload_precompute", payload=payload, message="前台推荐和日计划预计算已转入独立进程运行")
+
+        def execute() -> Dict[str, Any]:
+            return precompute_frontend_payloads(**payload)
+
+        if background:
+            return self.run_job_background("frontend_payload_precompute", execute, payload=payload, message="前台推荐和日计划预计算已转入后台运行")
+        return self.run_job("frontend_payload_precompute", execute, payload=payload)
+
     def _auto_market_codes(self, date: str, max_codes: int = 80) -> str:
         from app.quant.engine import digits6, quant_engine
 
@@ -1362,6 +1404,12 @@ class QuantJobManager:
 
     def _strategy_replay_max_models(self) -> int:
         return max(1, min(_env_int("QT_STRATEGY_REPLAY_MAX_MODELS", 24), 200))
+
+    def _frontend_payload_precompute_interval_seconds(self) -> int:
+        return _env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_INTERVAL_SECONDS", 1800)
+
+    def _frontend_payload_precompute_limit_users(self) -> int:
+        return max(1, min(_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_LIMIT_USERS", 50), 500))
 
     def _parse_date(self, value: str) -> Optional[datetime]:
         try:
@@ -1562,6 +1610,7 @@ class QuantJobManager:
         next_trade_cycle = time.time() + 50
         next_strategy_replay = time.time() + 70
         next_strategy_evolution = time.time() + 90
+        next_frontend_payload_precompute = time.time() + 100
         while not self._stop_event.is_set():
             now_ts = time.time()
             now_cn = _now_cn()
@@ -1654,6 +1703,20 @@ class QuantJobManager:
                     next_strategy_evolution = time.time() + 300
             elif not _env_bool("STRATEGY_EVOLUTION_ENABLED", False):
                 next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
+            if _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", True) and now_ts >= next_frontend_payload_precompute:
+                await asyncio.to_thread(
+                    self.run_frontend_payload_precompute,
+                    None,
+                    None,
+                    self._frontend_payload_precompute_limit_users(),
+                    False,
+                    False,
+                    _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True),
+                )
+                next_frontend_payload_precompute = time.time() + self._frontend_payload_precompute_interval_seconds()
+                ran_task = True
+            elif not _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", True):
+                next_frontend_payload_precompute = time.time() + self._frontend_payload_precompute_interval_seconds()
             if ran_task:
                 state = self._load_state()
                 state["scheduler"] = {
@@ -1688,6 +1751,10 @@ class QuantJobManager:
                     "strategy_evolution_generations": self._strategy_evolution_generations(),
                     "strategy_evolution_population_size": self._strategy_evolution_population_size(),
                     "strategy_evolution_enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", False),
+                    "next_frontend_payload_precompute_at": datetime.fromtimestamp(next_frontend_payload_precompute, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                    "frontend_payload_precompute_interval_seconds": self._frontend_payload_precompute_interval_seconds(),
+                    "frontend_payload_precompute_limit_users": self._frontend_payload_precompute_limit_users(),
+                    "frontend_payload_precompute_enabled": _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", True),
                 }
                 self._save_state(state)
                 self._append_log(

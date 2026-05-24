@@ -288,6 +288,7 @@
                 <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">交易循环</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_trade_cycle_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">策略复盘</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_strategy_replay_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">前台预计算</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_frontend_payload_precompute_at) }}</div></div>
               </div>
             </div>
             <div class="panel">
@@ -1419,6 +1420,10 @@
                     <button @click="runStrategyReplay" :disabled="replayingStrategy && !isJobRunning('strategy_replay')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('strategy_replay', replayingStrategy ? '复盘中' : '运行策略复盘') }}</button>
                     <div class="text-sm"><div>对全部资金档策略和策略库模型做分批复盘。</div><div class="text-xs text-neutral-500 mt-1">会把每个策略的信号、成交、持仓、资金流水写入策略运行表。</div></div>
                   </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="precomputeFrontendPayloads" :disabled="precomputingFrontend && !isJobRunning('frontend_payload_precompute')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('frontend_payload_precompute', precomputingFrontend ? '预计算中' : '预计算前台缓存') }}</button>
+                    <div class="text-sm"><div>预生成前台推荐和日计划缓存。</div><div class="text-xs text-neutral-500 mt-1">适合策略复盘后执行；前台缓存未命中时也会自动排队。</div></div>
+                  </div>
                 </div>
               </div>
 
@@ -1508,6 +1513,7 @@
             <option value="market_sync">行情</option>
             <option value="trade_cycle">交易</option>
             <option value="strategy_replay">策略复盘</option>
+            <option value="frontend_payload_precompute">前台预计算</option>
             <option value="system_startup">系统启动</option>
             <option value="admin_config">配置</option>
             <option value="admin_backup">备份</option>
@@ -1726,6 +1732,7 @@
             { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
             { key: 'strategy_replay', label: '策略复盘', desc: '按日期窗口复盘全部资金档策略和策略库模型' },
+            { key: 'frontend_payload_precompute', label: '前台预计算', desc: '推荐和日计划写入短缓存' },
           ],
           tradeViews: [
             { key: 'positions', label: '持仓' },
@@ -1764,6 +1771,7 @@
           syncingLhb: false,
           runningTrade: false,
           replayingStrategy: false,
+          precomputingFrontend: false,
           testingEmail: false,
           backuping: false,
           downloadingData: false,
@@ -2881,6 +2889,19 @@
             this.replayingStrategy = false;
           }
         },
+        async precomputeFrontendPayloads() {
+          if (this.isJobRunning('frontend_payload_precompute') || this.isJobPaused('frontend_payload_precompute')) return this.pauseOrResumeJob('frontend_payload_precompute');
+          this.precomputingFrontend = true;
+          try {
+            const q = new URLSearchParams({ background: 'true', process: 'true', force: 'true', limit_days: '120', top_n: '30' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            await this.api(`/api/jobs/frontend/precompute?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } finally {
+            this.precomputingFrontend = false;
+          }
+        },
         async testEmail() {
           this.testingEmail = true;
           try {
@@ -3505,6 +3526,7 @@
             lhb_sync: '龙虎榜同步',
             trade_cycle: '交易循环',
             strategy_replay: '策略复盘',
+            frontend_payload_precompute: '前台预计算',
             system_startup: '系统启动',
             admin_config: '配置保存',
             admin_backup: '数据备份',

@@ -101,6 +101,28 @@ def test_admin_routes_require_auth_and_accept_debug_key(tmp_path, monkeypatch):
     assert response.json()["status"] == "ok"
 
 
+def test_admin_frontend_precompute_job_endpoint(tmp_path, monkeypatch):
+    client, headers, _data_dir, _backup_dir = _client(tmp_path, monkeypatch)
+    called = {}
+
+    def fake_precompute(**kwargs):
+        called.update(kwargs)
+        return {"status": "running", "job": "frontend_payload_precompute", "background": True}
+
+    monkeypatch.setattr(main_module.job_manager, "run_frontend_payload_precompute", fake_precompute)
+
+    response = client.post(
+        "/api/jobs/frontend/precompute?background=true&process=false&limit_users=3&top_n=12&limit_days=120",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["job"] == "frontend_payload_precompute"
+    assert called["limit_users"] == 3
+    assert called["top_n"] == 12
+    assert called["limit_days"] == 120
+
+
 def test_admin_database_endpoints_return_tables_and_errors(tmp_path, monkeypatch):
     client, headers, data_dir, _backup_dir = _client(tmp_path, monkeypatch)
     db_path = data_dir / "quant_data.sqlite3"

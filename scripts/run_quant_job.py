@@ -67,12 +67,24 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             apply_best=payload.get("apply_best"),
             process=False,
         )
+    if job == "frontend_payload_precompute":
+        return job_manager.run_frontend_payload_precompute(
+            as_of=payload.get("as_of"),
+            usernames=payload.get("usernames"),
+            limit_users=payload.get("limit_users"),
+            force=bool(payload.get("force")),
+            background=False,
+            process=False,
+            lookback_days=payload.get("lookback_days") or 2,
+            top_n=payload.get("top_n") or 30,
+            limit_days=payload.get("limit_days") or 120,
+        )
     raise SystemExit(f"unsupported job: {job}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a quant job in an isolated process.")
-    parser.add_argument("--job", required=True, choices=["strategy_replay", "strategy_evolution"])
+    parser.add_argument("--job", required=True, choices=["strategy_replay", "strategy_evolution", "frontend_payload_precompute"])
     parser.add_argument("--payload-json", default="")
     args = parser.parse_args()
     _load_env_file()

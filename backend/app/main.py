@@ -1220,6 +1220,98 @@ def _frontend_payload_cache_ttl(name: str, default: int) -> int:
     return cache_env_int(name, default, minimum=0, maximum=86400)
 
 
+def _queue_frontend_payload_precompute(
+    context: Dict[str, Any],
+    effective_as_of: Optional[str],
+    lookback_days: int = 2,
+    top_n: int = 30,
+    limit_days: int = 120,
+    force: bool = False,
+) -> Dict[str, Any]:
+    username = str(context.get("username") or "").strip()
+    try:
+        return job_manager.run_frontend_payload_precompute(
+            as_of=effective_as_of,
+            usernames=[username] if username else None,
+            limit_users=1 if username else cache_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_LIMIT_USERS", 50, minimum=1, maximum=500),
+            force=force,
+            background=True,
+            process=_env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True),
+            lookback_days=lookback_days,
+            top_n=top_n,
+            limit_days=limit_days,
+        )
+    except Exception as exc:
+        job_manager._append_log("warning", f"前台推荐和日计划预计算排队失败：{exc}", job="frontend_payload_precompute", stage="queue")
+        return {"status": "error", "message": str(exc)}
+
+
+def _frontend_pending_payload(payload_type: str, effective_as_of: Optional[str], job_result: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "status": "pending",
+        "as_of": effective_as_of,
+        "frontend_payload_cache": "queued",
+        "frontend_payload_job": {
+            "status": job_result.get("status"),
+            "job": job_result.get("job"),
+            "background": bool(job_result.get("background") or job_result.get("process")),
+            "message": job_result.get("message"),
+        },
+        "message": "缓存未命中，后台正在预计算，请稍后刷新。",
+        **extra,
+    }
+    if payload_type == "front_recommendations":
+        payload.setdefault("items", [])
+    if payload_type == "front_daily_plan":
+        payload.setdefault("buy_list", [])
+        payload.setdefault("sell_list", [])
+        payload.setdefault("hold_list", [])
+    return payload
+
+
+def _frontend_cached_recommendations_and_plan(
+    context: Dict[str, Any],
+    effective_as_of: Optional[str],
+    top_n: int,
+    limit_days: int,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    rec_ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900)
+    plan_ttl = _frontend_payload_cache_ttl("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800)
+    effective_start = _frontend_replay_start_date(effective_as_of)
+    rec_parts = _frontend_payload_cache_parts(
+        context,
+        "front_recommendations",
+        {"as_of": effective_as_of, "lookback_days": 2, "top_n": top_n},
+    )
+    plan_parts = _frontend_payload_cache_parts(
+        context,
+        "front_daily_plan",
+        {"as_of": effective_as_of, "start_date": effective_start, "limit_days": limit_days},
+    )
+    recommendations = load_payload_cache("front_recommendations", rec_parts, rec_ttl)
+    daily_plan = load_payload_cache("front_daily_plan", plan_parts, plan_ttl)
+    if recommendations and daily_plan:
+        return recommendations, daily_plan
+    job_result = _queue_frontend_payload_precompute(context, effective_as_of, lookback_days=2, top_n=top_n, limit_days=limit_days)
+    if not recommendations:
+        recommendations = _frontend_pending_payload(
+            "front_recommendations",
+            effective_as_of,
+            job_result,
+            lookback_days=2,
+            top_n=top_n,
+        )
+    if not daily_plan:
+        daily_plan = _frontend_pending_payload(
+            "front_daily_plan",
+            effective_as_of,
+            job_result,
+            start_date=effective_start,
+            limit_days=limit_days,
+        )
+    return recommendations, daily_plan
+
+
 def _frontend_strategy_account(
     context: Dict[str, Any],
     as_of: Optional[str],
@@ -1729,9 +1821,7 @@ def frontend_snapshot(
             job_manager._append_log("warning", f"前台当前策略持仓快照失败：{exc}", job="frontend_snapshot", stage="account")
             trading_account = {}
         if not light:
-            with quant_engine.temporary_strategy_params(context["strategy_params"]):
-                recommendations = quant_engine.recommendations(as_of=effective_as_of, lookback_days=2, top_n=top_n)
-                daily_plan = quant_engine.daily_plan(as_of=effective_as_of, limit_days=120)
+            recommendations, daily_plan = _frontend_cached_recommendations_and_plan(context, effective_as_of, top_n=top_n, limit_days=120)
         stable = {
             "frontend_profile": context["profile"],
             "followed_model": context["followed_model"],
@@ -1775,6 +1865,7 @@ def frontend_recommendations(
     lookback_days: int = Query(default=2, ge=1, le=20),
     top_n: int = Query(default=30, ge=1, le=100),
     force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_DEFER_MISSES", True)),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
     effective_as_of = _frontend_account_as_of(as_of)
@@ -1791,6 +1882,21 @@ def frontend_recommendations(
     cached = None if force else load_payload_cache("front_recommendations", cache_parts, ttl)
     if cached:
         return cached
+    if defer and not force:
+        job_result = _queue_frontend_payload_precompute(
+            context,
+            effective_as_of,
+            lookback_days=lookback_days,
+            top_n=top_n,
+            limit_days=120,
+        )
+        return _frontend_pending_payload(
+            "front_recommendations",
+            effective_as_of,
+            job_result,
+            lookback_days=lookback_days,
+            top_n=top_n,
+        )
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
         payload = quant_engine.recommendations(as_of=effective_as_of, lookback_days=lookback_days, top_n=top_n)
     payload = _affordable_payload(payload, context, effective_as_of)
@@ -1806,6 +1912,7 @@ def frontend_daily_plan(
     start_date: Optional[str] = Query(default=None),
     limit_days: int = Query(default=120, ge=1, le=500),
     force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_DEFER_MISSES", True)),
 ):
     context = _frontend_profile_context(request, include_catalog=False)
     effective_as_of = _frontend_account_as_of(as_of)
@@ -1823,6 +1930,21 @@ def frontend_daily_plan(
     cached = None if force else load_payload_cache("front_daily_plan", cache_parts, ttl)
     if cached:
         return cached
+    if defer and not force:
+        job_result = _queue_frontend_payload_precompute(
+            context,
+            effective_as_of,
+            lookback_days=2,
+            top_n=30,
+            limit_days=limit_days,
+        )
+        return _frontend_pending_payload(
+            "front_daily_plan",
+            effective_as_of,
+            job_result,
+            start_date=effective_start,
+            limit_days=limit_days,
+        )
     with quant_engine.temporary_strategy_params(context["strategy_params"]):
         payload = quant_engine.daily_plan(as_of=effective_as_of, start_date=effective_start, limit_days=limit_days)
     payload = _affordable_payload(payload, context, effective_as_of)
@@ -2503,6 +2625,31 @@ def jobs_strategy_replay(
         batch_days=batch_days,
         use_cursor=use_cursor,
         process=process,
+    )
+
+
+@app.post("/api/jobs/frontend/precompute")
+def jobs_frontend_payload_precompute(
+    as_of: Optional[str] = Query(default=None),
+    usernames: Optional[str] = Query(default=None),
+    limit_users: int = Query(default=50, ge=1, le=500),
+    force: bool = Query(default=False),
+    background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True)),
+    lookback_days: int = Query(default=2, ge=1, le=20),
+    top_n: int = Query(default=30, ge=1, le=100),
+    limit_days: int = Query(default=120, ge=1, le=500),
+):
+    return job_manager.run_frontend_payload_precompute(
+        as_of=as_of,
+        usernames=usernames,
+        limit_users=limit_users,
+        force=force,
+        background=background,
+        process=process,
+        lookback_days=lookback_days,
+        top_n=top_n,
+        limit_days=limit_days,
     )
 
 

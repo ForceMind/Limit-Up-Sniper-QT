@@ -22,7 +22,7 @@
 7. 前台不能出现后台初始化或管理入口；未登录只能看概览和新闻，登录后才能看账户、策略、持仓、成交等。
 8. 后台必须可管理用户、数据、缓存、任务、日志、调试通道和数据库。
 
-当前已完成到 v0.2.33：
+当前已完成到 v0.2.48：
 - 前台用户 profile 有 simulated_cash、strategy_model_id、follow_started_at、follow_start_date。
 - 切换策略或调整模拟资金会重置跟随开始时间。
 - 前台账户按 follow_start_date 裁剪，不继承旧持仓；真正为每个用户从注册日完整独立重跑策略暂不开发，等明确要求后再做。
@@ -31,7 +31,7 @@
 - 用户注册、设置资金或切换策略会写入 user_follow_periods。
 - 后台用户管理页展示当前跟随周期、账户快照、持仓和最近成交来源。
 - 后台“持仓成交”按策略查看，不再把系统默认基础参数当成一个独立账户。
-- 推荐和日计划使用 frontend_payload_cache SQLite 短缓存。
+- 推荐和日计划使用 frontend_payload_cache SQLite 短缓存；缓存未命中时默认触发 frontend_payload_precompute 后台/独立进程任务，前台返回 pending。
 - 后台慢任务触发接口默认 background=true；手动策略复盘和策略进化默认使用独立 Python 子进程运行。
 - 独立进程任务会在状态接口读取时自动巡检，异常退出但未写回结果时标记失败并写运行日志。
 - 自动策略复盘使用 QT_STRATEGY_REPLAY_BATCH_DAYS 分批推进，默认 15 天一批，并记录 strategy_replay_cursor。
@@ -61,13 +61,13 @@
   bash -n scripts/update_server.sh
 - 最后告诉我改了什么、为什么这么改、怎么部署、怎么验证。
 
-本轮目标：把推荐和日计划生成改为后台定时预计算，前台只读 frontend_payload_cache，必要时提供 force 刷新或后台刷新任务。
+本轮目标：把覆盖率、回测详情和其它可能超过 5 秒的诊断接口继续改为后台任务 + 进度 + 缓存读取。
 ```
 
 ## 可替换的本轮目标
 
 ```text
-本轮目标：把推荐和日计划生成改为后台定时预计算，前台只读 frontend_payload_cache，必要时提供 force 刷新。
+本轮目标：把覆盖率、回测详情和其它可能超过 5 秒的诊断接口继续改为后台任务 + 进度 + 缓存读取。
 ```
 
 ```text

@@ -98,6 +98,8 @@ QT_DEBUG_API_ALLOW_WRITE=false
 
 需要调试时短期开启 `QT_DEBUG_API_ENABLED=true` 并重启服务，请求通过 `X-QT-Debug-Key` 请求头认证；可用 `qt debug-status` 查看当前状态，调试完成后执行 `qt debug-off && qt restart`。只有确实要排查写接口时才临时设置 `QT_DEBUG_API_ALLOW_WRITE=true`，并在完成后立刻关闭。
 
+API 触发服务重启同样默认关闭。`QUANT_ALLOW_API_RESTART=1` 只应在受控运维窗口短期开启；常规重启优先通过 SSH 执行 `qt restart`，不要把该开关长期放在公开服务器环境里。
+
 ### 备份和迁移包
 
 后台下载的数据包可能包含新闻、行情、AI 缓存、策略模型和日志。它们只能用于迁移服务器，不要提交 Git，也不要放在公开目录。

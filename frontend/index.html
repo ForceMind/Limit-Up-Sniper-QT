@@ -1623,7 +1623,7 @@
           try {
             if (!this.isLoggedIn) return;
             const date = this.asOf || '';
-            const planQuery = date ? `?as_of=${date}&limit_days=60` : '?limit_days=60';
+            const planQuery = date ? `?as_of=${date}&limit_days=120` : '?limit_days=120';
             const plan = await this.api(`/api/front/daily_plan${planQuery}`);
             this.plan = plan;
             if (!this.asOf && plan.as_of) this.asOf = plan.as_of;
