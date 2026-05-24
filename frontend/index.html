@@ -1378,6 +1378,56 @@
           const timer = window.setTimeout(() => controller.abort(), timeoutMs);
           return fetch(url, { ...options, signal: controller.signal }).finally(() => window.clearTimeout(timer));
         },
+        isHtmlErrorBody(text = '') {
+          const body = String(text || '').toLowerCase();
+          return body.includes('<!doctype html') || body.includes('<html') || body.includes('cf-error-details') || body.includes('cloudflare');
+        },
+        compactErrorText(text = '') {
+          return String(text || '')
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 240);
+        },
+        formatHttpError(res, text = '') {
+          const raw = String(text || '').trim();
+          if (raw.startsWith('{') || raw.startsWith('[')) {
+            try {
+              const parsed = JSON.parse(raw);
+              const detail = parsed.detail || parsed.message || parsed.error;
+              if (detail) return typeof detail === 'string' ? detail : JSON.stringify(detail);
+            } catch (err) {
+              // 继续按普通文本处理。
+            }
+          }
+          if (res.status === 502) {
+            return '源站网关错误（502）：Cloudflare 已连通，但服务器源站没有给出可用响应。通常是后端服务未启动、正在重启、端口不一致，或 Nginx 无法连接 API。请在服务器执行 qt status 和 qt logs 排查。';
+          }
+          if (res.status === 524) {
+            return 'Cloudflare 等待源站超时：服务器可能正在执行耗时任务或后端正忙。页面会先展示轻量数据，请稍后重试当前模块。';
+          }
+          if (res.status === 504) {
+            return 'Nginx 等待后端超时：服务器可能正在执行耗时任务。请稍后重试；如果反复出现，请查看任务日志和后端服务日志。';
+          }
+          if (res.status === 413) {
+            return '请求数据过大：请到后台使用分批上传或调整 Nginx 上传限制。';
+          }
+          if ([520, 521, 522, 523, 525, 526].includes(res.status)) {
+            return `Cloudflare 无法连接源站（HTTP ${res.status}）：请检查后端服务、Nginx 反代、TLS 和服务器防火墙。`;
+          }
+          if (this.isHtmlErrorBody(raw)) {
+            return `服务返回了 HTML 错误页（HTTP ${res.status}）：这不是应用接口 JSON，通常表示 Nginx、Cloudflare 或后端服务异常。请查看服务器日志。`;
+          }
+          return this.compactErrorText(raw) || `HTTP ${res.status}`;
+        },
+        makeHttpError(res, text = '') {
+          const error = new Error(this.formatHttpError(res, text));
+          error.status = res.status;
+          error.body = text;
+          return error;
+        },
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
@@ -1389,25 +1439,14 @@
               this.auth.token = '';
               localStorage.removeItem('qt_front_token');
             }
-            let message = text || `HTTP ${res.status}`;
-            if (res.status === 524) {
-              message = 'Cloudflare 等待源站超时：服务器可能正在执行耗时任务。页面会先展示轻量数据，请稍后重试当前模块。';
-            } else if (res.status === 504) {
-              message = 'Nginx 等待后端超时：服务器可能正在执行耗时任务。请稍后重试。';
-            } else if (res.status === 413) {
-              message = '请求数据过大：请到后台使用分批上传或调整 Nginx 上传限制。';
-            }
-            const error = new Error(message);
-            error.status = res.status;
-            error.body = text;
-            throw error;
+            throw this.makeHttpError(res, text);
           }
           return await res.json();
         },
         async initAuth() {
           try {
             const res = await this.fetchWithTimeout('/api/auth/status', { cache: 'no-store' }, 8000);
-            if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+            if (!res.ok) throw this.makeHttpError(res, await res.text());
             const status = await res.json();
             this.auth.setupRequired = Boolean(status.setup_required);
           } catch (err) {

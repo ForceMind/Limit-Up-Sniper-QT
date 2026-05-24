@@ -22,7 +22,7 @@
 7. 前台不能出现后台初始化或管理入口；未登录只能看概览和新闻，登录后才能看账户、策略、持仓、成交等。
 8. 后台必须可管理用户、数据、缓存、任务、日志、调试通道和数据库。
 
-当前已完成到 v0.2.49：
+当前已完成到 v0.2.50：
 - 前台用户 profile 有 simulated_cash、strategy_model_id、follow_started_at、follow_start_date。
 - 切换策略或调整模拟资金会重置跟随开始时间。
 - 前台账户按 follow_start_date 裁剪，不继承旧持仓；真正为每个用户从注册日完整独立重跑策略暂不开发，等明确要求后再做。
@@ -35,6 +35,7 @@
 - 后台慢任务触发接口默认 background=true；策略复盘、模型训练和回测默认只手动触发，策略库查看交割单默认读取已保存模型记录，手动策略复盘和策略进化默认使用独立 Python 子进程运行。
 - 独立进程任务会在状态接口读取时自动巡检，异常退出但未写回结果时标记失败并写运行日志。
 - 策略复盘使用 QT_STRATEGY_REPLAY_BATCH_DAYS 分批推进，默认 15 天一批，并记录 strategy_replay_cursor；自动调度默认不运行策略复盘。
+- 前台和后台会把 Cloudflare/Nginx 的 502/504/524 HTML 错误页转换为中文诊断信息，不再把整页代理错误 HTML 显示到业务页面里。
 - 数据包导入改为流式合并 SQLite，避免 200MB 级数据库文件在服务器上一次性读入内存。
 - 可以用 python scripts/package_strategy_runtime_export.py 生成只包含 strategy_runtime_* 的小包，把本地复盘结果合并到服务器。
 - 后台数据库页可以查看和清理缓存。

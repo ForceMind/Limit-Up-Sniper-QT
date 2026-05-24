@@ -281,6 +281,18 @@ v0.2.48 起，前台推荐和日计划缓存未命中时默认触发 `frontend_p
 
 v0.2.49 起，策略复盘、模型训练和回测默认只手动触发。`STRATEGY_REPLAY_ENABLED=false` 时自动调度器不会跑策略复盘；`QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY=false` 时后台“系统启动”只执行新闻、AI、补数、行情和模拟交易，不会顺手跑复盘。策略库查看交割单默认读取已保存模型记录，只有点击“手动重新回测”才会实时重算。日常生产建议保持这两个值为 false，只在需要更新模型运行结果时手动点击“运行策略复盘”或“启动进化”。
 
+v0.2.50 起，前台和后台不会再把 Cloudflare 或 Nginx 返回的整页 HTML 错误页原样展示给用户。看到 `源站网关错误（502）` 时，含义是浏览器和 Cloudflare 边缘节点已经连通，但源站主机没有返回可用响应，通常是后端服务未启动、正在重启、监听端口和 Nginx 上游不一致、进程被重任务或内存压力杀掉，或 Nginx 无法连接 API。优先在服务器执行：
+
+```bash
+qt status
+qt logs
+curl -i http://127.0.0.1:${QUANT_PORT:-8000}/api/version
+sudo nginx -t
+sudo systemctl status ${QUANT_SERVICE_NAME:-qt}
+```
+
+如果本机 `curl` 也连不上，先重启后端：`qt restart`；如果本机可连但公网 502，重点检查 Nginx upstream、端口、防火墙、Cloudflare TLS 模式和服务日志。
+
 v0.2.29 起，后台上传合并数据包时，`quant_data.sqlite3` 不再一次性读入内存，而是流式写入临时 SQLite 后再合并。58MB 这类压缩包本身没有超过上传限制；如果旧版本合并失败，先更新到 v0.2.29 再重新上传。
 
 如果只是迁移本地跑好的策略运行结果，优先使用 `python scripts/package_strategy_runtime_export.py` 生成小包。该小包只包含 `strategy_runtime_*` 运行表，不包含新闻、行情、K 线 JSON 和账号配置，适合把本地资金档复盘结果合并到服务器。
