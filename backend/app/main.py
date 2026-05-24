@@ -3041,11 +3041,13 @@ def admin_clear_sample_state():
 @app.get("/api/admin/access_logs")
 def admin_access_logs(
     limit: int = Query(default=220, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     username: Optional[str] = Query(default=None),
     ip: Optional[str] = Query(default=None),
     path: Optional[str] = Query(default=None),
+    status_code: Optional[int] = Query(default=None, ge=100, le=599),
 ):
-    return access_logs(limit=limit, username=username, ip=ip, path=path)
+    return access_logs(limit=limit, offset=offset, username=username, ip=ip, path=path, status_code=status_code)
 
 
 @app.get("/api/admin/access_security")
@@ -3072,6 +3074,34 @@ def admin_access_security_unblock(payload: Dict[str, Any] = Body(default_factory
     result = unblock_ip(ip)
     result["security"] = access_security(limit=120)
     return result
+
+
+@app.post("/api/admin/access_security/block_all")
+def admin_access_security_block_all(payload: Dict[str, Any] = Body(default_factory=dict)):
+    limit = int(safe_float((payload or {}).get("limit"), 500))
+    summary = access_security(limit=max(1, min(limit, 500)))
+    blocked = []
+    skipped = []
+    for item in summary.get("items", []):
+        if not isinstance(item, dict) or item.get("blocked"):
+            continue
+        ip = str(item.get("ip") or "").strip()
+        if not ip:
+            continue
+        reason = "、".join(item.get("reasons") or []) or "后台一键拉黑异常访问"
+        result = block_ip(ip, reason=reason, source="manual_bulk")
+        if result.get("blocked"):
+            blocked.append(ip)
+        else:
+            skipped.append({"ip": ip, "result": result})
+    return {
+        "status": "ok",
+        "blocked": blocked,
+        "blocked_count": len(blocked),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "security": access_security(limit=120),
+    }
 
 
 @app.get("/api/admin/frontend_users")

@@ -391,6 +391,7 @@ def test_admin_access_security_classifies_and_blocks_suspicious_ips(tmp_path, mo
     )
 
     summary = client.get("/api/admin/access_security", headers=headers)
+    page = client.get("/api/admin/access_logs?limit=1&offset=1&status_code=404", headers=headers)
     blocked = client.post(
         "/api/admin/access_security/block",
         headers=headers,
@@ -401,15 +402,22 @@ def test_admin_access_security_classifies_and_blocks_suspicious_ips(tmp_path, mo
         headers=headers,
         json={"ip": "45.33.32.156"},
     )
+    bulk = client.post("/api/admin/access_security/block_all", headers=headers, json={"limit": 500})
 
     assert summary.status_code == 200
     assert any(item["ip"] == "45.33.32.156" for item in summary.json()["items"])
     assert not any(item["ip"] == "8.8.8.8" for item in summary.json()["items"])
+    assert page.status_code == 200
+    assert page.json()["returned"] == 1
+    assert page.json()["offset"] == 1
+    assert page.json()["prev_offset"] == 0
     assert blocked.status_code == 200
     assert blocked.json()["blocked"] is True
     assert any(item["ip"] == "45.33.32.156" for item in blocked.json()["security"]["blocked"])
     assert unblocked.status_code == 200
     assert unblocked.json()["blocked"] is False
+    assert bulk.status_code == 200
+    assert "45.33.32.156" in bulk.json()["blocked"]
 
 
 def test_quant_timeline_can_run_against_selected_strategy(tmp_path, monkeypatch):

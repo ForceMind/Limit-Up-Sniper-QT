@@ -240,9 +240,11 @@ def record_access(
 
 def access_logs(
     limit: int = 200,
+    offset: int = 0,
     username: Optional[str] = None,
     ip: Optional[str] = None,
     path: Optional[str] = None,
+    status_code: Optional[int] = None,
 ) -> Dict[str, Any]:
     data = read_json(ACCESS_LOG_FILE, {"items": []})
     if not isinstance(data, dict):
@@ -255,15 +257,23 @@ def access_logs(
         rows = [item for item in rows if ip in str(item.get("ip") or "")]
     if path:
         rows = [item for item in rows if path.lower() in str(item.get("path") or "").lower()]
+    if status_code:
+        rows = [item for item in rows if int(safe_float(item.get("status_code"), 0)) == int(status_code)]
     rows = list(reversed(rows))
     limit = max(1, min(int(safe_float(limit, 200)), 1000))
+    offset = max(0, int(safe_float(offset, 0)))
+    page_rows = rows[offset : offset + limit]
     unique_visitors = len({str(item.get("ip") or "") for item in rows if item.get("ip")})
     unique_users = len({str(item.get("username") or "") for item in rows if item.get("username")})
     return {
         "status": "ok",
-        "items": rows[:limit],
+        "items": page_rows,
         "count": len(rows),
-        "returned": min(limit, len(rows)),
+        "returned": len(page_rows),
+        "limit": limit,
+        "offset": offset,
+        "next_offset": offset + limit if offset + limit < len(rows) else None,
+        "prev_offset": max(0, offset - limit) if offset > 0 else None,
         "unique_visitors": unique_visitors,
         "unique_users": unique_users,
         "updated_at": data.get("updated_at") or "",

@@ -1280,7 +1280,10 @@
                 <div class="font-semibold">异常访问与 IP 封禁</div>
                 <div class="text-xs text-neutral-500 mt-1">正常登录用户访问单独保留；扫描敏感路径、访问不存在接口、未授权探测会进入这里，并按规则自动封禁。</div>
               </div>
-              <button @click="fetchAccessSecurity" class="h-9 px-3 bg-white border border-neutral-300 text-sm">刷新异常</button>
+              <div class="flex flex-wrap gap-2">
+                <button @click="blockAllSuspiciousIps" :disabled="accessSecurityBlockingAll || !unblockedSuspiciousCount" class="h-9 px-3 bg-red-600 text-white text-sm disabled:opacity-50">{{ accessSecurityBlockingAll ? '拉黑中' : `一键拉黑 ${unblockedSuspiciousCount} 个` }}</button>
+                <button @click="fetchAccessSecurity" class="h-9 px-3 bg-white border border-neutral-300 text-sm">刷新异常</button>
+              </div>
             </div>
             <div class="table-wrap overflow-auto max-h-[420px]">
               <table class="w-full text-sm">
@@ -1314,9 +1317,20 @@
                 <div class="font-semibold">访问审计</div>
                 <div class="text-xs text-neutral-500 mt-1">记录页面和接口访问的时间、用户、IP、浏览器、路径和状态码，不记录密码明文。</div>
               </div>
-              <div class="flex gap-2">
-                <input v-model="accessFilter" placeholder="筛选用户 / IP / 路径" class="h-9 px-3 border border-neutral-300 text-sm">
-                <button @click="fetchAccessLogs" class="h-9 px-3 bg-neutral-900 text-white text-sm">刷新</button>
+              <div class="grid grid-cols-2 lg:grid-cols-[120px_140px_180px_100px_90px_auto] gap-2 text-sm">
+                <input v-model="accessLogForm.username" placeholder="用户" class="h-9 px-3 border border-neutral-300">
+                <input v-model="accessLogForm.ip" placeholder="IP" class="h-9 px-3 border border-neutral-300">
+                <input v-model="accessLogForm.path" placeholder="路径" class="h-9 px-3 border border-neutral-300">
+                <input v-model="accessLogForm.status_code" placeholder="状态码" class="h-9 px-3 border border-neutral-300">
+                <select v-model.number="accessLogForm.limit" class="h-9 px-2 border border-neutral-300 bg-white">
+                  <option :value="50">50条</option>
+                  <option :value="100">100条</option>
+                  <option :value="220">220条</option>
+                </select>
+                <div class="flex gap-2">
+                  <button @click="searchAccessLogs" class="h-9 px-3 bg-neutral-900 text-white text-sm">查询</button>
+                  <button @click="resetAccessLogs" class="h-9 px-3 bg-white border border-neutral-300 text-sm">重置</button>
+                </div>
               </div>
             </div>
             <div class="table-wrap overflow-auto max-h-[520px]">
@@ -1345,6 +1359,15 @@
                   <tr v-if="!accessLogItems.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无访问记录</td></tr>
                 </tbody>
               </table>
+            </div>
+            <div class="px-4 py-3 border-t border-neutral-200 flex flex-wrap items-center justify-between gap-3 text-sm">
+              <div class="text-xs text-neutral-500">
+                第 {{ (accessLogs.offset || 0) + 1 }} - {{ (accessLogs.offset || 0) + (accessLogs.returned || 0) }} 条 / 共 {{ accessLogs.count || 0 }} 条
+              </div>
+              <div class="flex gap-2">
+                <button @click="accessLogsPrevPage" :disabled="accessLogs.prev_offset === null || accessLogs.prev_offset === undefined" class="h-8 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">上一页</button>
+                <button @click="accessLogsNextPage" :disabled="accessLogs.next_offset === null || accessLogs.next_offset === undefined" class="h-8 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">下一页</button>
+              </div>
             </div>
           </div>
 
@@ -1820,6 +1843,8 @@
           strategyModels: {},
           accessLogs: {},
           accessSecurity: {},
+          accessSecurityBlockingAll: false,
+          accessLogForm: { limit: 50, offset: 0, username: '', ip: '', path: '', status_code: '' },
           frontendUsers: {},
           userFilter: '',
           showUserDialog: false,
@@ -1853,7 +1878,6 @@
           logs: [],
           logJob: '',
           logLevel: '',
-          accessFilter: '',
           logUpdatedAt: '',
           showPayloads: false,
           syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
@@ -1999,6 +2023,7 @@
         accessLogItems() { return this.accessLogs.items || []; },
         suspiciousAccessItems() { return this.accessSecurity.items || []; },
         blockedAccessItems() { return this.accessSecurity.blocked || []; },
+        unblockedSuspiciousCount() { return this.suspiciousAccessItems.filter(item => !item.blocked).length; },
         frontendUserItems() { return this.frontendUsers.items || []; },
         filteredFrontendUsers() {
           const term = String(this.userFilter || '').trim().toLowerCase();
@@ -2519,18 +2544,38 @@
         },
         async fetchAccessLogs() {
           try {
-            const q = new URLSearchParams({ limit: '220' });
-            const term = String(this.accessFilter || '').trim();
-            if (term) {
-              if (/^[0-9a-fA-F:.]+$/.test(term)) q.set('ip', term);
-              else if (term.startsWith('/')) q.set('path', term);
-              else q.set('username', term);
-            }
+            const form = this.accessLogForm || {};
+            const q = new URLSearchParams({
+              limit: String(form.limit || 50),
+              offset: String(form.offset || 0),
+            });
+            if (String(form.username || '').trim()) q.set('username', String(form.username).trim());
+            if (String(form.ip || '').trim()) q.set('ip', String(form.ip).trim());
+            if (String(form.path || '').trim()) q.set('path', String(form.path).trim());
+            if (String(form.status_code || '').trim()) q.set('status_code', String(form.status_code).trim());
             this.accessLogs = await this.api(`/api/admin/access_logs?${q.toString()}`);
             await this.fetchFrontendUsers();
           } catch (err) {
             this.clientError = String(err.message || err);
           }
+        },
+        searchAccessLogs() {
+          this.accessLogForm.offset = 0;
+          this.fetchAccessLogs();
+        },
+        resetAccessLogs() {
+          this.accessLogForm = { limit: 50, offset: 0, username: '', ip: '', path: '', status_code: '' };
+          this.fetchAccessLogs();
+        },
+        accessLogsPrevPage() {
+          if (this.accessLogs.prev_offset === null || this.accessLogs.prev_offset === undefined) return;
+          this.accessLogForm.offset = Number(this.accessLogs.prev_offset || 0);
+          this.fetchAccessLogs();
+        },
+        accessLogsNextPage() {
+          if (this.accessLogs.next_offset === null || this.accessLogs.next_offset === undefined) return;
+          this.accessLogForm.offset = Number(this.accessLogs.next_offset || 0);
+          this.fetchAccessLogs();
         },
         async fetchAccessSecurity() {
           try {
@@ -2549,6 +2594,21 @@
             this.accessSecurity = result.security || this.accessSecurity;
           } catch (err) {
             this.clientError = String(err.message || err);
+          }
+        },
+        async blockAllSuspiciousIps() {
+          this.accessSecurityBlockingAll = true;
+          try {
+            const result = await this.api('/api/admin/access_security/block_all', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ limit: 500 }),
+            });
+            this.accessSecurity = result.security || this.accessSecurity;
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.accessSecurityBlockingAll = false;
           }
         },
         async unblockAccessIp(ip) {
