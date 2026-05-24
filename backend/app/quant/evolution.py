@@ -204,6 +204,23 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
 
+            CREATE TABLE IF NOT EXISTS user_follow_periods (
+                period_id TEXT PRIMARY KEY,
+                username TEXT,
+                model_id TEXT,
+                simulated_cash REAL,
+                started_at TEXT,
+                start_date TEXT,
+                ended_at TEXT,
+                end_date TEXT,
+                reason TEXT,
+                source TEXT,
+                created_at TEXT,
+                raw_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_follow_periods_user_started ON user_follow_periods(username, started_at);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_periods_active ON user_follow_periods(username, ended_at);
+
             CREATE TABLE IF NOT EXISTS user_follow_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 username TEXT,
@@ -1649,6 +1666,203 @@ class StrategyEvolution:
                 conn.close()
         except Exception:
             return
+
+    def record_user_follow_period(
+        self,
+        username: str,
+        profile: Dict[str, Any],
+        reason: str = "",
+        source: str = "",
+        previous_profile: Optional[Dict[str, Any]] = None,
+        created_at: str = "",
+    ) -> Dict[str, Any]:
+        if not isinstance(profile, dict):
+            return {"status": "invalid"}
+        clean_username = str(username or "").strip()
+        if not clean_username:
+            return {"status": "invalid"}
+        model_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+        simulated_cash = round(max(0.0, safe_float(profile.get("simulated_cash"), 0)), 2)
+        started_at = str(profile.get("follow_started_at") or created_at or datetime.now().isoformat(timespec="seconds")).strip()
+        if len(started_at) == 10:
+            started_at = f"{started_at}T00:00:00"
+        start_date = str(profile.get("follow_start_date") or started_at[:10]).strip()[:10]
+        now_text = datetime.now().isoformat(timespec="seconds")
+        reason_text = str(reason or "profile_sync").strip()[:80]
+        source_text = str(source or "user_profile").strip()[:80]
+        period_id = self._digest("user_follow_period", clean_username, model_id, simulated_cash, started_at)[:40]
+        raw_payload = {
+            "username": clean_username,
+            "profile": profile,
+            "previous_profile": previous_profile if isinstance(previous_profile, dict) else {},
+            "reason": reason_text,
+            "source": source_text,
+        }
+        try:
+            conn = self._connect_db()
+            try:
+                existing = conn.execute(
+                    "SELECT period_id FROM user_follow_periods WHERE period_id = ? LIMIT 1",
+                    (period_id,),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """
+                        UPDATE user_follow_periods
+                        SET ended_at = ?, end_date = ?
+                        WHERE username = ? AND COALESCE(ended_at, '') = '' AND period_id <> ?
+                        """,
+                        (now_text, now_text[:10], clean_username, period_id),
+                    )
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO user_follow_periods
+                    (period_id, username, model_id, simulated_cash, started_at, start_date,
+                     ended_at, end_date, reason, source, created_at, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT ended_at FROM user_follow_periods WHERE period_id = ?), ''),
+                            COALESCE((SELECT end_date FROM user_follow_periods WHERE period_id = ?), ''), ?, ?, ?, ?)
+                    """,
+                    (
+                        period_id,
+                        clean_username,
+                        model_id,
+                        simulated_cash,
+                        started_at,
+                        start_date,
+                        period_id,
+                        period_id,
+                        reason_text,
+                        source_text,
+                        now_text,
+                        self._json_text(raw_payload),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            return {"status": "error"}
+        return {
+            "status": "ok",
+            "period_id": period_id,
+            "username": clean_username,
+            "model_id": model_id,
+            "simulated_cash": simulated_cash,
+            "started_at": started_at,
+            "start_date": start_date,
+            "reason": reason_text,
+            "source": source_text,
+        }
+
+    def user_follow_diagnostics(
+        self,
+        username: str,
+        profile: Optional[Dict[str, Any]] = None,
+        position_limit: int = 8,
+        trade_limit: int = 8,
+        period_limit: int = 6,
+    ) -> Dict[str, Any]:
+        if not QUANT_DB_FILE.exists():
+            return {"status": "missing", "current_period": {}, "account_snapshot": {}, "positions": [], "recent_trades": [], "periods": []}
+        clean_username = str(username or "").strip()
+        if not clean_username:
+            return {"status": "invalid", "current_period": {}, "account_snapshot": {}, "positions": [], "recent_trades": [], "periods": []}
+        profile = profile if isinstance(profile, dict) else {}
+        model_id = str(profile.get("strategy_model_id") or "").strip()
+        follow_start_date = str(profile.get("follow_start_date") or "").strip()[:10]
+        simulated_cash = safe_float(profile.get("simulated_cash"), 0)
+        try:
+            conn = self._connect_db()
+            try:
+                period_rows = conn.execute(
+                    """
+                    SELECT period_id, username, model_id, simulated_cash, started_at, start_date,
+                           ended_at, end_date, reason, source, created_at
+                    FROM user_follow_periods
+                    WHERE username = ?
+                    ORDER BY started_at DESC, created_at DESC
+                    LIMIT ?
+                    """,
+                    (clean_username, max(1, min(int(period_limit or 6), 20))),
+                ).fetchall()
+                current_period = conn.execute(
+                    """
+                    SELECT period_id, username, model_id, simulated_cash, started_at, start_date,
+                           ended_at, end_date, reason, source, created_at
+                    FROM user_follow_periods
+                    WHERE username = ? AND COALESCE(ended_at, '') = ''
+                    ORDER BY started_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (clean_username,),
+                ).fetchone()
+                where = ["username = ?"]
+                values: list[Any] = [clean_username]
+                if model_id:
+                    where.append("model_id = ?")
+                    values.append(model_id)
+                if follow_start_date:
+                    where.append("follow_start_date = ?")
+                    values.append(follow_start_date)
+                if simulated_cash > 0:
+                    where.append("ABS(initial_cash - ?) < 0.01")
+                    values.append(simulated_cash)
+                where_sql = " AND ".join(where)
+                snapshot = conn.execute(
+                    f"""
+                    SELECT snapshot_id, username, model_id, model_version, follow_start_date, as_of,
+                           initial_cash, record_limit, source, generated_at, total_asset,
+                           return_pct, position_count, deal_count
+                    FROM user_follow_snapshots
+                    WHERE {where_sql}
+                    ORDER BY as_of DESC, generated_at DESC
+                    LIMIT 1
+                    """,
+                    values,
+                ).fetchone()
+                positions = []
+                trades = []
+                if snapshot:
+                    snapshot_id = str(snapshot["snapshot_id"] or "")
+                    positions = conn.execute(
+                        """
+                        SELECT code, name, qty, available_qty, entry_date, entry_price, last_price,
+                               market_value, pnl_pct, source, generated_at
+                        FROM user_follow_positions
+                        WHERE snapshot_id = ?
+                        ORDER BY market_value DESC, code ASC
+                        LIMIT ?
+                        """,
+                        (snapshot_id, max(1, min(int(position_limit or 8), 50))),
+                    ).fetchall()
+                    trades = conn.execute(
+                        """
+                        SELECT date, time, side, code, name, qty, price, amount, pnl_pct, source, generated_at
+                        FROM user_follow_trades
+                        WHERE snapshot_id = ?
+                        ORDER BY date DESC, time DESC, trade_id DESC
+                        LIMIT ?
+                        """,
+                        (snapshot_id, max(1, min(int(trade_limit or 8), 50))),
+                    ).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:
+            return {"status": "error", "error": str(exc), "current_period": {}, "account_snapshot": {}, "positions": [], "recent_trades": [], "periods": []}
+
+        def row_dict(row: Any) -> Dict[str, Any]:
+            if not row:
+                return {}
+            return {key: row[key] for key in row.keys()}
+
+        return {
+            "status": "ok",
+            "current_period": row_dict(current_period),
+            "account_snapshot": row_dict(snapshot),
+            "positions": [row_dict(row) for row in positions],
+            "recent_trades": [row_dict(row) for row in trades],
+            "periods": [row_dict(row) for row in period_rows],
+        }
 
     def _runtime_summary_for_model(
         self,

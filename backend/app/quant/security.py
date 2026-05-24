@@ -457,8 +457,12 @@ def admin_update_frontend_user(username: str, payload: Dict[str, Any]) -> Dict[s
     merged = {**current, **profile_payload}
     old_model = str(current.get("strategy_model_id") or "")
     new_model = str(merged.get("strategy_model_id") or old_model)
-    if new_model and new_model != old_model:
-        merged["follow_started_at"] = _now_iso()
+    old_cash = safe_float(current.get("simulated_cash"), DEFAULT_FRONTEND_SIMULATED_CASH)
+    new_cash = safe_float(merged.get("simulated_cash"), old_cash)
+    if (new_model and new_model != old_model) or abs(new_cash - old_cash) >= 0.01:
+        follow_started_at = _now_iso()
+        merged["follow_started_at"] = follow_started_at
+        merged["follow_start_date"] = follow_started_at[:10]
     if not str(merged.get("follow_started_at") or "").strip():
         merged["follow_started_at"] = str(record.get("created_at") or _now_iso())
     record["profile"] = _normalize_frontend_profile(merged)
@@ -548,8 +552,12 @@ def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict
     merged = {**current, **updates}
     old_model = str(current.get("strategy_model_id") or "")
     new_model = str(merged.get("strategy_model_id") or old_model)
-    if new_model and new_model != old_model:
-        merged["follow_started_at"] = _now_iso()
+    old_cash = safe_float(current.get("simulated_cash"), DEFAULT_FRONTEND_SIMULATED_CASH)
+    new_cash = safe_float(merged.get("simulated_cash"), old_cash)
+    if (new_model and new_model != old_model) or abs(new_cash - old_cash) >= 0.01:
+        follow_started_at = _now_iso()
+        merged["follow_started_at"] = follow_started_at
+        merged["follow_start_date"] = follow_started_at[:10]
     if not str(merged.get("follow_started_at") or "").strip():
         merged["follow_started_at"] = str(record.get("created_at") or _now_iso())
     profile = _normalize_frontend_profile(merged)

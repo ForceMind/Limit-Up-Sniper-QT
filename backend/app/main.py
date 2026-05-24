@@ -479,7 +479,15 @@ def api_auth_login(request: Request, payload: Dict[str, Any] = Body(default_fact
 
 @app.post("/api/auth/register")
 def api_auth_register(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
-    return register_frontend_user(payload, request)
+    result = register_frontend_user(payload, request)
+    username = str(result.get("username") or "").strip()
+    if username:
+        try:
+            profile_payload = frontend_user_profile(username)
+            _record_user_follow_period(username, profile_payload.get("profile"), source="front_register", reason="register", created_at=profile_payload.get("created_at"))
+        except Exception:
+            pass
+    return result
 
 
 def _request_username(request: Request) -> str:
@@ -497,6 +505,12 @@ def api_front_profile(request: Request):
 @app.post("/api/front/profile")
 def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
     username = _request_username(request)
+    previous = {}
+    try:
+        previous_payload = frontend_user_profile(username)
+        previous = previous_payload.get("profile") if isinstance(previous_payload.get("profile"), dict) else {}
+    except Exception:
+        previous = {}
     updates = dict(payload) if isinstance(payload, dict) else {}
     if updates.get("auto_recommend"):
         cash = max(10_000.0, min(10_000_000.0, safe_float(updates.get("simulated_cash"), 10_000.0)))
@@ -505,6 +519,14 @@ def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(de
     result = update_frontend_user_profile(username, updates)
     _frontend_account_cache_clear()
     context = _frontend_profile_context(request, include_catalog=True)
+    _record_user_follow_period(
+        username,
+        context.get("profile"),
+        previous_profile=previous,
+        source="front_profile",
+        reason=_follow_period_reason(previous, context.get("profile")),
+        created_at=context.get("created_at"),
+    )
     return {
         **result,
         "profile": context["profile"],
@@ -867,6 +889,74 @@ def _frontend_account_cache_clear() -> None:
     _FRONTEND_ACCOUNT_CACHE.clear()
 
 
+def _follow_period_reason(previous: Any, current: Any) -> str:
+    previous = previous if isinstance(previous, dict) else {}
+    current = current if isinstance(current, dict) else {}
+    old_model = str(previous.get("strategy_model_id") or "")
+    new_model = str(current.get("strategy_model_id") or "")
+    old_cash = safe_float(previous.get("simulated_cash"), 0)
+    new_cash = safe_float(current.get("simulated_cash"), old_cash)
+    model_changed = bool(new_model and old_model and new_model != old_model)
+    cash_changed = abs(new_cash - old_cash) >= 0.01 if old_cash > 0 else False
+    if model_changed and cash_changed:
+        return "profile_cash_and_strategy_changed"
+    if model_changed:
+        return "profile_strategy_changed"
+    if cash_changed:
+        return "profile_cash_changed"
+    return "profile_sync"
+
+
+def _record_user_follow_period(
+    username: str,
+    profile: Any,
+    previous_profile: Optional[Dict[str, Any]] = None,
+    source: str = "",
+    reason: str = "",
+    created_at: Any = "",
+) -> Dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {"status": "invalid"}
+    return strategy_evolution.record_user_follow_period(
+        username,
+        profile,
+        reason=reason or "profile_sync",
+        source=source or "frontend_profile",
+        previous_profile=previous_profile,
+        created_at=str(created_at or ""),
+    )
+
+
+def _frontend_user_with_diagnostics(item: Dict[str, Any]) -> Dict[str, Any]:
+    row = dict(item)
+    username = str(row.get("username") or "").strip()
+    profile = row.get("profile") if isinstance(row.get("profile"), dict) else {}
+    if username and profile:
+        period = _record_user_follow_period(
+            username,
+            profile,
+            source="admin_user_summary",
+            reason="admin_summary_sync",
+            created_at=row.get("created_at"),
+        )
+        diagnostic = strategy_evolution.user_follow_diagnostics(username, profile)
+        if period.get("status") == "ok" and not diagnostic.get("current_period"):
+            diagnostic["current_period"] = period
+        row["follow_period"] = diagnostic.get("current_period") or period
+        row["account_diagnostic"] = diagnostic
+    return row
+
+
+def _admin_frontend_user_summary() -> Dict[str, Any]:
+    payload = frontend_user_summary()
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    enriched = [_frontend_user_with_diagnostics(item) for item in items if isinstance(item, dict)]
+    next_payload = dict(payload)
+    next_payload["items"] = enriched
+    next_payload["account_snapshot_count"] = sum(1 for item in enriched if (item.get("account_diagnostic") or {}).get("account_snapshot"))
+    return next_payload
+
+
 def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
     latest = str(quant_engine.latest_event_date() or "").strip()
     requested = str(as_of or "").strip()
@@ -945,6 +1035,7 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
     replay_start_date = _frontend_follow_start_date(context, effective_as_of)
     model_version = _frontend_followed_model_version(context)
     username = str(context.get("username") or "").strip() or "anonymous"
+    _record_user_follow_period(username, profile, source="front_account", reason="account_view", created_at=context.get("created_at"))
 
     def persist_user_follow(account: Dict[str, Any], source: str) -> Dict[str, Any]:
         strategy_evolution.save_user_follow_account(
@@ -1440,7 +1531,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
             "notification_status": trade_notifier.status(),
             "evolution_status": strategy_evolution.status(),
             "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
-            "frontend_users": frontend_user_summary(),
+            "frontend_users": _admin_frontend_user_summary(),
             "dashboard": dashboard,
         }
     return {
@@ -1454,7 +1545,7 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "evolution_status": strategy_evolution.status(),
         "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
         "access_logs": access_logs(limit=120),
-        "frontend_users": frontend_user_summary(),
+        "frontend_users": _admin_frontend_user_summary(),
         "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
         "trading_account": quant_engine.trading_account(as_of=as_of, limit=1000),
         "news": quant_engine.news_feed(as_of=as_of, limit=120, fallback_latest=True),
@@ -2121,17 +2212,40 @@ def admin_access_logs(
 
 @app.get("/api/admin/frontend_users")
 def admin_frontend_users():
-    return frontend_user_summary()
+    return _admin_frontend_user_summary()
 
 
 @app.post("/api/admin/frontend_users")
 def admin_create_frontend_user_api(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
-    return admin_create_frontend_user(payload, request)
+    result = admin_create_frontend_user(payload, request)
+    user = result.get("user") if isinstance(result.get("user"), dict) else {}
+    if user:
+        _record_user_follow_period(user.get("username"), user.get("profile"), source="admin_create_user", reason="admin_create_user", created_at=user.get("created_at"))
+        result["user"] = _frontend_user_with_diagnostics(user)
+    return result
 
 
 @app.patch("/api/admin/frontend_users/{username}")
 def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
-    return admin_update_frontend_user(username, payload)
+    previous = {}
+    try:
+        previous_payload = frontend_user_profile(username)
+        previous = previous_payload.get("profile") if isinstance(previous_payload.get("profile"), dict) else {}
+    except Exception:
+        previous = {}
+    result = admin_update_frontend_user(username, payload)
+    user = result.get("user") if isinstance(result.get("user"), dict) else {}
+    if user:
+        _record_user_follow_period(
+            user.get("username"),
+            user.get("profile"),
+            previous_profile=previous,
+            source="admin_update_user",
+            reason=_follow_period_reason(previous, user.get("profile")),
+            created_at=user.get("created_at"),
+        )
+        result["user"] = _frontend_user_with_diagnostics(user)
+    return result
 
 
 @app.post("/api/admin/frontend_users/{username}/password")

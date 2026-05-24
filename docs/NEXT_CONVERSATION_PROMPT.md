@@ -22,12 +22,14 @@
 7. 前台不能出现后台初始化或管理入口；未登录只能看概览和新闻，登录后才能看账户、策略、持仓、成交等。
 8. 后台必须可管理用户、数据、缓存、任务、日志、调试通道和数据库。
 
-当前已完成到 v0.2.32：
+当前已完成到 v0.2.33：
 - 前台用户 profile 有 simulated_cash、strategy_model_id、follow_started_at、follow_start_date。
-- 切换策略会重置跟随开始时间。
+- 切换策略或调整模拟资金会重置跟随开始时间。
 - 前台账户按 follow_start_date 裁剪，不继承旧持仓。
 - 策略复盘任务会把每个策略的每日信号、成交、持仓、账户快照和清算写入 strategy_daily_signals、strategy_runtime_trades、strategy_runtime_positions、strategy_runtime_snapshots、strategy_runtime_settlements。
 - 前台账户优先读取 user_follow_snapshots；未命中时从 strategy_runtime_*、短缓存、模型记录或即时回放派生，并写入 user_follow_positions、user_follow_trades。
+- 用户注册、设置资金或切换策略会写入 user_follow_periods。
+- 后台用户管理页展示当前跟随周期、账户快照、持仓和最近成交来源。
 - 推荐和日计划使用 frontend_payload_cache SQLite 短缓存。
 - 后台慢任务触发接口默认 background=true；手动策略复盘和策略进化默认使用独立 Python 子进程运行。
 - 独立进程任务会在状态接口读取时自动巡检，异常退出但未写回结果时标记失败并写运行日志。
@@ -58,7 +60,7 @@
   bash -n scripts/update_server.sh
 - 最后告诉我改了什么、为什么这么改、怎么部署、怎么验证。
 
-本轮目标：实现用户跟随周期记录和后台账户诊断第一版：记录用户资金/策略切换周期，并在后台用户管理页展示当前跟随账户快照、持仓和最近成交来源。
+本轮目标：把推荐和日计划生成改为后台定时预计算，前台只读 frontend_payload_cache，必要时提供 force 刷新或后台刷新任务。
 ```
 
 ## 可替换的本轮目标

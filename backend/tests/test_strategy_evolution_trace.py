@@ -163,6 +163,57 @@ def test_user_follow_account_persists_user_scoped_snapshot_and_rows(tmp_path, mo
         assert conn.execute("SELECT COUNT(*) FROM user_follow_trades").fetchone()[0] == 2
 
 
+def test_user_follow_periods_close_previous_cycle_and_feed_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    first_profile = {
+        "simulated_cash": 100000,
+        "strategy_model_id": "model-a",
+        "follow_started_at": "2026-05-01T09:00:00",
+        "follow_start_date": "2026-05-01",
+    }
+    second_profile = {
+        "simulated_cash": 50000,
+        "strategy_model_id": "model-b",
+        "follow_started_at": "2026-05-10T09:00:00",
+        "follow_start_date": "2026-05-10",
+    }
+
+    first = evolution.record_user_follow_period("alice", first_profile, reason="register", source="test")
+    second = evolution.record_user_follow_period("alice", second_profile, reason="profile_cash_and_strategy_changed", source="test", previous_profile=first_profile)
+    evolution.save_user_follow_account(
+        "alice",
+        "model-b",
+        {"account_initial_cash": 50000},
+        50000,
+        "2026-05-10",
+        "2026-05-19",
+        50,
+        {
+            "status": "ok",
+            "account": {"total_asset": 51000, "return_pct": 2, "position_count": 1, "deal_count": 1},
+            "positions": [{"code": "600000", "qty": 100, "market_value": 1000, "pnl_pct": 2}],
+            "history_deals": [{"date": "2026-05-19", "side": "BUY", "code": "600000", "qty": 100, "price": 10}],
+        },
+        model_version="run-b",
+        source="runtime_tables",
+    )
+
+    diagnostics = evolution.user_follow_diagnostics("alice", second_profile)
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert diagnostics["current_period"]["period_id"] == second["period_id"]
+    assert diagnostics["account_snapshot"]["total_asset"] == 51000
+    assert diagnostics["positions"][0]["code"] == "600000"
+    assert diagnostics["recent_trades"][0]["side"] == "BUY"
+    with sqlite3.connect(tmp_path / "quant_data.sqlite3") as conn:
+        rows = conn.execute("SELECT period_id, ended_at FROM user_follow_periods ORDER BY started_at ASC").fetchall()
+        assert len(rows) == 2
+        assert rows[0][1]
+        assert rows[1][1] == ""
+
+
 def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monkeypatch):
     monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
     evolution = StrategyEvolution()

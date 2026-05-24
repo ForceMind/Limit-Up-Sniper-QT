@@ -1110,10 +1110,11 @@
         </section>
 
         <section v-if="activeTab === 'users'" class="space-y-4">
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
             <div class="metric"><div class="text-xs text-neutral-500">前台账号</div><div class="mt-2 text-lg font-semibold">{{ frontendUsers.count || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">正常账号</div><div class="mt-2 text-lg font-semibold text-emerald-700">{{ frontendUsers.active_count || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">已封禁</div><div class="mt-2 text-lg font-semibold text-red-600">{{ frontendUsers.disabled_count || 0 }}</div></div>
+            <div class="metric"><div class="text-xs text-neutral-500">账户快照</div><div class="mt-2 text-lg font-semibold">{{ frontendUsers.account_snapshot_count || 0 }}</div></div>
             <div class="metric"><div class="text-xs text-neutral-500">最近登录</div><div class="mt-2 text-lg font-semibold">{{ latestFrontendLogin || '-' }}</div></div>
           </div>
 
@@ -1137,6 +1138,7 @@
                     <th class="px-3 py-2 text-left">用户名</th>
                     <th class="px-3 py-2 text-right">模拟资金</th>
                     <th class="px-3 py-2 text-left">跟随策略</th>
+                    <th class="px-3 py-2 text-left">跟随账户</th>
                     <th class="px-3 py-2 text-left">注册 / 最近登录</th>
                     <th class="px-3 py-2 text-left">IP</th>
                     <th class="px-3 py-2 text-right">登录</th>
@@ -1152,6 +1154,10 @@
                     <td class="px-3 py-2 font-semibold">{{ item.username }}</td>
                     <td class="px-3 py-2 text-right">{{ money((item.profile || {}).simulated_cash) }}</td>
                     <td class="px-3 py-2">{{ (item.profile || {}).strategy_model_id || 'active' }}</td>
+                    <td class="px-3 py-2">
+                      <div class="font-semibold" :class="numClass((userAccountSnapshot(item) || {}).return_pct)">{{ userAccountText(item) }}</div>
+                      <div class="text-xs text-neutral-500">{{ userAccountMeta(item) }}</div>
+                    </td>
                     <td class="px-3 py-2">
                       <div>{{ item.created_at || '-' }}</div>
                       <div class="text-xs text-neutral-500">{{ item.last_login_at || '未登录' }}</div>
@@ -1169,7 +1175,7 @@
                       <button @click="openFrontendUserDialog(item)" class="h-8 px-3 border border-neutral-300 bg-white text-sm">管理</button>
                     </td>
                   </tr>
-                  <tr v-if="!filteredFrontendUsers.length"><td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无前台账号</td></tr>
+                  <tr v-if="!filteredFrontendUsers.length"><td colspan="10" class="px-3 py-10 text-center text-neutral-500">暂无前台账号</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1387,6 +1393,36 @@
                 <div><div class="text-xs text-neutral-500">最近登录 IP</div><div class="font-semibold mt-1">{{ selectedFrontendUser.last_login_ip || '-' }}</div></div>
                 <div class="md:col-span-2"><div class="text-xs text-neutral-500">最近浏览器</div><div class="mt-1 break-all">{{ selectedFrontendUser.last_login_user_agent || selectedFrontendUser.registered_user_agent || '-' }}</div></div>
                 <div v-if="selectedFrontendUser.disabled" class="md:col-span-2 text-red-700"><div class="text-xs">封禁原因</div><div class="mt-1">{{ selectedFrontendUser.disabled_reason || '-' }}</div></div>
+              </div>
+            </div>
+
+            <div v-if="selectedFrontendUser" class="border border-neutral-200">
+              <div class="px-3 py-2 border-b border-neutral-100 text-xs text-neutral-500">当前账户诊断</div>
+              <div class="p-3 space-y-3 text-sm">
+                <div class="grid gap-3 md:grid-cols-4">
+                  <div><div class="text-xs text-neutral-500">跟随开始</div><div class="font-semibold mt-1">{{ ((selectedFrontendUser.follow_period || {}).start_date) || ((selectedFrontendUser.profile || {}).follow_start_date) || '-' }}</div></div>
+                  <div><div class="text-xs text-neutral-500">账户资产</div><div class="font-semibold mt-1">{{ userAccountText(selectedFrontendUser) }}</div></div>
+                  <div><div class="text-xs text-neutral-500">快照日期</div><div class="font-semibold mt-1">{{ (userAccountSnapshot(selectedFrontendUser) || {}).as_of || '-' }}</div></div>
+                  <div><div class="text-xs text-neutral-500">来源</div><div class="font-semibold mt-1">{{ (userAccountSnapshot(selectedFrontendUser) || {}).source || '-' }}</div></div>
+                </div>
+                <div class="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <div class="text-xs text-neutral-500 mb-1">当前持仓</div>
+                    <div v-for="pos in userDiagnosticPositions(selectedFrontendUser)" :key="'diag-pos-' + pos.code" class="flex items-center justify-between gap-2 border-t border-neutral-100 py-1">
+                      <span>{{ pos.name || pos.code }} <span class="text-xs text-neutral-500">{{ pos.code }}</span></span>
+                      <span class="font-semibold">{{ fixed(pos.qty, 0) }} / {{ pct(pos.pnl_pct) }}</span>
+                    </div>
+                    <div v-if="!userDiagnosticPositions(selectedFrontendUser).length" class="text-neutral-500">暂无持仓快照</div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-neutral-500 mb-1">最近成交</div>
+                    <div v-for="trade in userDiagnosticTrades(selectedFrontendUser)" :key="'diag-trade-' + trade.date + '-' + trade.time + '-' + trade.code + '-' + trade.side" class="flex items-center justify-between gap-2 border-t border-neutral-100 py-1">
+                      <span>{{ trade.date || '-' }} {{ trade.side || '-' }} {{ trade.code }}</span>
+                      <span class="font-semibold">{{ fixed(trade.qty, 0) }} @ {{ fixed(trade.price, 2) }}</span>
+                    </div>
+                    <div v-if="!userDiagnosticTrades(selectedFrontendUser).length" class="text-neutral-500">暂无成交快照</div>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -1842,6 +1878,35 @@
             throw error;
           }
           return await res.json();
+        },
+        userAccountDiagnostic(user) {
+          return ((user || {}).account_diagnostic || {});
+        },
+        userAccountSnapshot(user) {
+          return this.userAccountDiagnostic(user).account_snapshot || {};
+        },
+        userDiagnosticPositions(user) {
+          const rows = this.userAccountDiagnostic(user).positions || [];
+          return Array.isArray(rows) ? rows : [];
+        },
+        userDiagnosticTrades(user) {
+          const rows = this.userAccountDiagnostic(user).recent_trades || [];
+          return Array.isArray(rows) ? rows : [];
+        },
+        userAccountText(user) {
+          const snapshot = this.userAccountSnapshot(user);
+          if (!snapshot || !snapshot.snapshot_id) return '未生成';
+          return `${this.money(snapshot.total_asset)} / ${this.pct(snapshot.return_pct)}`;
+        },
+        userAccountMeta(user) {
+          const snapshot = this.userAccountSnapshot(user);
+          if (!snapshot || !snapshot.snapshot_id) {
+            const period = (user || {}).follow_period || {};
+            return period.start_date ? `周期 ${period.start_date}` : '等待前台账户刷新';
+          }
+          const pos = Number(snapshot.position_count || 0);
+          const deals = Number(snapshot.deal_count || 0);
+          return `${snapshot.as_of || '-'} · 持仓 ${pos} · 成交 ${deals}`;
         },
         async initAuth() {
           let shouldLoadAdmin = false;

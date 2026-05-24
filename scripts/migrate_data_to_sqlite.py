@@ -417,6 +417,23 @@ def create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
         CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
 
+        CREATE TABLE IF NOT EXISTS user_follow_periods (
+            period_id TEXT PRIMARY KEY,
+            username TEXT,
+            model_id TEXT,
+            simulated_cash REAL,
+            started_at TEXT,
+            start_date TEXT,
+            ended_at TEXT,
+            end_date TEXT,
+            reason TEXT,
+            source TEXT,
+            created_at TEXT,
+            raw_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_follow_periods_user_started ON user_follow_periods(username, started_at);
+        CREATE INDEX IF NOT EXISTS idx_user_follow_periods_active ON user_follow_periods(username, ended_at);
+
         CREATE TABLE IF NOT EXISTS user_follow_snapshots (
             snapshot_id TEXT PRIMARY KEY,
             username TEXT,

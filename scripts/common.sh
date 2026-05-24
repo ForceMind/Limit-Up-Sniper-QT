@@ -230,6 +230,7 @@ required = {
     "strategy_models": ["model_id", "run_id", "params_json", "backtest_json", "raw_json"],
     "strategy_model_records": ["record_id", "model_id", "record_type", "raw_json"],
     "strategy_runtime_snapshots": ["cache_key", "model_id", "as_of", "account_json"],
+    "user_follow_periods": ["period_id", "username", "model_id", "simulated_cash", "started_at", "raw_json"],
     "user_follow_snapshots": ["snapshot_id", "username", "model_id", "follow_start_date", "as_of", "account_json"],
     "user_follow_positions": ["position_id", "snapshot_id", "username", "code", "raw_json"],
     "user_follow_trades": ["trade_id", "snapshot_id", "username", "date", "side", "code", "raw_json"],
