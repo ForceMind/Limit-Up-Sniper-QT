@@ -25,7 +25,15 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.quant.access_audit import access_logs, record_access
+from app.quant.access_audit import (
+    access_logs,
+    access_security,
+    block_ip,
+    client_ip_from_request,
+    is_ip_blocked,
+    record_access,
+    unblock_ip,
+)
 from app.quant.biying_sync import biying_minute_sync
 from app.quant.capital_strategy import (
     DEFAULT_FRONTEND_STRATEGY_ID,
@@ -443,6 +451,9 @@ async def api_auth_middleware(request: Request, call_next):
     status_code = 500
     required_scope = required_scope_for_api(request.url.path, request.method)
     try:
+        if is_ip_blocked(client_ip_from_request(request)):
+            status_code = 403
+            return JSONResponse({"detail": "当前 IP 已被访问审计封禁"}, status_code=403)
         if required_scope:
             try:
                 auth_payload = require_request_scope(request, required_scope)
@@ -1972,6 +1983,96 @@ def _admin_strategy_trading_account(
     return payload
 
 
+def _admin_strategy_runtime_replay(
+    as_of: Optional[str] = None,
+    model_id: Optional[str] = None,
+    initial_cash: Optional[float] = None,
+    start_date: Optional[str] = None,
+    limit: int = 1000,
+) -> Dict[str, Any]:
+    payload = _admin_strategy_trading_account(
+        as_of=as_of,
+        model_id=model_id,
+        initial_cash=initial_cash,
+        start_date=start_date,
+        limit=limit,
+    )
+    account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+    trades = payload.get("history_deals") if isinstance(payload.get("history_deals"), list) else []
+    deliveries = payload.get("delivery_records") if isinstance(payload.get("delivery_records"), list) else trades
+    settlements = payload.get("daily_settlements") if isinstance(payload.get("daily_settlements"), list) else []
+    initial = safe_float(account.get("initial_cash"), safe_float(payload.get("selected_initial_cash"), 0))
+    final_value = safe_float(account.get("total_asset"), initial)
+    return_pct = safe_float(account.get("return_pct"), ((final_value / initial - 1) * 100 if initial > 0 else 0))
+    sell_rows = [
+        item
+        for item in deliveries
+        if str(item.get("side") or item.get("direction") or "").upper() in {"SELL", "卖出"}
+    ]
+    closed_trades = len(sell_rows)
+    wins = [item for item in sell_rows if safe_float(item.get("realized_pnl"), 0) > 0]
+    win_rate = round(len(wins) / closed_trades * 100, 2) if closed_trades else 0.0
+    curve = []
+    cumulative_realized = 0.0
+    for row in sorted([item for item in settlements if isinstance(item, dict)], key=lambda item: str(item.get("date") or "")):
+        cumulative_realized += safe_float(row.get("realized_pnl"), 0)
+        value = initial + cumulative_realized
+        curve.append(
+            {
+                "date": str(row.get("date") or ""),
+                "total_value": round(value, 2),
+                "return_pct": round((value / initial - 1) * 100, 3) if initial > 0 else 0.0,
+                "deal_count": int(safe_float(row.get("deal_count"), 0)),
+            }
+        )
+    if not curve and payload.get("selected_as_of"):
+        curve.append(
+            {
+                "date": payload.get("selected_as_of"),
+                "total_value": round(final_value, 2),
+                "return_pct": round(return_pct, 3),
+                "deal_count": len(trades),
+            }
+        )
+    peak = initial if initial > 0 else 1.0
+    max_drawdown = 0.0
+    for point in curve:
+        value = safe_float(point.get("total_value"), peak)
+        peak = max(peak, value)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - value) / peak * 100)
+    return {
+        "status": payload.get("status") or "ok",
+        "source": "strategy_runtime",
+        "model_id": payload.get("strategy_model_id"),
+        "strategy_model_id": payload.get("strategy_model_id"),
+        "strategy_name": payload.get("strategy_name"),
+        "strategy_model": payload.get("strategy_model"),
+        "mode": "strategy_runtime",
+        "start_date": payload.get("selected_start_date") or payload.get("start_date") or "",
+        "end_date": payload.get("selected_as_of") or payload.get("as_of") or "",
+        "initial_cash": round(initial, 2),
+        "final_value": round(final_value, 2),
+        "return_pct": round(return_pct, 3),
+        "max_drawdown_pct": round(max_drawdown, 3),
+        "win_rate": win_rate,
+        "closed_trades": closed_trades,
+        "trade_count": len(trades),
+        "runtime_signal_count": payload.get("runtime_signal_count", 0),
+        "runtime_generated_at": payload.get("runtime_generated_at", ""),
+        "account": account,
+        "positions": payload.get("positions", []),
+        "trades": trades,
+        "trade_records": trades,
+        "delivery_records": deliveries,
+        "daily_settlements": settlements,
+        "equity_curve": curve,
+        "days": payload.get("days", []),
+        "message": payload.get("message", ""),
+        "strategy_params": payload.get("strategy_params", {}),
+    }
+
+
 @app.get("/api/admin/trading_account")
 def admin_trading_account(
     as_of: Optional[str] = Query(default=None),
@@ -1981,6 +2082,23 @@ def admin_trading_account(
     limit: int = Query(default=1000, ge=1, le=2000),
 ):
     return _admin_strategy_trading_account(
+        as_of=as_of,
+        model_id=model_id,
+        initial_cash=initial_cash,
+        start_date=start_date,
+        limit=limit,
+    )
+
+
+@app.get("/api/admin/strategy_runtime/replay")
+def admin_strategy_runtime_replay(
+    as_of: Optional[str] = Query(default=None),
+    model_id: Optional[str] = Query(default=None),
+    initial_cash: Optional[float] = Query(default=None, ge=1000),
+    start_date: Optional[str] = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=2000),
+):
+    return _admin_strategy_runtime_replay(
         as_of=as_of,
         model_id=model_id,
         initial_cash=initial_cash,
@@ -2581,7 +2699,12 @@ def admin_data_import_status(job_id: str):
 
 @app.get("/api/admin/database/tables")
 def admin_database_tables():
-    return database_overview()
+    cache_ttl = cache_env_int("QT_DATABASE_OVERVIEW_CACHE_TTL_SECONDS", 30, minimum=0, maximum=3600)
+    cache_parts = {"version": APP_VERSION, "data_dir": str(DATA_DIR)}
+    cached = _memory_cache_get("admin_database_overview", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    return _memory_cache_set("admin_database_overview", cache_parts, database_overview())
 
 
 @app.get("/api/admin/database/table/{table_name}")
@@ -2691,6 +2814,32 @@ def admin_access_logs(
     path: Optional[str] = Query(default=None),
 ):
     return access_logs(limit=limit, username=username, ip=ip, path=path)
+
+
+@app.get("/api/admin/access_security")
+def admin_access_security(limit: int = Query(default=120, ge=1, le=500)):
+    return access_security(limit=limit)
+
+
+@app.post("/api/admin/access_security/block")
+def admin_access_security_block(payload: Dict[str, Any] = Body(default_factory=dict)):
+    ip = str((payload or {}).get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip is required")
+    reason = str((payload or {}).get("reason") or "后台手动封禁").strip()
+    result = block_ip(ip, reason=reason, source="manual")
+    result["security"] = access_security(limit=120)
+    return result
+
+
+@app.post("/api/admin/access_security/unblock")
+def admin_access_security_unblock(payload: Dict[str, Any] = Body(default_factory=dict)):
+    ip = str((payload or {}).get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip is required")
+    result = unblock_ip(ip)
+    result["security"] = access_security(limit=120)
+    return result
 
 
 @app.get("/api/admin/frontend_users")
@@ -2860,7 +3009,14 @@ def quant_data_coverage(
     as_of: Optional[str] = Query(default=None),
     top_n: int = Query(default=80, ge=1, le=300),
 ):
-    return data_coverage(as_of=as_of, top_n=top_n)
+    effective_as_of = _frontend_account_as_of(as_of)
+    clean_top_n = max(1, min(int(top_n or 80), 300))
+    cache_ttl = cache_env_int("QT_DATA_COVERAGE_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+    cache_parts = {"as_of": effective_as_of, "top_n": clean_top_n, "version": APP_VERSION}
+    cached = _memory_cache_get("data_coverage", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    return _memory_cache_set("data_coverage", cache_parts, data_coverage(as_of=effective_as_of, top_n=clean_top_n))
 
 
 @app.post("/api/data/kline/fill")
@@ -2924,7 +3080,12 @@ def biying_sync_intraday(
 
 @app.get("/api/ai/usage")
 def quant_ai_usage():
-    return ai_usage_summary()
+    cache_ttl = cache_env_int("QT_AI_STATUS_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+    cache_parts = {"version": APP_VERSION}
+    cached = _memory_cache_get("ai_usage", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    return _memory_cache_set("ai_usage", cache_parts, ai_usage_summary())
 
 
 @app.get("/api/ai/records")
@@ -2933,12 +3094,22 @@ def quant_ai_records(
     code: Optional[str] = Query(default=None),
     source: Optional[str] = Query(default=None),
 ):
-    return ai_records_feed(limit=limit, code=code, source=source)
+    cache_ttl = cache_env_int("QT_AI_STATUS_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+    cache_parts = {"limit": int(limit or 100), "code": code or "", "source": source or "", "version": APP_VERSION}
+    cached = _memory_cache_get("ai_records", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    return _memory_cache_set("ai_records", cache_parts, ai_records_feed(limit=limit, code=code, source=source))
 
 
 @app.get("/api/ai/failures")
 def quant_ai_failures(limit: int = Query(default=100, ge=1, le=500)):
-    return ai_failures(limit=limit)
+    cache_ttl = cache_env_int("QT_AI_STATUS_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+    cache_parts = {"limit": int(limit or 100), "version": APP_VERSION}
+    cached = _memory_cache_get("ai_failures", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    return _memory_cache_set("ai_failures", cache_parts, ai_failures(limit=limit))
 
 
 @app.get("/api/quant/backtest")

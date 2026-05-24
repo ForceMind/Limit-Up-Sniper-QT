@@ -53,6 +53,7 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setenv("QT_DEBUG_API_ALLOW_WRITE", "true")
     monkeypatch.setattr(security_module, "AUTH_FILE", auth_file)
     monkeypatch.setattr(access_audit_module, "ACCESS_LOG_FILE", data_dir / "access_logs.json")
+    monkeypatch.setattr(access_audit_module, "BLOCKED_IP_FILE", data_dir / "blocked_ips.json")
     monkeypatch.setattr(main_module, "DATA_DIR", data_dir)
     monkeypatch.setattr(main_module, "BACKUP_DIR", backup_dir)
     main_module.DATA_IMPORT_JOBS.clear()
@@ -273,6 +274,7 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
 
     snapshot = client.get("/api/admin/snapshot?light=true", headers=headers)
     account = client.get("/api/admin/trading_account?limit=10", headers=headers)
+    replay = client.get("/api/admin/strategy_runtime/replay?model_id=capital_10000&limit=10", headers=headers)
     logs = client.get("/api/admin/access_logs?limit=5", headers=headers)
 
     assert snapshot.status_code == 200
@@ -284,8 +286,78 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
     assert account.status_code == 200
     assert account.json()["strategy_scope"] == "strategy_runtime"
     assert account.json()["strategy_model_id"] == "capital_10000"
+    assert replay.status_code == 200
+    assert replay.json()["source"] == "strategy_runtime"
+    assert replay.json()["strategy_model_id"] == "capital_10000"
     assert logs.status_code == 200
     assert logs.json()["status"] == "ok"
+
+
+def test_admin_access_security_classifies_and_blocks_suspicious_ips(tmp_path, monkeypatch):
+    client, headers, data_dir, _backup_dir = _client(tmp_path, monkeypatch)
+    log_file = data_dir / "access_logs.json"
+    log_file.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-05-24T10:00:00",
+                "items": [
+                    {
+                        "ts": "2026-05-24T09:58:00",
+                        "method": "GET",
+                        "path": "/api/front/snapshot",
+                        "status_code": 200,
+                        "username": "user-a",
+                        "scope": "frontend",
+                        "ip": "8.8.8.8",
+                        "user_agent": "Mozilla/5.0",
+                    },
+                    {
+                        "ts": "2026-05-24T09:59:00",
+                        "method": "GET",
+                        "path": "/.env",
+                        "status_code": 404,
+                        "username": "",
+                        "scope": "public",
+                        "ip": "45.33.32.156",
+                        "user_agent": "zgrab",
+                    },
+                    {
+                        "ts": "2026-05-24T09:59:10",
+                        "method": "GET",
+                        "path": "/api/not_exists",
+                        "status_code": 404,
+                        "username": "",
+                        "scope": "public",
+                        "ip": "45.33.32.156",
+                        "user_agent": "zgrab",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = client.get("/api/admin/access_security", headers=headers)
+    blocked = client.post(
+        "/api/admin/access_security/block",
+        headers=headers,
+        json={"ip": "45.33.32.156", "reason": "unit-test"},
+    )
+    unblocked = client.post(
+        "/api/admin/access_security/unblock",
+        headers=headers,
+        json={"ip": "45.33.32.156"},
+    )
+
+    assert summary.status_code == 200
+    assert any(item["ip"] == "45.33.32.156" for item in summary.json()["items"])
+    assert not any(item["ip"] == "8.8.8.8" for item in summary.json()["items"])
+    assert blocked.status_code == 200
+    assert blocked.json()["blocked"] is True
+    assert any(item["ip"] == "45.33.32.156" for item in blocked.json()["security"]["blocked"])
+    assert unblocked.status_code == 200
+    assert unblocked.json()["blocked"] is False
 
 
 def test_quant_timeline_can_run_against_selected_strategy(tmp_path, monkeypatch):
