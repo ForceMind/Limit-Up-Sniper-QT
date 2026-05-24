@@ -1513,18 +1513,26 @@ def frontend_daily_plan(
 
 @app.get("/api/admin/snapshot")
 def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Query(default=True)):
+    effective_as_of = _frontend_account_as_of(as_of)
     if light:
         jobs_payload = job_manager.status(light=True)
-        dashboard = {
-            "status": "ok",
-            "as_of": as_of,
-            "strategy_params": quant_engine.strategy_params(),
-            "strategy_source": quant_engine.strategy_source(),
-            "timeline": {},
-        }
+        news_payload = _safe_news_feed(as_of=effective_as_of, limit=60, fallback_latest=True)
+        try:
+            dashboard = quant_engine.dashboard(as_of=effective_as_of, include_heavy=False)
+            dashboard["timeline"] = {}
+        except Exception as exc:
+            job_manager._append_log("warning", f"后台轻量信号快照失败：{exc}", job="admin_snapshot", stage="dashboard")
+            dashboard = {
+                "status": "ok",
+                "as_of": effective_as_of,
+                "strategy_params": quant_engine.strategy_params(),
+                "strategy_source": quant_engine.strategy_source(),
+                "recommendations": {"status": "error", "items": [], "latest_events": [], "error": str(exc)},
+                "timeline": {},
+            }
         return {
             "status": "ok",
-            "status_payload": _light_status_payload(as_of=as_of, jobs_payload=jobs_payload),
+            "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=jobs_payload),
             "jobs": jobs_payload,
             "biying": biying_minute_sync.status(),
             "lhb": lhb_status(),
@@ -1533,6 +1541,8 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
             "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
             "frontend_users": _admin_frontend_user_summary(),
             "dashboard": dashboard,
+            "news": news_payload,
+            "market_sentiment": _market_sentiment(news_payload),
         }
     return {
         "status": "ok",
@@ -1546,10 +1556,10 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
         "access_logs": access_logs(limit=120),
         "frontend_users": _admin_frontend_user_summary(),
-        "dashboard": quant_engine.dashboard(as_of=as_of, include_heavy=False),
-        "trading_account": quant_engine.trading_account(as_of=as_of, limit=1000),
-        "news": quant_engine.news_feed(as_of=as_of, limit=120, fallback_latest=True),
-        "coverage": data_coverage(as_of=as_of, top_n=100),
+        "dashboard": quant_engine.dashboard(as_of=effective_as_of, include_heavy=False),
+        "trading_account": quant_engine.trading_account(as_of=effective_as_of, limit=1000),
+        "news": quant_engine.news_feed(as_of=effective_as_of, limit=120, fallback_latest=True),
+        "coverage": data_coverage(as_of=effective_as_of, top_n=100),
         "ai_failures": ai_failures(limit=40),
         "ai_records": ai_records_feed(limit=80),
     }

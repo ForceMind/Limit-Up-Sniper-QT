@@ -45,7 +45,7 @@ GENES: Dict[str, tuple[float, float]] = {
     "stop_loss_pct": (-12, -2),
     "take_profit_pct": (3, 20),
     "max_hold_days": (1, 10),
-    "max_positions": (2, 10),
+    "max_positions": (1, 10),
     "top_n": (3, 20),
     "sentiment_weight": (0.10, 0.55),
     "event_weight": (0.10, 0.55),

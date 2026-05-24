@@ -204,14 +204,22 @@ def test_admin_backup_export_and_clear_sample_state(tmp_path, monkeypatch):
 def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
     client, headers, _data_dir, _backup_dir = _client(tmp_path, monkeypatch)
     monkeypatch.setattr(main_module.job_manager, "status", lambda light=False: {"status": "ok", "running": {}, "scheduler": {}})
+    monkeypatch.setattr(main_module, "_safe_news_feed", lambda **kwargs: {"status": "ok", "items": [{"id": "n1", "text": "测试新闻"}], "events": []})
     monkeypatch.setattr(main_module.biying_minute_sync, "status", lambda: {"status": "disabled"})
     monkeypatch.setattr(main_module, "lhb_status", lambda: {"status": "ok"})
     monkeypatch.setattr(main_module.trade_notifier, "status", lambda: {"status": "disabled"})
     monkeypatch.setattr(main_module.strategy_evolution, "status", lambda: {"status": "idle"})
     monkeypatch.setattr(main_module, "_frontend_strategy_models_payload", lambda include_catalog=True: {"status": "ok", "items": []})
     monkeypatch.setattr(main_module, "_admin_frontend_user_summary", lambda: {"status": "ok", "items": []})
-    monkeypatch.setattr(main_module.quant_engine, "strategy_params", lambda *args, **kwargs: {"buy_threshold": 72})
-    monkeypatch.setattr(main_module.quant_engine, "strategy_source", lambda: {"type": "unit"})
+    monkeypatch.setattr(
+        main_module.quant_engine,
+        "dashboard",
+        lambda as_of=None, include_heavy=False: {
+            "status": "ok",
+            "recommendations": {"items": [{"code": "600000", "name": "测试信号"}], "latest_events": []},
+            "timeline": {"days": [1]},
+        },
+    )
     monkeypatch.setattr(main_module.quant_engine, "trading_account", lambda as_of=None, limit=1000: {"status": "ok", "account": {}})
 
     snapshot = client.get("/api/admin/snapshot?light=true", headers=headers)
@@ -220,6 +228,9 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
 
     assert snapshot.status_code == 200
     assert snapshot.json()["status"] == "ok"
+    assert snapshot.json()["news"]["items"][0]["text"] == "测试新闻"
+    assert snapshot.json()["dashboard"]["recommendations"]["items"][0]["code"] == "600000"
+    assert snapshot.json()["dashboard"]["timeline"] == {}
     assert account.status_code == 200
     assert account.json()["strategy_scope"] == "system_runtime"
     assert logs.status_code == 200

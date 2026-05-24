@@ -1815,6 +1815,10 @@
             if (!this.activeTimeline.start_date) this.loadTimeline(false);
             if (!this.backtestResult.status) this.loadBacktest(false);
           }
+          if (value === 'signals') {
+            this.loadAdminSnapshot(true, true);
+            if (!this.dailyPlan.as_of) this.loadDailyPlan(false);
+          }
           if (value === 'trading') {
             this.loadTradingAccount(true);
           }
@@ -2101,6 +2105,8 @@
         },
         applyAdminSnapshot(snapshot) {
           this.status = snapshot.status_payload || this.status;
+          const dataDate = this.status.data_date || this.status.latest_event_date || '';
+          if (dataDate && (!this.asOf || this.asOf > dataDate)) this.asOf = dataDate;
           this.jobStatus = snapshot.jobs || this.jobStatus;
           if (!this.timelineForm.start_date && this.scheduler.data_backfill_start_date) this.timelineForm.start_date = this.scheduler.data_backfill_start_date;
           if ((!this.dataFillForm.start_date || this.dataFillForm.start_date === '2026-03-01') && this.scheduler.data_backfill_start_date) this.dataFillForm.start_date = this.scheduler.data_backfill_start_date;
