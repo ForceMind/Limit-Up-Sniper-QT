@@ -234,8 +234,9 @@
                   <div>
                     <div class="text-xs text-neutral-500">状态</div>
                     <span class="inline-flex mt-1 px-2 py-1 text-xs rounded-md" :class="statusPillClass(jobState(job.key).status)">
-                      {{ jobState(job.key).status || 'pending' }}
+                      {{ jobStatusText(jobState(job.key).status) }}
                     </span>
+                    <div class="mt-1 text-xs text-neutral-500">{{ jobStatusHint(job.key) }}</div>
                   </div>
                   <div>
                     <div class="text-xs text-neutral-500">开始</div>
@@ -270,8 +271,18 @@
 
           <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
             <div class="panel">
-              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">下一轮调度</div>
+              <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div class="font-semibold">自动调度器</div>
+                  <div class="text-xs text-neutral-500 mt-1">{{ schedulerSummary }}</div>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button @click="startScheduler" :disabled="schedulerWorking || scheduler.enabled" class="h-8 px-3 bg-neutral-900 text-white text-xs disabled:opacity-50">启动自动调度</button>
+                  <button @click="stopScheduler" :disabled="schedulerWorking || !scheduler.enabled" class="h-8 px-3 bg-white border border-neutral-300 text-xs disabled:opacity-50">停止自动调度</button>
+                </div>
+              </div>
               <div class="p-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><div class="text-xs text-neutral-500">当前状态</div><div class="font-semibold mt-1">{{ schedulerStatusText }}</div></div>
                 <div><div class="text-xs text-neutral-500">新闻抓取</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_news_fetch_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">AI分析</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_ai_analysis_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
@@ -1307,7 +1318,10 @@
 
         <section v-if="activeTab === 'ops'" class="space-y-4">
           <div class="panel">
-            <div class="px-4 py-3 border-b border-neutral-200 font-semibold">运维操作</div>
+            <div class="px-4 py-3 border-b border-neutral-200">
+              <div class="font-semibold">运维操作</div>
+              <div class="text-xs text-neutral-500 mt-1">这里都是手动操作；自动调度器在下方单独控制。先确认日期范围，再按需要执行单个任务。</div>
+            </div>
             <div class="p-4 pb-0 grid gap-3 md:grid-cols-3 2xl:grid-cols-[150px_150px_140px_1fr] text-sm">
               <label><span class="block text-xs text-neutral-500 mb-1">补数开始</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">补数结束</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
@@ -1317,21 +1331,90 @@
             <div class="mx-4 mb-2 text-xs text-neutral-500">
               策略复盘：{{ strategyReplayPlanText }}
             </div>
-            <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
-              <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '系统启动') }}</button>
-              <button @click="fetchNews" :disabled="newsFetching && !isJobRunning('news_fetch')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('news_fetch', newsFetching ? '抓取中' : '立即抓新闻') }}</button>
-              <button @click="analyzeAI" :disabled="aiAnalyzing && !isJobRunning('ai_analysis')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('ai_analysis', aiAnalyzing ? '分析中' : '立即AI分析') }}</button>
-              <button @click="syncIntraday" :disabled="syncing && !isJobRunning('market_sync')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('market_sync', syncing ? '同步中' : '同步分时行情') }}</button>
-              <button @click="fillKline" :disabled="fillingKline && !isJobRunning('kline_fill')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('kline_fill', fillingKline ? '补齐中' : '补齐缺失日K') }}</button>
-              <button @click="syncLhb" :disabled="syncingLhb && !isJobRunning('lhb_sync')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('lhb_sync', syncingLhb ? '拉取中' : '拉取龙虎榜') }}</button>
-              <button @click="runTradeCycle" :disabled="runningTrade && !isJobRunning('trade_cycle')" class="h-10 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ jobActionText('trade_cycle', runningTrade ? '交易中' : '运行交易循环') }}</button>
-              <button @click="runStrategyReplay" :disabled="replayingStrategy && !isJobRunning('strategy_replay')" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('strategy_replay', replayingStrategy ? '复盘中' : '运行策略复盘') }}</button>
-              <button @click="testEmail" :disabled="testingEmail" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
-              <button @click="backupData" :disabled="backuping" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份数据' }}</button>
-              <button @click="downloadDataPackage" :disabled="downloadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
-              <button @click="openDataImport" :disabled="uploadingData" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '合并中' : '上传合并数据' }}</button>
-              <button @click="clearSampleState" :disabled="clearingSample" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ clearingSample ? '清理中' : '清理样例持仓' }}</button>
-              <button @click="restartService" :disabled="restarting" class="h-10 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
+            <div class="px-4 pb-4">
+              <div class="border-t border-neutral-200 py-4 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '执行系统启动流程') }}</button>
+                <div class="text-sm text-neutral-700">
+                  <div class="font-semibold">一键按顺序执行完整准备流程</div>
+                  <div class="text-xs text-neutral-500 mt-1">依次抓新闻、AI 分析、补日K、同步龙虎榜、同步分时、运行交易循环、启动策略复盘；适合服务器刚部署、刚导入数据或需要从指定日期重新准备时使用。</div>
+                </div>
+              </div>
+
+              <div class="border-t border-neutral-200 py-4">
+                <div class="font-semibold">数据准备</div>
+                <div class="mt-3 divide-y divide-neutral-100">
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="fetchNews" :disabled="newsFetching && !isJobRunning('news_fetch')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('news_fetch', newsFetching ? '抓取中' : '抓取新闻') }}</button>
+                    <div class="text-sm"><div>拉取最新新闻并刷新事件库。</div><div class="text-xs text-neutral-500 mt-1">适合每天手动补新闻；不会改策略参数。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="fillKline" :disabled="fillingKline && !isJobRunning('kline_fill')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('kline_fill', fillingKline ? '补齐中' : '补齐缺失日K') }}</button>
+                    <div class="text-sm"><div>按上方日期范围补齐有新闻股票的日K行情。</div><div class="text-xs text-neutral-500 mt-1">回测和策略复盘前先执行；会增量写入行情库。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="syncLhb" :disabled="syncingLhb && !isJobRunning('lhb_sync')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('lhb_sync', syncingLhb ? '拉取中' : '拉取龙虎榜') }}</button>
+                    <div class="text-sm"><div>拉取龙虎榜和席位数据，作为策略分析因子。</div><div class="text-xs text-neutral-500 mt-1">按上方日期范围增量补齐；数据量较大时会慢一些。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="syncIntraday" :disabled="syncing && !isJobRunning('market_sync')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('market_sync', syncing ? '同步中' : '同步分时行情') }}</button>
+                    <div class="text-sm"><div>同步指定日期的分时行情。</div><div class="text-xs text-neutral-500 mt-1">用于分时复盘和盘中观察；默认走必盈接口。</div></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="border-t border-neutral-200 py-4">
+                <div class="font-semibold">策略和模拟</div>
+                <div class="mt-3 divide-y divide-neutral-100">
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="analyzeAI" :disabled="aiAnalyzing && !isJobRunning('ai_analysis')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('ai_analysis', aiAnalyzing ? '分析中' : 'AI 分析新闻') }}</button>
+                    <div class="text-sm"><div>把新闻结构化为情绪、事件、行业和个股影响。</div><div class="text-xs text-neutral-500 mt-1">策略信号依赖这些结果；只处理未分析或近期新闻。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="runTradeCycle" :disabled="runningTrade && !isJobRunning('trade_cycle')" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ jobActionText('trade_cycle', runningTrade ? '交易中' : '运行模拟交易') }}</button>
+                    <div class="text-sm"><div>按当前策略运行一次买入、卖出和资金更新。</div><div class="text-xs text-neutral-500 mt-1">这是模拟交易，不会真实下单；结果会进入持仓成交视图。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="runStrategyReplay" :disabled="replayingStrategy && !isJobRunning('strategy_replay')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('strategy_replay', replayingStrategy ? '复盘中' : '运行策略复盘') }}</button>
+                    <div class="text-sm"><div>对全部资金档策略和策略库模型做分批复盘。</div><div class="text-xs text-neutral-500 mt-1">会把每个策略的信号、成交、持仓、资金流水写入策略运行表。</div></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="border-t border-neutral-200 py-4">
+                <div class="font-semibold">数据迁移和维护</div>
+                <div class="mt-3 divide-y divide-neutral-100">
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="backupData" :disabled="backuping" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ backuping ? '备份中' : '备份服务器数据' }}</button>
+                    <div class="text-sm"><div>把服务器当前数据目录打包备份。</div><div class="text-xs text-neutral-500 mt-1">导入数据前建议先备份；备份保存在服务器 backups 目录。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="downloadDataPackage" :disabled="downloadingData" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ downloadingData ? '打包中' : '下载数据包' }}</button>
+                    <div class="text-sm"><div>导出可迁移数据包。</div><div class="text-xs text-neutral-500 mt-1">用于换服务器或本地留档，不包含敏感密钥。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="openDataImport" :disabled="uploadingData" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ uploadingData ? '合并中' : '上传合并数据' }}</button>
+                    <div class="text-sm"><div>上传本地数据包并合并到服务器。</div><div class="text-xs text-neutral-500 mt-1">按新闻、行情、策略运行结果等类型增量合并，不直接覆盖服务器数据。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="clearSampleState" :disabled="clearingSample" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ clearingSample ? '清理中' : '清理样例持仓' }}</button>
+                    <div class="text-sm"><div>清理样例算力、样例电力这类演示持仓。</div><div class="text-xs text-neutral-500 mt-1">不会清理真实股票策略持仓。</div></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="border-t border-neutral-200 pt-4">
+                <div class="font-semibold">系统维护</div>
+                <div class="mt-3 divide-y divide-neutral-100">
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="testEmail" :disabled="testingEmail" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ testingEmail ? '发送中' : '测试邮件' }}</button>
+                    <div class="text-sm"><div>发送一封测试邮件。</div><div class="text-xs text-neutral-500 mt-1">用于确认通知配置是否可用。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="restartService" :disabled="restarting" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ restarting ? '请求中' : '重启服务' }}</button>
+                    <div class="text-sm"><div>请求服务器重启后端服务。</div><div class="text-xs text-neutral-500 mt-1">仅在服务器允许 API 重启时生效；更新代码后使用。</div></div>
+                  </div>
+                </div>
+              </div>
               <input ref="dataPackageInput" type="file" accept=".tar.gz,.tgz,application/gzip" class="hidden" @change="uploadDataPackage">
             </div>
             <pre v-if="adminResult.status" class="mx-4 mb-4 bg-neutral-100 p-3 rounded-md overflow-auto max-h-[180px] text-xs">{{ compactJson(adminResult) }}</pre>
@@ -1649,6 +1732,7 @@
           importPollTimer: null,
           clearingSample: false,
           restarting: false,
+          schedulerWorking: false,
           strategySaving: false,
           fitting: false,
           evolving: false,
@@ -1766,6 +1850,16 @@
         scheduler() { return this.jobStatus.scheduler || {}; },
         runningJobs() { return this.jobStatus.running || {}; },
         pausedJobs() { return this.jobStatus.paused_jobs || {}; },
+        schedulerStatusText() {
+          if (this.scheduler.enabled) return this.scheduler.status === 'starting' ? '启动中' : '自动调度中';
+          if (this.scheduler.status === 'stopped') return '已停止';
+          if (this.scheduler.status === 'disabled') return '手动模式';
+          return this.scheduler.status || '未启动';
+        },
+        schedulerSummary() {
+          if (this.scheduler.enabled) return '自动调度会按间隔触发新闻、AI、行情、交易、策略复盘和进化任务。';
+          return this.scheduler.reason || '当前为手动模式，只会执行你在后台点击的任务。';
+        },
         dataStartDate() { return this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || ''; },
         appVersion() { return this.status.frontend_version || this.status.version || '0.0.0'; },
         isEvolutionRunning() { return this.evolving || this.evolutionStatus.status === 'running'; },
@@ -2041,8 +2135,10 @@
           await this.refreshAll();
           this.startLive();
           window.setTimeout(() => {
-            this.loadDailyPlan(true);
-            this.loadTimeline(true);
+            if (this.activeTab === 'analysis') {
+              this.loadDailyPlan(true);
+              this.loadTimeline(true);
+            }
           }, 1500);
           if (!this.refreshTimer) {
             this.refreshTimer = window.setInterval(() => {
@@ -2281,8 +2377,10 @@
           const snapshot = await this.api(`/api/admin/snapshot?${q.toString()}`);
           this.applyAdminSnapshot(snapshot);
           if (!quiet) {
-            this.loadDailyPlan(true);
-            if (!this.activeTimeline.start_date) this.loadTimeline(true);
+            if (this.activeTab === 'analysis') {
+              this.loadDailyPlan(true);
+              if (!this.activeTimeline.start_date) this.loadTimeline(true);
+            }
           }
           await nextTick();
           this.renderEquityChart();
@@ -2881,6 +2979,31 @@
             this.restarting = false;
           }
         },
+        async startScheduler() {
+          if (!window.confirm('启动自动调度后，服务器会按间隔自动执行新闻、AI、补数、交易、策略复盘等任务。确认启动吗？')) return;
+          this.schedulerWorking = true;
+          try {
+            this.adminResult = await this.api('/api/jobs/scheduler/start', { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.schedulerWorking = false;
+          }
+        },
+        async stopScheduler() {
+          this.schedulerWorking = true;
+          try {
+            this.adminResult = await this.api('/api/jobs/scheduler/stop', { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } catch (err) {
+            this.clientError = String(err.message || err);
+          } finally {
+            this.schedulerWorking = false;
+          }
+        },
         async loadRuntimeConfig(quiet = true) {
           this.configLoading = !quiet;
           try {
@@ -3182,9 +3305,35 @@
           const text = String(status || '').toLowerCase();
           if (text === 'running') return 'bg-sky-100 text-sky-800';
           if (text === 'ok') return 'bg-emerald-100 text-emerald-800';
-          if (text === 'stopped' || text === 'stop_requested') return 'bg-amber-100 text-amber-800';
+          if (text === 'stopped' || text === 'stop_requested' || text === 'paused') return 'bg-amber-100 text-amber-800';
           if (text === 'failed') return 'bg-red-100 text-red-800';
           return 'bg-neutral-100 text-neutral-700';
+        },
+        jobStatusText(status) {
+          const labels = {
+            running: '运行中',
+            ok: '已完成',
+            failed: '失败',
+            stopped: '已停止',
+            stop_requested: '停止中',
+            paused: '已暂停后续',
+            idle: '空闲',
+            disabled: '已禁用',
+            pending: '未开始',
+          };
+          return labels[String(status || 'pending').toLowerCase()] || String(status || '未开始');
+        },
+        jobStatusHint(key) {
+          const state = this.jobState(key);
+          const status = String(state.status || 'pending').toLowerCase();
+          if (status === 'running') return '正在执行，可停止当前任务或暂停后续自动触发';
+          if (status === 'ok') return '最近一次执行成功，结果已写入对应数据表';
+          if (status === 'failed') return '最近一次执行失败，请查看右侧运行日志';
+          if (status === 'stopped') return '任务已被人工停止，不代表数据被回滚';
+          if (status === 'stop_requested') return '已发送停止请求，等待任务检查点结束';
+          if (status === 'paused') return '只暂停后续调度，不会删除已有数据';
+          if (this.isJobPaused(key)) return '已暂停后续调度，点击恢复后可继续自动触发';
+          return '还没有执行记录，手动点击对应按钮后会更新';
         },
         importStatusText(status) {
           const labels = {

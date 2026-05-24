@@ -2279,6 +2279,16 @@ def jobs_logs(
     return job_manager.logs(limit=limit, level=level, job=job)
 
 
+@app.post("/api/jobs/scheduler/start")
+async def jobs_scheduler_start():
+    return job_manager.start()
+
+
+@app.post("/api/jobs/scheduler/stop")
+async def jobs_scheduler_stop():
+    return await job_manager.stop()
+
+
 @app.post("/api/jobs/{job_name}/pause")
 def jobs_pause(job_name: str):
     return job_manager.pause_job(job_name)

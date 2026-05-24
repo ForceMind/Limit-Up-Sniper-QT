@@ -346,12 +346,20 @@ def test_admin_system_startup_and_restart_are_controlled(tmp_path, monkeypatch):
         return {"status": "running", "job": {"name": name, "status": "running"}, "background": True}
 
     monkeypatch.setattr(main_module.job_manager, "run_job_background", fake_background)
+    monkeypatch.setattr(main_module.job_manager, "start", lambda: {"status": "ok", "scheduler": "started"})
+
+    async def fake_scheduler_stop():
+        return {"status": "ok", "scheduler": "stopped"}
+
+    monkeypatch.setattr(main_module.job_manager, "stop", fake_scheduler_stop)
     monkeypatch.setenv("QUANT_ALLOW_API_RESTART", "0")
 
     startup = client.post(
         "/api/admin/system/startup?background=true&start_date=2026-03-01&end_date=2026-03-05&market_codes=12",
         headers=headers,
     )
+    scheduler_start = client.post("/api/jobs/scheduler/start", headers=headers)
+    scheduler_stop = client.post("/api/jobs/scheduler/stop", headers=headers)
     restart = client.post("/api/admin/restart", headers=headers)
 
     assert startup.status_code == 200
@@ -359,6 +367,10 @@ def test_admin_system_startup_and_restart_are_controlled(tmp_path, monkeypatch):
     assert captured["name"] == "system_startup"
     assert captured["payload"]["start_date"] == "2026-03-01"
     assert captured["payload"]["market_codes"] == 12
+    assert scheduler_start.status_code == 200
+    assert scheduler_start.json()["scheduler"] == "started"
+    assert scheduler_stop.status_code == 200
+    assert scheduler_stop.json()["scheduler"] == "stopped"
     assert restart.status_code == 200
     assert restart.json()["status"] == "disabled"
 
