@@ -1671,7 +1671,7 @@ class QuantJobManager:
                     )
                     next_trade_cycle = time.time() + 60
                 ran_task = True
-            if _env_bool("STRATEGY_REPLAY_ENABLED", True) and now_ts >= next_strategy_replay:
+            if _env_bool("STRATEGY_REPLAY_ENABLED", False) and now_ts >= next_strategy_replay:
                 await asyncio.to_thread(
                     self.run_strategy_replay,
                     None,
@@ -1683,7 +1683,7 @@ class QuantJobManager:
                 )
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
                 ran_task = True
-            elif not _env_bool("STRATEGY_REPLAY_ENABLED", True):
+            elif not _env_bool("STRATEGY_REPLAY_ENABLED", False):
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
             if _env_bool("STRATEGY_EVOLUTION_ENABLED", False) and now_ts >= next_strategy_evolution:
                 evolution_state = strategy_evolution.status()
@@ -1744,7 +1744,7 @@ class QuantJobManager:
                     "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
                     "strategy_replay_start_date": self._default_backfill_start_date(),
                     "strategy_replay_batch_days": self._strategy_replay_batch_days(),
-                    "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", True),
+                    "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", False),
                     "next_strategy_evolution_at": datetime.fromtimestamp(next_strategy_evolution, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
                     "strategy_evolution_interval_seconds": self._strategy_evolution_interval_seconds(),
                     "strategy_evolution_start_date": self._default_backfill_start_date(),

@@ -287,7 +287,7 @@
                 <div><div class="text-xs text-neutral-500">AI分析</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_ai_analysis_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">交易循环</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_trade_cycle_at) }}</div></div>
-                <div><div class="text-xs text-neutral-500">策略复盘</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_strategy_replay_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">策略复盘</div><div class="font-semibold mt-1">{{ scheduler.strategy_replay_enabled ? shortTime(scheduler.next_strategy_replay_at) : '手动' }}</div></div>
                 <div><div class="text-xs text-neutral-500">前台预计算</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_frontend_payload_precompute_at) }}</div></div>
               </div>
             </div>
@@ -1011,7 +1011,7 @@
                 <div class="font-semibold">策略回测详情与交割单</div>
                 <div class="text-xs text-neutral-500 mt-1">{{ selectedStrategyBacktest.model_name || '先在上方策略表点击“查看交割单”' }}</div>
               </div>
-              <button v-if="selectedStrategyBacktest.model_id" @click="loadStrategyBacktest(selectedStrategyBacktest.model)" :disabled="strategyBacktestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyBacktestLoading ? '加载中' : '重新回测' }}</button>
+              <button v-if="selectedStrategyBacktest.model_id" @click="loadStrategyBacktest(selectedStrategyBacktest.model, true)" :disabled="strategyBacktestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyBacktestLoading ? '加载中' : '手动重新回测' }}</button>
             </div>
             <div v-if="selectedStrategyBacktest.status" class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
               <div class="metric"><div class="text-xs text-neutral-500">起止</div><div class="mt-2 font-semibold">{{ selectedStrategyBacktest.start_date || '-' }} / {{ selectedStrategyBacktest.end_date || '-' }}</div></div>
@@ -1369,7 +1369,7 @@
               <label><span class="block text-xs text-neutral-500 mb-1">补数开始</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">补数结束</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="5000" class="w-full h-9 px-2 border border-neutral-300"></label>
-              <div class="text-xs text-neutral-500 flex items-end pb-2">重启后默认不自动跑任务。系统启动、日K补齐、龙虎榜同步、策略复盘都会使用这个范围；不填开始则使用服务器已有数据最早日期。</div>
+              <div class="text-xs text-neutral-500 flex items-end pb-2">重启后默认不自动跑任务。日K补齐、龙虎榜同步会使用这个范围；策略复盘、训练和回测只手动触发。</div>
             </div>
             <div class="mx-4 mb-2 text-xs text-neutral-500">
               策略复盘：{{ strategyReplayPlanText }}
@@ -1379,7 +1379,7 @@
                 <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '执行系统启动流程') }}</button>
                 <div class="text-sm text-neutral-700">
                   <div class="font-semibold">一键按顺序执行完整准备流程</div>
-                  <div class="text-xs text-neutral-500 mt-1">依次抓新闻、AI 分析、补日K、同步龙虎榜、同步分时、运行交易循环、启动策略复盘；适合服务器刚部署、刚导入数据或需要从指定日期重新准备时使用。</div>
+                  <div class="text-xs text-neutral-500 mt-1">依次抓新闻、AI 分析、补日K、同步龙虎榜、同步分时、运行交易循环；默认不启动策略复盘、训练或回测。</div>
                 </div>
               </div>
 
@@ -1724,7 +1724,7 @@
             { key: 'ops', label: '运维' },
           ],
           jobCards: [
-            { key: 'system_startup', label: '系统启动', desc: '手动执行新闻、AI、日K、龙虎榜、分时、交易和策略复盘流程' },
+            { key: 'system_startup', label: '系统启动', desc: '手动执行新闻、AI、日K、龙虎榜、分时和交易流程' },
             { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
             { key: 'market_sync', label: '分时行情', desc: '交易时段同步必盈数据' },
@@ -1909,7 +1909,7 @@
           return this.scheduler.status || '未启动';
         },
         schedulerSummary() {
-          if (this.scheduler.enabled) return '自动调度会按间隔触发新闻、AI、行情、交易、策略复盘和进化任务。';
+          if (this.scheduler.enabled) return '自动调度会按间隔触发新闻、AI、行情、交易和前台预计算；策略复盘、训练和回测只手动触发。';
           return this.scheduler.reason || '当前为手动模式，只会执行你在后台点击的任务。';
         },
         dataStartDate() { return this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || ''; },
@@ -3100,7 +3100,7 @@
           }
         },
         async startScheduler() {
-          if (!window.confirm('启动自动调度后，服务器会按间隔自动执行新闻、AI、补数、交易、策略复盘等任务。确认启动吗？')) return;
+          if (!window.confirm('启动自动调度后，服务器会按间隔自动执行新闻、AI、补数、交易和前台预计算；策略复盘、训练和回测不会自动执行。确认启动吗？')) return;
           this.schedulerWorking = true;
           try {
             this.adminResult = await this.api('/api/jobs/scheduler/start', { method: 'POST' });
@@ -3260,7 +3260,7 @@
           ];
           return `基础参数：${parts.join(' · ')}`;
         },
-        async loadStrategyBacktest(model) {
+        async loadStrategyBacktest(model, recompute = false) {
           if (!model || !model.id) return;
           this.strategyBacktestLoading = true;
           this.clientError = '';
@@ -3269,6 +3269,7 @@
               model_id: model.id,
               mode: this.tradeMode || 'intraday',
               limit: '0',
+              recompute: String(Boolean(recompute)),
             });
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
@@ -3300,7 +3301,7 @@
           this.backtestLoading = !quiet;
           try {
             this.ensureTimelineFormDefaults();
-            const q = new URLSearchParams({ auto_fill: 'false', limit: '500', mode: this.tradeMode || 'intraday' });
+            const q = new URLSearchParams({ auto_fill: 'false', limit: '500', mode: this.tradeMode || 'intraday', recompute: 'true' });
             if (this.timelineForm.model_id) q.set('model_id', this.timelineForm.model_id);
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
@@ -3402,7 +3403,7 @@
           const payload = this.jobPayload(key);
           const start = result.start_date || payload.start_date || '-';
           const end = result.end_date || result.date || payload.end_date || payload.date || '-';
-          if (key === 'system_startup') return `手动启动流程：新闻、AI、日K、龙虎榜、分时、交易、策略复盘；范围 ${start} 到 ${end}`;
+          if (key === 'system_startup') return `手动启动流程：新闻、AI、日K、龙虎榜、分时、交易；策略复盘/训练/回测不自动执行；范围 ${start} 到 ${end}`;
           if (key === 'news_fetch') return `新闻抓取：最近 ${payload.hours || 24} 小时，抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
           if (key === 'ai_analysis') return `AI分析：截至 ${payload.as_of || this.asOf || '-'}，选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
           if (key === 'market_sync') return `分时行情：日期 ${payload.date || result.date || this.asOf || '-'}，来源 ${payload.source || '-'}，请求 ${result.requested || 0}，成功 ${result.fetched || 0}`;

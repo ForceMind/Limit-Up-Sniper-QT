@@ -123,6 +123,36 @@ def test_admin_frontend_precompute_job_endpoint(tmp_path, monkeypatch):
     assert called["limit_days"] == 120
 
 
+def test_model_backtest_reads_saved_records_by_default(tmp_path, monkeypatch):
+    client, headers, _data_dir, _backup_dir = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        main_module,
+        "_find_strategy_model",
+        lambda model_id: {
+            "id": "model-a",
+            "name": "Saved Model",
+            "params": {"account_initial_cash": 100000},
+            "backtest": {"return_pct": 3.2, "win_rate": 0.5, "trade_count": 1, "initial_cash": 100000, "end_date": "2026-05-20"},
+            "trade_records": [{"date": "2026-05-20", "side": "BUY", "code": "600000", "qty": 100, "price": 10}],
+            "delivery_records": [{"date": "2026-05-20", "code": "600000", "side": "BUY"}],
+            "daily_settlements": [],
+        },
+    )
+    monkeypatch.setattr(
+        main_module.quant_engine,
+        "walk_forward_intraday",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not recompute")),
+    )
+
+    response = client.get("/api/quant/model/backtest?model_id=model-a", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "strategy_model_records"
+    assert body["summary"]["return_pct"] == 3.2
+    assert body["trade_records"][0]["code"] == "600000"
+
+
 def test_admin_database_endpoints_return_tables_and_errors(tmp_path, monkeypatch):
     client, headers, data_dir, _backup_dir = _client(tmp_path, monkeypatch)
     db_path = data_dir / "quant_data.sqlite3"

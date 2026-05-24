@@ -56,12 +56,13 @@ NEWS_FETCH_INTERVAL_SECONDS=3600
 AI_ANALYSIS_INTERVAL_SECONDS=3600
 MARKET_SYNC_INTERVAL_SECONDS=300
 TRADE_CYCLE_INTERVAL_SECONDS=300
-STRATEGY_REPLAY_ENABLED=true
+STRATEGY_REPLAY_ENABLED=false
 STRATEGY_REPLAY_START_DATE=2026-03-01
 STRATEGY_REPLAY_INTERVAL_SECONDS=3600
 STRATEGY_REPLAY_MODE=intraday
 QT_STRATEGY_REPLAY_BATCH_DAYS=15
 QT_STRATEGY_REPLAY_MAX_MODELS=24
+QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY=false
 STRATEGY_EVOLUTION_ENABLED=false
 STRATEGY_EVOLUTION_INTERVAL_SECONDS=21600
 STRATEGY_EVOLUTION_GENERATIONS=1
@@ -278,6 +279,8 @@ v0.2.33 起，用户注册、设置模拟资金或切换策略会写入 `user_fo
 
 v0.2.48 起，前台推荐和日计划缓存未命中时默认触发 `frontend_payload_precompute` 后台任务，接口返回 pending，不再同步等待慢计算。后台“运维”页可以手动执行“预计算前台缓存”；调度器开启时也会按 `QT_FRONT_PAYLOAD_PRECOMPUTE_INTERVAL_SECONDS` 自动预计算。默认使用独立进程，可用 `QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED=false` 临时改回线程模式；如需让未命中接口恢复同步计算，可设置 `QT_FRONT_PAYLOAD_DEFER_MISSES=false` 后重启。
 
+v0.2.49 起，策略复盘、模型训练和回测默认只手动触发。`STRATEGY_REPLAY_ENABLED=false` 时自动调度器不会跑策略复盘；`QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY=false` 时后台“系统启动”只执行新闻、AI、补数、行情和模拟交易，不会顺手跑复盘。策略库查看交割单默认读取已保存模型记录，只有点击“手动重新回测”才会实时重算。日常生产建议保持这两个值为 false，只在需要更新模型运行结果时手动点击“运行策略复盘”或“启动进化”。
+
 v0.2.29 起，后台上传合并数据包时，`quant_data.sqlite3` 不再一次性读入内存，而是流式写入临时 SQLite 后再合并。58MB 这类压缩包本身没有超过上传限制；如果旧版本合并失败，先更新到 v0.2.29 再重新上传。
 
 如果只是迁移本地跑好的策略运行结果，优先使用 `python scripts/package_strategy_runtime_export.py` 生成小包。该小包只包含 `strategy_runtime_*` 运行表，不包含新闻、行情、K 线 JSON 和账号配置，适合把本地资金档复盘结果合并到服务器。
@@ -300,7 +303,7 @@ http://服务器IP:8000/
 
 首次部署会自动生成随机后台入口，固定 `/admin` 不再公开。首次打开后台会进入初始化页，需要创建两个账号：后台管理员账号和前台交易终端账号。后台账号用于配置密钥、触发任务和运维操作；前台账号只用于查看交易终端。账号哈希保存在 `backend/data/auth.json`，运行配置保存在 `backend/data/config.json`，二者都属于服务器本地文件，不要提交到 Git。
 
-部署后如果页面仍显示样例数据，说明生产数据链路还没有跑起来。先在后台“配置与安全”填写 DeepSeek、必盈、邮件等服务器本地配置，再到“运维”点击“系统启动”。该按钮会按顺序执行新闻抓取、AI 分析、行情同步、交易循环和策略复盘，运行日志会在右侧日志栏显示中文状态。
+部署后如果页面仍显示样例数据，说明生产数据链路还没有跑起来。先在后台“配置与安全”填写 DeepSeek、必盈、邮件等服务器本地配置，再到“运维”点击“系统启动”。该按钮会按顺序执行新闻抓取、AI 分析、行情同步和交易循环；策略复盘、模型训练和回测需要单独手动触发，运行日志会在右侧日志栏显示中文状态。
 
 检查服务器是否已经保留从 3 月开始的新闻和行情：
 
@@ -371,7 +374,7 @@ curl -H "Authorization: Bearer $QT_ADMIN_TOKEN" -X POST "http://127.0.0.1:8000/a
 - AI 分析：默认每 1 小时增量调用 DeepSeek，将新闻结构化为事件、行业、个股、利好利空和影响强度
 - 行情同步：仅交易日 09:30-11:30、13:00-15:00 使用必盈接口补充分时 K 线；日 K 补齐使用必盈历史行情并写入 SQLite；周末和非开盘时间不触发盘中行情同步
 - 模拟交易：按当前模型触发买入/卖出，触发后可通过 SMTP 发送邮件
-- 策略复盘：默认从 `2026-03-01` 开始，每小时用新闻和行情滚动复盘；v0.2.28 起自动调度按 `QT_STRATEGY_REPLAY_BATCH_DAYS` 分批推进，默认每批 15 天，并用 `strategy_replay_cursor` 记录下一批起点；v0.2.24 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`、`strategy_runtime_snapshots`、`strategy_runtime_settlements`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
+- 策略复盘：默认只手动触发；手动运行时可从 `2026-03-01` 开始按 `QT_STRATEGY_REPLAY_BATCH_DAYS` 分批推进，默认每批 15 天，并用 `strategy_replay_cursor` 记录下一批起点；v0.2.24 起会按资金档预设和策略库模型批量写入 `strategy_daily_signals`、`strategy_runtime_trades`、`strategy_runtime_positions`、`strategy_runtime_snapshots`、`strategy_runtime_settlements`，可用 `QT_STRATEGY_REPLAY_MAX_MODELS` 限制单轮最多复盘策略数
 - 遗传进化：多组参数并行回放，按收益、回撤、胜率选择最优参数，后台可手动应用
 - 模型回放：前台和后台按全周期线性回放计算买入、卖出、收益和交割单
 

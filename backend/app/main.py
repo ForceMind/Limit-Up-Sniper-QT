@@ -1668,6 +1668,64 @@ def _model_backtest_payload(
     }
 
 
+def _stored_model_backtest_payload(model: Dict[str, Any], limit: int = 0) -> Dict[str, Any]:
+    backtest = model.get("backtest") if isinstance(model.get("backtest"), dict) else {}
+    trades = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
+    deliveries = model.get("delivery_records") if isinstance(model.get("delivery_records"), list) else []
+    settlements = model.get("daily_settlements") if isinstance(model.get("daily_settlements"), list) else []
+    params = quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {})
+    if not backtest and not trades and not deliveries and not settlements:
+        return {
+            "status": "missing",
+            "source": "strategy_model_records",
+            "model": model,
+            "model_id": model.get("id"),
+            "model_name": model.get("name"),
+            "message": "该模型还没有保存的回测交割单；需要时请手动重新回测或运行策略复盘。",
+            "summary": {},
+            "trade_records": [],
+            "delivery_records": [],
+            "daily_settlements": [],
+            "equity_curve": [],
+            "days": [],
+            "strategy_params": params,
+        }
+    initial_cash = backtest.get("initial_cash") or params.get("account_initial_cash")
+    as_of = backtest.get("end_date") or model.get("generated_at")
+    account = quant_engine.account_from_trades(trades, initial_cash=initial_cash, as_of=as_of, limit=limit) if trades else {}
+    return {
+        "status": "ok",
+        "source": "strategy_model_records",
+        "model": model,
+        "model_id": model.get("id"),
+        "model_name": model.get("name"),
+        "mode": backtest.get("mode") or "",
+        "start_date": backtest.get("start_date") or "",
+        "end_date": backtest.get("end_date") or "",
+        "summary": {
+            "initial_cash": initial_cash,
+            "final_value": backtest.get("final_value"),
+            "return_pct": backtest.get("return_pct", model.get("return_pct", 0)),
+            "max_drawdown_pct": backtest.get("max_drawdown_pct", model.get("max_drawdown_pct", 0)),
+            "annualized_return_pct": backtest.get("annualized_return_pct", 0),
+            "sharpe_ratio": backtest.get("sharpe_ratio", 0),
+            "profit_factor": backtest.get("profit_factor", 0),
+            "win_rate": backtest.get("win_rate", model.get("win_rate", 0)),
+            "closed_trades": backtest.get("closed_trades", model.get("closed_trades", 0)),
+            "trade_count": backtest.get("trade_count", len(trades)),
+            "total_fees": backtest.get("total_fees", 0),
+        },
+        "account": account.get("account", {}),
+        "positions": account.get("positions", []),
+        "trade_records": trades if limit <= 0 else trades[-limit:],
+        "delivery_records": deliveries or account.get("delivery_records", []),
+        "daily_settlements": settlements or account.get("daily_settlements", []),
+        "equity_curve": model.get("equity_curve") if isinstance(model.get("equity_curve"), list) else [],
+        "days": model.get("days") if isinstance(model.get("days"), list) else [],
+        "strategy_params": params,
+    }
+
+
 def _quant_timeline_payload(
     *,
     model_id: Optional[str],
@@ -2380,9 +2438,13 @@ def quant_strategy_model_backtest(
     end_date: Optional[str] = Query(default=None),
     mode: str = Query(default="intraday"),
     limit: int = Query(default=0, ge=0, le=5000),
+    recompute: bool = Query(default=False),
 ):
+    model = _find_strategy_model(model_id)
+    if not recompute:
+        return _stored_model_backtest_payload(model, limit=limit)
     return _model_backtest_payload(
-        model=_find_strategy_model(model_id),
+        model=model,
         start_date=start_date,
         end_date=end_date,
         mode=mode,
@@ -2670,6 +2732,7 @@ def _run_system_startup_flow(
     ai_items: int,
     market_codes: int,
     notify: bool,
+    run_strategy_replay: bool = False,
 ) -> Dict[str, Any]:
     steps = []
 
@@ -2746,20 +2809,39 @@ def _run_system_startup_flow(
     trade_result = job_manager.run_trade_cycle(date=target_date, notify=notify)
     steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
 
-    stopped = stopped_before("策略复盘")
-    if stopped:
-        return stopped
-    job_manager.update_progress("system_startup", 94, "策略复盘", {"step": "strategy_replay", "start_date": replay_start_date})
-    replay_result = job_manager.run_strategy_replay(
-        start_date=replay_start_date,
-        end_date=target_date,
-        mode="intraday",
-        batch_days=15,
-        use_cursor=True,
-    )
-    steps.append({"name": "策略复盘", "job": "strategy_replay", "result": replay_result})
+    if run_strategy_replay:
+        stopped = stopped_before("策略复盘")
+        if stopped:
+            return stopped
+        job_manager.update_progress("system_startup", 94, "策略复盘", {"step": "strategy_replay", "start_date": replay_start_date})
+        replay_result = job_manager.run_strategy_replay(
+            start_date=replay_start_date,
+            end_date=target_date,
+            mode="intraday",
+            batch_days=15,
+            use_cursor=True,
+        )
+        steps.append({"name": "策略复盘", "job": "strategy_replay", "result": replay_result})
+    else:
+        job_manager.update_progress(
+            "system_startup",
+            94,
+            "跳过策略复盘，训练和回测仅手动触发",
+            {"step": "strategy_replay", "manual_only": True},
+        )
+        steps.append(
+            {
+                "name": "策略复盘",
+                "job": "strategy_replay",
+                "result": {
+                    "status": "skipped",
+                    "manual_only": True,
+                    "message": "策略复盘、训练和回测默认不随系统启动执行，请在后台手动触发。",
+                },
+            }
+        )
 
-    failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running"}]
+    failed = [step for step in steps if (step.get("result") or {}).get("status") not in {"ok", "running", "skipped"}]
     return {
         "status": "partial" if failed else "ok",
         "message": "系统启动流程完成" if not failed else "系统启动流程完成，但有步骤未成功，请查看运行日志",
@@ -2780,6 +2862,7 @@ def admin_system_startup(
     market_codes: int = Query(default=200, ge=1, le=1000),
     notify: bool = Query(default=True),
     background: bool = Query(default=True),
+    run_strategy_replay: bool = Query(default=_env_flag("QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY", False)),
 ):
     target_date = str(end_date or date or quant_engine.latest_event_date() or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
     replay_start_date = str(start_date or quant_engine.first_data_date() or "2026-03-01").strip()
@@ -2792,6 +2875,7 @@ def admin_system_startup(
         "ai_items": ai_items,
         "market_codes": market_codes,
         "notify": notify,
+        "run_strategy_replay": run_strategy_replay,
     }
     def runner() -> Dict[str, Any]:
         return _run_system_startup_flow(
@@ -2802,6 +2886,7 @@ def admin_system_startup(
             ai_items=ai_items,
             market_codes=market_codes,
             notify=notify,
+            run_strategy_replay=run_strategy_replay,
         )
     if background:
         return job_manager.run_job_background(
