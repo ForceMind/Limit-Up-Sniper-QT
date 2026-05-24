@@ -209,7 +209,41 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "lhb_status", lambda: {"status": "ok"})
     monkeypatch.setattr(main_module.trade_notifier, "status", lambda: {"status": "disabled"})
     monkeypatch.setattr(main_module.strategy_evolution, "status", lambda: {"status": "idle"})
-    monkeypatch.setattr(main_module, "_frontend_strategy_models_payload", lambda include_catalog=True: {"status": "ok", "items": []})
+    monkeypatch.setattr(
+        main_module.strategy_evolution,
+        "model_signal_feed",
+        lambda **kwargs: {
+            "status": "ok",
+            "data_date": "2026-05-20",
+            "items": [
+                {
+                    "model_id": "capital_10000",
+                    "model_name": "小资金策略",
+                    "signal_count": 1,
+                    "signals": [{"code": "600000", "name": "测试信号", "buy_score": 80}],
+                }
+            ],
+            "total": 1,
+            "model_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_frontend_strategy_models_payload",
+        lambda include_catalog=True: {
+            "status": "ok",
+            "capital_presets": [
+                {
+                    "id": "capital_10000",
+                    "name": "Small Capital",
+                    "params": {"account_initial_cash": 10000},
+                    "has_runtime_data": True,
+                    "runtime_start_date": "2026-05-01",
+                }
+            ],
+            "items": [],
+        },
+    )
     monkeypatch.setattr(main_module, "_admin_frontend_user_summary", lambda: {"status": "ok", "items": []})
     monkeypatch.setattr(
         main_module.quant_engine,
@@ -220,7 +254,20 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
             "timeline": {"days": [1]},
         },
     )
-    monkeypatch.setattr(main_module.quant_engine, "trading_account", lambda as_of=None, limit=1000: {"status": "ok", "account": {}})
+    monkeypatch.setattr(main_module.strategy_evolution, "runtime_model_version", lambda model: "test-version")
+    monkeypatch.setattr(
+        main_module.strategy_evolution,
+        "load_runtime_account",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "account": {"initial_cash": 10000, "total_asset": 10100, "return_pct": 1},
+            "positions": [],
+            "history_deals": [],
+            "delivery_records": [],
+            "daily_settlements": [],
+            "strategy_account_source": "strategy_runtime",
+        },
+    )
 
     snapshot = client.get("/api/admin/snapshot?light=true", headers=headers)
     account = client.get("/api/admin/trading_account?limit=10", headers=headers)
@@ -231,8 +278,10 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
     assert snapshot.json()["news"]["items"][0]["text"] == "测试新闻"
     assert snapshot.json()["dashboard"]["recommendations"]["items"][0]["code"] == "600000"
     assert snapshot.json()["dashboard"]["timeline"] == {}
+    assert snapshot.json()["model_signals"]["items"][0]["model_id"] == "capital_10000"
     assert account.status_code == 200
-    assert account.json()["strategy_scope"] == "system_runtime"
+    assert account.json()["strategy_scope"] == "strategy_runtime"
+    assert account.json()["strategy_model_id"] == "capital_10000"
     assert logs.status_code == 200
     assert logs.json()["status"] == "ok"
 

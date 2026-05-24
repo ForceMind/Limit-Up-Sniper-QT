@@ -260,6 +260,7 @@ def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monk
         model_version=evolution.runtime_model_version(model),
         params=params,
     )
+    signal_feed = evolution.model_signal_feed(as_of="2026-05-04", limit_models=4, limit_per_model=5)
 
     assert persisted["status"] == "ok"
     assert persisted["signal_count"] == 2
@@ -268,12 +269,31 @@ def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monk
     assert persisted["settlement_count"] == 3
     assert persisted["snapshot_count"] == 2
     assert account
-    assert account["strategy_account_source"] == "runtime_tables"
+    assert account["strategy_account_source"] == "runtime_snapshot"
     assert account["follow_start_date"] == "2026-05-02"
     assert account["runtime_signal_count"] == 1
     assert account["runtime_settlement_count"] == 2
     assert account["runtime_snapshot_as_of"] == "2026-05-03"
+    assert account["positions"][0]["code"] == "600003"
     assert {deal["code"] for deal in account["history_deals"]} == {"600003"}
+    assert signal_feed["data_date"] == "2026-05-03"
+    assert signal_feed["model_count"] == 1
+    assert signal_feed["items"][0]["signals"][0]["code"] == "600003"
+
+    relaxed = evolution.load_runtime_account(
+        "model-runtime-a",
+        100000,
+        "2026-05-06",
+        "2026-05-06",
+        50,
+        model_version="outdated-version",
+        params={"account_initial_cash": 100000, "max_positions": 3, "buy_threshold": 99},
+    )
+    assert relaxed
+    assert relaxed["runtime_fallback_latest_snapshot"] is True
+    assert relaxed["runtime_relaxed_model_version"] is True
+    assert relaxed["runtime_relaxed_params_hash"] is True
+    assert relaxed["positions"][0]["code"] == "600003"
 
 
 def test_runtime_model_summary_uses_daily_runtime_tables(tmp_path, monkeypatch):

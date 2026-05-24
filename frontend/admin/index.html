@@ -290,36 +290,46 @@
         <section v-if="activeTab === 'signals'" class="space-y-4">
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
-              <div class="font-semibold">今日买入候选</div>
-              <div class="text-xs text-neutral-500">{{ dailyPlan.as_of || asOf || '-' }}</div>
+              <div>
+                <div class="font-semibold">不同模型买入信号</div>
+                <div class="text-xs text-neutral-500 mt-1">来自策略复盘表，新闻在下方按全局数据展示</div>
+              </div>
+              <div class="text-xs text-neutral-500 text-right">
+                <div>信号日期 {{ modelSignalDate || '-' }}</div>
+                <div v-if="modelSignals.fallback_latest">已自动切到最近有信号日期</div>
+              </div>
             </div>
             <div class="table-wrap overflow-auto max-h-[520px]">
               <table class="w-full text-sm">
                 <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
                   <tr>
+                    <th class="px-3 py-2 text-left min-w-[180px]">策略模型</th>
                     <th class="px-3 py-2 text-left">股票</th>
-                    <th class="px-3 py-2 text-left">动作</th>
-                    <th class="px-3 py-2 text-right">买入</th>
-                    <th class="px-3 py-2 text-right">卖出</th>
-                    <th class="px-3 py-2 text-left">行业 / 事件</th>
-                    <th class="px-3 py-2 text-left min-w-[320px]">模型解释</th>
+                    <th class="px-3 py-2 text-left">信号 / 执行</th>
+                    <th class="px-3 py-2 text-right">买入评分</th>
+                    <th class="px-3 py-2 text-right">卖出评分</th>
+                    <th class="px-3 py-2 text-left min-w-[360px]">模型理由</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-neutral-100">
-                  <tr v-for="item in recommendations" :key="item.code" class="hover:bg-neutral-50">
+                  <tr v-for="item in modelSignalRows" :key="item.row_key" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">
+                      <div class="font-semibold">{{ item.model_name || item.model_id }}</div>
+                      <div class="text-xs text-neutral-500">{{ item.model_id }} · {{ money(item.initial_cash) }}</div>
+                      <div class="text-xs text-neutral-500">收益 {{ fixed(item.return_pct) }}% · 信号 {{ item.model_signal_count || 0 }}</div>
+                    </td>
                     <td class="px-3 py-2 font-semibold">{{ item.name }} <span class="text-xs text-neutral-500">{{ item.code }}</span></td>
-                    <td class="px-3 py-2"><span class="px-2 py-1 rounded-md text-xs" :class="actionClass(item.action)">{{ item.action || '-' }}</span></td>
+                    <td class="px-3 py-2">
+                      <span class="px-2 py-1 rounded-md text-xs" :class="actionClass(item.action)">{{ item.action || '买入候选' }}</span>
+                      <div class="text-xs text-neutral-500 mt-1">{{ item.date || '-' }} → {{ item.execute_on || '-' }}</div>
+                    </td>
                     <td class="px-3 py-2 text-right text-red-600 font-semibold">{{ fixed(item.buy_score) }}</td>
                     <td class="px-3 py-2 text-right text-green-700 font-semibold">{{ fixed(item.sell_score) }}</td>
-                    <td class="px-3 py-2">{{ item.industry || '-' }}<div class="text-xs text-neutral-500">{{ item.event_type || '-' }}</div></td>
                     <td class="px-3 py-2">
-                      <div class="text-xs text-neutral-500">
-                        情绪 {{ fixed((item.components || {}).sentiment_score) }} · 事件 {{ fixed((item.components || {}).event_score) }} · 技术 {{ fixed((item.components || {}).technical_score) }} · 风控 {{ fixed((item.components || {}).risk_score) }}
-                      </div>
                       <div class="mt-1 line-clamp-2">{{ item.reason || '-' }}</div>
                     </td>
                   </tr>
-                  <tr v-if="!recommendations.length"><td colspan="6" class="px-3 py-10 text-center text-neutral-500">暂无推荐</td></tr>
+                  <tr v-if="!modelSignalRows.length"><td colspan="6" class="px-3 py-10 text-center text-neutral-500">暂无模型信号，请先运行策略复盘或进化训练生成买入信号</td></tr>
                 </tbody>
               </table>
             </div>
@@ -357,12 +367,38 @@
         </section>
 
         <section v-if="activeTab === 'trading'" class="space-y-4">
-          <div class="panel px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <div class="font-semibold">{{ tradingAccount.strategy_name || '后台基准账户（仅用于诊断）' }}</div>
-              <div class="text-xs text-neutral-500 mt-1">正式产品按“用户账号 + 跟随策略”独立运行；这里仅显示后台基准参数跑出的诊断账户，不代表任何用户正在跟随。</div>
+          <div class="panel p-4 space-y-3">
+            <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <div class="font-semibold">{{ tradingAccount.strategy_name || '策略账户' }}</div>
+                <div class="text-xs text-neutral-500 mt-1">这里查看不同策略的持仓、成交、交割单和资金流水；前台用户选择策略后按自己的资金跟随。</div>
+              </div>
+              <button @click="loadTradingAccount(false)" :disabled="tradingLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ tradingLoading ? '加载中' : '刷新策略账户' }}</button>
             </div>
-            <button @click="loadTradingAccount(false)" :disabled="tradingLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ tradingLoading ? '加载中' : '刷新交易账户' }}</button>
+            <div class="grid gap-3 md:grid-cols-[minmax(220px,1.5fr)_140px_150px_150px_auto] md:items-end">
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">策略</span>
+                <select v-model="tradingForm.model_id" @change="onTradingModelChange" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+                  <option v-for="model in evolutionModels" :key="'trade-model-' + model.id" :value="model.id">{{ model.name || model.id }}</option>
+                </select>
+              </label>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">模拟资金</span>
+                <input v-model.number="tradingForm.initial_cash" type="number" min="1000" step="1000" class="w-full h-9 px-3 border border-neutral-300 text-sm">
+              </label>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">起始日期</span>
+                <input v-model="tradingForm.start_date" type="date" class="w-full h-9 px-3 border border-neutral-300 text-sm">
+              </label>
+              <label class="block text-sm">
+                <span class="block text-xs text-neutral-500 mb-1">截至日期</span>
+                <input v-model="asOf" type="date" class="w-full h-9 px-3 border border-neutral-300 text-sm">
+              </label>
+              <button @click="loadTradingAccount(false)" :disabled="tradingLoading" class="h-9 px-3 border border-neutral-300 bg-white text-sm disabled:opacity-50">查看</button>
+            </div>
+            <div class="text-xs text-neutral-500">
+              数据来源 {{ tradingAccount.strategy_account_source || '-' }} · 快照 {{ tradingAccount.runtime_snapshot_as_of || tradingAccount.as_of || '-' }} · {{ tradingAccount.message || selectedTradingModel.runtime_data_note || '' }}
+            </div>
           </div>
           <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
             <div class="metric"><div class="text-xs text-neutral-500">总资产</div><div class="mt-2 text-lg font-semibold">{{ money(account.total_asset) }}</div></div>
@@ -758,9 +794,9 @@
           <div class="panel">
             <div class="px-4 py-3 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-2">
               <div>
-                <div class="font-semibold">后台基准参数</div>
+                <div class="font-semibold">系统默认基础参数</div>
                 <div class="text-xs text-neutral-500 mt-1">
-                  当前来源：{{ systemStrategySource.name || '默认基准参数' }} · {{ systemStrategySource.description || '用于生成默认模型和诊断，不代表用户跟随账户' }}
+                  当前来源：{{ systemStrategySource.name || '默认基础参数' }} · {{ systemStrategySource.description || '用于生成新策略、人工调参和诊断；每个策略都有自己的基础参数' }}
                 </div>
               </div>
               <div class="flex gap-2">
@@ -841,7 +877,7 @@
                       <td class="px-3 py-2 text-right">
                         <button @click="loadStrategyBacktest(model)" :disabled="strategyBacktestLoading" class="h-8 px-3 border border-neutral-300 bg-white text-xs disabled:opacity-50">查看交割单</button>
                       </td>
-                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">设为后台基准</button></td>
+                      <td class="px-3 py-2 text-right"><button @click="applyEvolutionModel(model)" class="h-8 px-3 border border-neutral-300 bg-white text-xs">复制为默认参数</button></td>
                     </tr>
                     <tr v-if="!evolutionModels.length"><td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无进化模型</td></tr>
                   </tbody>
@@ -1592,7 +1628,9 @@
           dashboard: {},
           dailyPlan: {},
           tradingAccount: {},
+          tradingForm: { model_id: 'capital_10000', initial_cash: 10000, start_date: '' },
           newsFeed: {},
+          modelSignals: {},
           biyingStatus: {},
           lhbStatus: {},
           coverage: {},
@@ -1723,13 +1761,31 @@
           return Object.keys(current).length ? current : (this.activeTimeline || {});
         },
         recommendations() { return (this.dashboard.recommendations || {}).items || []; },
+        modelSignalGroups() { return (this.modelSignals.items || []).filter(item => (item.signals || []).length); },
+        modelSignalDate() { return this.modelSignals.data_date || this.modelSignals.as_of || this.asOf || ''; },
+        modelSignalRows() {
+          return this.modelSignalGroups.flatMap(group => {
+            const signals = Array.isArray(group.signals) ? group.signals : [];
+            return signals.map(signal => ({
+              ...signal,
+              row_key: `${group.model_id}-${signal.signal_id || `${signal.date}-${signal.code}`}`,
+              model_id: group.model_id,
+              model_name: group.model_name,
+              initial_cash: signal.initial_cash || group.initial_cash,
+              return_pct: group.return_pct,
+              max_drawdown_pct: group.max_drawdown_pct,
+              win_rate: group.win_rate,
+              model_signal_count: group.signal_count,
+            }));
+          });
+        },
         buyList() {
           const planned = this.dailyPlan.buy_list || [];
           const sample = item => ['600001', '600002'].includes(String((item || {}).code || '').trim()) || JSON.stringify(item || {}).includes('样例');
           return (planned.length ? planned : this.recommendations.filter(item => String(item.action || '').includes('买入')))
             .filter(item => !sample(item));
         },
-        latestEvents() { return (this.dashboard.recommendations || {}).latest_events || []; },
+        latestEvents() { return this.newsFeed.events || (this.dashboard.recommendations || {}).latest_events || []; },
         latestNews() { return this.newsFeed.items || []; },
         positions() { return this.tradingAccount.positions || []; },
         deals() { return this.tradingAccount.history_deals || []; },
@@ -1793,6 +1849,9 @@
             seen.add(id);
             return true;
           });
+        },
+        selectedTradingModel() {
+          return this.evolutionModels.find(item => String(item.id) === String(this.tradingForm.model_id)) || {};
         },
         minuteCacheCount() {
           const dates = this.biyingStatus.cache_dates || {};
@@ -2121,6 +2180,7 @@
           this.dashboard = snapshot.dashboard || this.dashboard;
           this.tradingAccount = snapshot.trading_account || this.tradingAccount;
           this.newsFeed = snapshot.news || this.newsFeed;
+          this.modelSignals = snapshot.model_signals || this.modelSignals;
           this.coverage = snapshot.coverage || this.coverage;
           this.aiFailures = snapshot.ai_failures || this.aiFailures;
           this.aiRecords = snapshot.ai_records || this.aiRecords;
@@ -2129,8 +2189,30 @@
           this.dataFillForm.end_date = this.asOf || dashboard.as_of || this.dataFillForm.end_date;
           this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
           this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
+          this.ensureTradingFormDefaults();
           if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
           if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
+        },
+        ensureTradingFormDefaults() {
+          const models = this.evolutionModels || [];
+          if (!models.length) return;
+          const current = models.find(item => String(item.id) === String(this.tradingForm.model_id));
+          const selected = current || models.find(item => item.has_runtime_data) || models[0];
+          if (!current && selected) this.tradingForm.model_id = selected.id;
+          if ((!this.tradingForm.initial_cash || Number(this.tradingForm.initial_cash) <= 0) && selected) {
+            const params = selected.params || {};
+            this.tradingForm.initial_cash = Number(params.account_initial_cash || selected.initial_cash || selected.default_cash || 10000);
+          }
+          if (!this.tradingForm.start_date && selected && selected.runtime_start_date) {
+            this.tradingForm.start_date = selected.runtime_start_date;
+          }
+        },
+        onTradingModelChange() {
+          const model = this.selectedTradingModel || {};
+          const params = model.params || {};
+          this.tradingForm.initial_cash = Number(params.account_initial_cash || model.initial_cash || this.tradingForm.initial_cash || 10000);
+          this.tradingForm.start_date = model.runtime_start_date || this.tradingForm.start_date || this.dataStartDate || '';
+          this.loadTradingAccount(true);
         },
         async loadAdminSnapshot(quiet = true, light = true) {
           const q = new URLSearchParams();
@@ -2157,8 +2239,12 @@
           if (!quiet) this.clientError = '';
           this.tradingLoading = true;
           try {
+            this.ensureTradingFormDefaults();
             const q = new URLSearchParams({ limit: '1000' });
             if (this.asOf) q.set('as_of', this.asOf);
+            if (this.tradingForm.model_id) q.set('model_id', this.tradingForm.model_id);
+            if (this.tradingForm.initial_cash) q.set('initial_cash', String(this.tradingForm.initial_cash));
+            if (this.tradingForm.start_date) q.set('start_date', this.tradingForm.start_date);
             this.tradingAccount = await this.api(`/api/admin/trading_account?${q.toString()}`);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
@@ -2848,7 +2934,7 @@
         },
         async applyEvolutionModel(model) {
           if (!model || !model.id) return;
-          if (!window.confirm(`确认把「${model.name || model.id}」设为后台基准参数？这不会改变任何用户已经选择的跟随策略。`)) return;
+          if (!window.confirm(`确认把「${model.name || model.id}」的基础参数复制为系统默认基础参数？这不会改变任何用户已经选择的跟随策略。`)) return;
           const q = new URLSearchParams({ model_id: model.id });
           const result = await this.api(`/api/quant/model/apply?${q.toString()}`, { method: 'POST' });
           this.strategyForm = { ...(result.strategy_params || this.strategyForm) };

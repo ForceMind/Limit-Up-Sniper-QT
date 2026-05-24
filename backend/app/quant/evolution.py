@@ -927,6 +927,89 @@ class StrategyEvolution:
                 return True
         return False
 
+    def _latest_runtime_scope(
+        self,
+        conn: sqlite3.Connection,
+        model_id: str,
+        model_version: str,
+        start_date: Optional[str],
+        as_of: Optional[str],
+        params_hash: str = "",
+    ) -> Optional[Dict[str, str]]:
+        where_sql, params = self._runtime_date_filter(
+            conn,
+            "strategy_runtime_snapshots",
+            "as_of",
+            model_id,
+            model_version,
+            start_date,
+            as_of,
+            params_hash=params_hash,
+        )
+        row = conn.execute(
+            f"""
+            SELECT generated_at
+            FROM strategy_runtime_snapshots
+            WHERE {where_sql} AND source LIKE ?
+            ORDER BY generated_at DESC, as_of DESC
+            LIMIT 1
+            """,
+            [*params, "daily_runtime%"],
+        ).fetchone()
+        if not row:
+            return None
+        generated_at = str(row["generated_at"] if isinstance(row, sqlite3.Row) else row[0] or "").strip()
+        if not generated_at:
+            return None
+        return {
+            "model_version": str(model_version or ""),
+            "start_date": str(start_date or ""),
+            "params_hash": str(params_hash or ""),
+            "generated_at": generated_at,
+        }
+
+    def _select_runtime_scope(
+        self,
+        conn: sqlite3.Connection,
+        model_id: str,
+        model_version: str,
+        start_date: Optional[str],
+        as_of: Optional[str],
+        params_hash: str = "",
+    ) -> Optional[Dict[str, str]]:
+        versions = []
+        for value in (str(model_version or "").strip(), ""):
+            if value not in versions:
+                versions.append(value)
+        hashes = []
+        for value in (str(params_hash or "").strip(), ""):
+            if value not in hashes:
+                hashes.append(value)
+        starts: List[Optional[str]] = []
+        clean_start = str(start_date or "").strip() or None
+        for value in (clean_start, None):
+            if value not in starts:
+                starts.append(value)
+
+        for candidate_start in starts:
+            for candidate_version in versions:
+                for candidate_hash in hashes:
+                    scope = self._latest_runtime_scope(
+                        conn,
+                        model_id,
+                        candidate_version,
+                        candidate_start,
+                        as_of,
+                        params_hash=candidate_hash,
+                    )
+                    if scope:
+                        scope["requested_start_date"] = str(start_date or "")
+                        scope["fallback_latest_snapshot"] = bool(candidate_start != clean_start)
+                        scope["relaxed_model_version"] = bool(candidate_version != str(model_version or "").strip())
+                        scope["relaxed_params_hash"] = bool(candidate_hash != str(params_hash or "").strip())
+                        return scope
+        return None
+
     def _scale_runtime_trades(self, trades: List[Dict[str, Any]], base_cash: float, target_cash: float) -> List[Dict[str, Any]]:
         if base_cash <= 0 or target_cash <= 0:
             return [dict(trade) for trade in trades if isinstance(trade, dict)]
@@ -1295,24 +1378,32 @@ class StrategyEvolution:
         try:
             conn = self._connect_db()
             try:
-                selected_version = str(model_version or "").strip()
-                if selected_version and not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=params_hash):
-                    selected_version = ""
-                if not self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=params_hash):
-                    if params_hash and self._runtime_rows_exist(conn, model_id, selected_version, start_date, as_of, params_hash=""):
-                        params_hash = ""
-                    else:
-                        return None
+                scope = self._select_runtime_scope(
+                    conn,
+                    model_id,
+                    str(model_version or "").strip(),
+                    start_date,
+                    as_of,
+                    params_hash=params_hash,
+                )
+                if not scope:
+                    return None
+                selected_version = scope.get("model_version", "")
+                selected_start_date = scope.get("start_date") or None
+                params_hash = scope.get("params_hash", "")
+                generated_at = scope.get("generated_at", "")
                 where_sql, sql_params = self._runtime_date_filter(
                     conn,
                     "strategy_runtime_trades",
                     "date",
                     model_id,
                     selected_version,
-                    start_date,
+                    selected_start_date,
                     as_of,
                     params_hash=params_hash,
                 )
+                where_sql = f"{where_sql} AND generated_at = ?"
+                sql_params.append(generated_at)
                 rows = conn.execute(
                     f"""
                     SELECT date, time, side, code, name, qty, price, amount, score, pnl_pct,
@@ -1329,10 +1420,12 @@ class StrategyEvolution:
                     "date",
                     model_id,
                     selected_version,
-                    start_date,
+                    selected_start_date,
                     as_of,
                     params_hash=params_hash,
                 )
+                signal_where = f"{signal_where} AND generated_at = ?"
+                signal_params.append(generated_at)
                 signal_count = conn.execute(
                     f"SELECT COUNT(*) AS count FROM strategy_daily_signals WHERE {signal_where}",
                     signal_params,
@@ -1343,10 +1436,12 @@ class StrategyEvolution:
                     "as_of",
                     model_id,
                     selected_version,
-                    start_date,
+                    selected_start_date,
                     as_of,
                     params_hash=params_hash,
                 )
+                position_where = f"{position_where} AND generated_at = ?"
+                position_params.append(generated_at)
                 position_count = conn.execute(
                     f"SELECT COUNT(*) AS count FROM strategy_runtime_positions WHERE {position_where}",
                     position_params,
@@ -1357,10 +1452,12 @@ class StrategyEvolution:
                     "date",
                     model_id,
                     selected_version,
-                    start_date,
+                    selected_start_date,
                     as_of,
                     params_hash=params_hash,
                 )
+                settlement_where = f"{settlement_where} AND generated_at = ?"
+                settlement_params.append(generated_at)
                 settlement_count = conn.execute(
                     f"SELECT COUNT(*) AS count FROM strategy_runtime_settlements WHERE {settlement_where}",
                     settlement_params,
@@ -1371,15 +1468,16 @@ class StrategyEvolution:
                     "as_of",
                     model_id,
                     selected_version,
-                    start_date,
+                    selected_start_date,
                     as_of,
                     params_hash=params_hash,
                 )
-                snapshot_where = f"{snapshot_where} AND source LIKE ?"
-                snapshot_params.append("daily_runtime%")
+                snapshot_where = f"{snapshot_where} AND source LIKE ? AND generated_at = ?"
+                snapshot_params.extend(["daily_runtime%", generated_at])
                 snapshot_row = conn.execute(
                     f"""
-                    SELECT as_of, source, total_asset, return_pct, position_count, deal_count, account_json
+                    SELECT as_of, start_date, source, generated_at, initial_cash, total_asset,
+                           return_pct, position_count, deal_count, account_json
                     FROM strategy_runtime_snapshots
                     WHERE {snapshot_where}
                     ORDER BY as_of DESC
@@ -1417,31 +1515,84 @@ class StrategyEvolution:
                     "mode": str(row["mode"] or ""),
                 }
             trades.append(trade)
-        base_cash = base_cash or target_cash
-        scaled_trades = self._scale_runtime_trades(trades, base_cash, target_cash)
-        account = quant_engine.account_from_trades(
-            scaled_trades,
-            initial_cash=target_cash,
-            as_of=as_of,
-            start_date=start_date,
-            limit=limit,
-            drop_unmatched_sells=True,
-        )
+        base_cash = base_cash or (safe_float(snapshot_row["initial_cash"], 0) if snapshot_row else 0) or target_cash
+
+        account: Dict[str, Any] = {}
+        if snapshot_row:
+            try:
+                loaded = json.loads(str(snapshot_row["account_json"] or "{}"))
+                account = loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                account = {}
+        if account:
+            account = dict(account)
+            scaled_trades = self._scale_runtime_trades(trades, base_cash, target_cash)
+            deal_account = quant_engine.account_from_trades(
+                scaled_trades,
+                initial_cash=target_cash,
+                as_of=as_of,
+                start_date=selected_start_date,
+                limit=limit,
+                drop_unmatched_sells=True,
+            )
+            account.setdefault("status", "ok")
+            account.setdefault("as_of", str(snapshot_row["as_of"] or as_of) if snapshot_row else as_of)
+            account.setdefault("start_date", str(snapshot_row["start_date"] or selected_start_date or "") if snapshot_row else str(selected_start_date or ""))
+            positions = []
+            for pos in account.get("positions", []) if isinstance(account.get("positions"), list) else []:
+                if not isinstance(pos, dict):
+                    continue
+                item = dict(pos)
+                qty = safe_float(item.get("qty"), 0)
+                entry_price = safe_float(item.get("entry_price"), safe_float(item.get("cost_price"), 0))
+                last_price = safe_float(item.get("last_price"), entry_price)
+                market_value = safe_float(item.get("market_value"), qty * last_price)
+                cost_amount = safe_float(item.get("cost_amount"), qty * entry_price)
+                item.setdefault("available_qty", item.get("qty", 0))
+                item.setdefault("cost_price", round(cost_amount / qty, 3) if qty > 0 and cost_amount > 0 else round(entry_price, 3))
+                item.setdefault("cost_amount", round(cost_amount, 2))
+                item.setdefault("market_value", round(market_value, 2))
+                item.setdefault("pnl_amount", round(market_value - cost_amount, 2))
+                if "pnl_pct" not in item:
+                    item["pnl_pct"] = round((market_value - cost_amount) / cost_amount * 100, 3) if cost_amount > 0 else 0.0
+                positions.append(item)
+            account["positions"] = positions
+            account["history_deals"] = deal_account.get("history_deals", [])
+            account["delivery_records"] = deal_account.get("delivery_records", [])
+            account["daily_settlements"] = deal_account.get("daily_settlements", [])
+            snapshot_as_of = str(account.get("as_of") or as_of or "")
+            today_deals = deal_account.get("today_deals", [])
+            account["today_deals"] = today_deals if isinstance(today_deals, list) else [trade for trade in trades if str(trade.get("date") or "") == snapshot_as_of][:limit]
+        else:
+            scaled_trades = self._scale_runtime_trades(trades, base_cash, target_cash)
+            account = quant_engine.account_from_trades(
+                scaled_trades,
+                initial_cash=target_cash,
+                as_of=as_of,
+                start_date=selected_start_date,
+                limit=limit,
+                drop_unmatched_sells=True,
+            )
         signal_total = int((signal_count["count"] if isinstance(signal_count, sqlite3.Row) else signal_count[0]) or 0)
         position_total = int((position_count["count"] if isinstance(position_count, sqlite3.Row) else position_count[0]) or 0)
         settlement_total = int((settlement_count["count"] if isinstance(settlement_count, sqlite3.Row) else settlement_count[0]) or 0)
-        account["strategy_account_source"] = "runtime_tables"
+        account["strategy_account_source"] = "runtime_snapshot" if snapshot_row else "runtime_tables"
         account["strategy_account_cache"] = "runtime"
         account["follow_start_date"] = start_date or ""
+        account["runtime_data_start_date"] = selected_start_date or ""
         account["runtime_model_id"] = model_id
         account["runtime_model_version"] = selected_version
         account["runtime_trade_count"] = len(trades)
-        account["runtime_scaled_trade_count"] = len(scaled_trades)
+        account["runtime_scaled_trade_count"] = len(account.get("history_deals", []))
         account["runtime_signal_count"] = signal_total
         account["runtime_position_count"] = position_total
         account["runtime_settlement_count"] = settlement_total
         account["runtime_scaled_from_cash"] = round(base_cash, 2)
         account["runtime_scaled_to_cash"] = round(target_cash, 2)
+        account["runtime_generated_at"] = generated_at
+        account["runtime_fallback_latest_snapshot"] = bool(scope.get("fallback_latest_snapshot"))
+        account["runtime_relaxed_params_hash"] = bool(scope.get("relaxed_params_hash"))
+        account["runtime_relaxed_model_version"] = bool(scope.get("relaxed_model_version"))
         if snapshot_row:
             account["runtime_snapshot_as_of"] = str(snapshot_row["as_of"] or "")
             account["runtime_snapshot_source"] = str(snapshot_row["source"] or "")
@@ -2000,6 +2151,184 @@ class StrategyEvolution:
             return {}
         return summaries
 
+    def model_signal_feed(
+        self,
+        as_of: Optional[str] = None,
+        limit_models: int = 20,
+        limit_per_model: int = 12,
+        fallback_latest: bool = True,
+    ) -> Dict[str, Any]:
+        limit_models = max(1, min(int(safe_float(limit_models, 20)), 80))
+        limit_per_model = max(1, min(int(safe_float(limit_per_model, 12)), 80))
+        requested_as_of = str(as_of or "").strip()[:10]
+        if not QUANT_DB_FILE.exists():
+            return {
+                "status": "ok",
+                "as_of": requested_as_of,
+                "data_date": "",
+                "items": [],
+                "total": 0,
+                "model_count": 0,
+                "message": "策略信号表还没有生成数据",
+            }
+
+        conn = self._connect_db()
+        try:
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS count, MAX(date) AS latest_date FROM strategy_daily_signals"
+            ).fetchone()
+            total_available = int((total_row["count"] if isinstance(total_row, sqlite3.Row) else total_row[0]) or 0)
+            latest_date = str((total_row["latest_date"] if isinstance(total_row, sqlite3.Row) else total_row[1]) or "")
+            if total_available <= 0 or not latest_date:
+                return {
+                    "status": "ok",
+                    "as_of": requested_as_of,
+                    "data_date": "",
+                    "items": [],
+                    "total": 0,
+                    "model_count": 0,
+                    "message": "策略信号表还没有生成数据",
+                }
+
+            data_date = latest_date
+            if requested_as_of:
+                row = conn.execute(
+                    "SELECT MAX(date) AS date FROM strategy_daily_signals WHERE date <= ?",
+                    (requested_as_of,),
+                ).fetchone()
+                candidate_date = str((row["date"] if isinstance(row, sqlite3.Row) else row[0]) or "")
+                if candidate_date:
+                    data_date = candidate_date
+                elif not fallback_latest:
+                    return {
+                        "status": "ok",
+                        "as_of": requested_as_of,
+                        "data_date": "",
+                        "items": [],
+                        "total": 0,
+                        "model_count": 0,
+                        "message": f"{requested_as_of} 没有模型信号",
+                    }
+
+            model_rows = conn.execute(
+                """
+                WITH latest AS (
+                    SELECT model_id, MAX(generated_at) AS generated_at
+                    FROM strategy_daily_signals
+                    WHERE date = ?
+                    GROUP BY model_id
+                )
+                SELECT
+                  s.model_id,
+                  s.model_version,
+                  s.params_hash,
+                  s.generated_at,
+                  MIN(s.start_date) AS start_date,
+                  MAX(s.initial_cash) AS initial_cash,
+                  COUNT(*) AS signal_count,
+                  COALESCE(m.name, '') AS model_name,
+                  COALESCE(m.source, '') AS model_source,
+                  m.run_id,
+                  m.rank,
+                  m.objective,
+                  m.return_pct,
+                  m.max_drawdown_pct,
+                  m.win_rate,
+                  m.closed_trades
+                FROM strategy_daily_signals s
+                JOIN latest l ON l.model_id = s.model_id AND l.generated_at = s.generated_at
+                LEFT JOIN strategy_models m ON m.model_id = s.model_id
+                WHERE s.date = ?
+                GROUP BY s.model_id, s.model_version, s.params_hash, s.generated_at
+                ORDER BY
+                  CASE WHEN m.rank IS NULL THEN 999999 ELSE m.rank END ASC,
+                  COALESCE(m.objective, 0) DESC,
+                  signal_count DESC,
+                  s.model_id ASC
+                LIMIT ?
+                """,
+                (data_date, data_date, limit_models),
+            ).fetchall()
+
+            items: List[Dict[str, Any]] = []
+            total = 0
+            for model_row in model_rows:
+                model_id = str(model_row["model_id"] or "")
+                generated_at = str(model_row["generated_at"] or "")
+                signal_rows = conn.execute(
+                    """
+                    SELECT signal_id, date, execute_on, mode, code, name, action, buy_score,
+                           sell_score, reason, source, generated_at, initial_cash, raw_json
+                    FROM strategy_daily_signals
+                    WHERE date = ? AND model_id = ? AND generated_at = ?
+                    ORDER BY buy_score DESC, sell_score ASC, code ASC
+                    LIMIT ?
+                    """,
+                    (data_date, model_id, generated_at, limit_per_model),
+                ).fetchall()
+                signals: List[Dict[str, Any]] = []
+                for row in signal_rows:
+                    raw: Dict[str, Any] = {}
+                    try:
+                        loaded = json.loads(str(row["raw_json"] or "{}"))
+                        raw = loaded if isinstance(loaded, dict) else {}
+                    except Exception:
+                        raw = {}
+                    signal = {
+                        "signal_id": str(row["signal_id"] or ""),
+                        "model_id": model_id,
+                        "date": str(row["date"] or ""),
+                        "execute_on": str(row["execute_on"] or raw.get("execute_on") or ""),
+                        "mode": str(row["mode"] or ""),
+                        "code": str(row["code"] or raw.get("code") or ""),
+                        "name": str(row["name"] or raw.get("name") or ""),
+                        "action": str(row["action"] or raw.get("action") or "买入候选"),
+                        "buy_score": round(safe_float(row["buy_score"], raw.get("buy_score") or 0), 2),
+                        "sell_score": round(safe_float(row["sell_score"], raw.get("sell_score") or 0), 2),
+                        "reason": str(row["reason"] or raw.get("reason") or ""),
+                        "source": str(row["source"] or ""),
+                        "generated_at": str(row["generated_at"] or ""),
+                        "initial_cash": safe_float(row["initial_cash"], 0),
+                    }
+                    signals.append(signal)
+                total += int(model_row["signal_count"] or 0)
+                items.append(
+                    {
+                        "model_id": model_id,
+                        "model_name": str(model_row["model_name"] or model_id),
+                        "model_version": str(model_row["model_version"] or ""),
+                        "params_hash": str(model_row["params_hash"] or ""),
+                        "run_id": str(model_row["run_id"] or ""),
+                        "rank": model_row["rank"],
+                        "source": str(model_row["model_source"] or ""),
+                        "start_date": str(model_row["start_date"] or ""),
+                        "data_date": data_date,
+                        "generated_at": generated_at,
+                        "initial_cash": safe_float(model_row["initial_cash"], 0),
+                        "objective": safe_float(model_row["objective"], 0),
+                        "return_pct": safe_float(model_row["return_pct"], 0),
+                        "max_drawdown_pct": safe_float(model_row["max_drawdown_pct"], 0),
+                        "win_rate": safe_float(model_row["win_rate"], 0),
+                        "closed_trades": int(model_row["closed_trades"] or 0),
+                        "signal_count": int(model_row["signal_count"] or 0),
+                        "signals": signals,
+                    }
+                )
+
+            return {
+                "status": "ok",
+                "as_of": requested_as_of or data_date,
+                "data_date": data_date,
+                "latest_date": latest_date,
+                "items": items,
+                "total": total,
+                "model_count": len(items),
+                "limit_per_model": limit_per_model,
+                "fallback_latest": bool(requested_as_of and data_date != requested_as_of),
+            }
+        finally:
+            conn.close()
+
     def _runtime_cache_is_fresh(self, generated_at: str) -> bool:
         ttl = self._runtime_cache_ttl_seconds()
         if ttl <= 0:
@@ -2205,7 +2534,7 @@ class StrategyEvolution:
             "status": "ok",
             "active": {
                 "id": "active",
-                "name": "后台基准参数（非跟随策略）",
+                "name": "系统默认基础参数（非跟随策略）",
                 "source": "baseline",
                 "reusable": False,
                 "params": active_params,
@@ -2220,7 +2549,7 @@ class StrategyEvolution:
         if model_id == "active":
             return {
                 "id": "active",
-                "name": "后台基准参数（非跟随策略）",
+                "name": "系统默认基础参数（非跟随策略）",
                 "source": "baseline",
                 "reusable": False,
                 "params": quant_engine.strategy_params(),
@@ -2443,7 +2772,7 @@ class StrategyEvolution:
                     "type": "strategy_model",
                     "model_id": str(model.get("id") or ""),
                     "name": str(model.get("name") or model.get("id") or ""),
-                    "description": "来自策略库模型设为后台基准参数。",
+                    "description": "来自策略库模型复制为系统默认基础参数。",
                     "objective": model.get("objective"),
                     "return_pct": model.get("return_pct"),
                     "max_drawdown_pct": model.get("max_drawdown_pct"),
@@ -2604,7 +2933,7 @@ class StrategyEvolution:
                         "type": "strategy_model",
                         "model_id": str(models[0].get("id") or ""),
                         "name": str(models[0].get("name") or models[0].get("id") or ""),
-                        "description": "来自策略进化完成后自动设为后台基准参数。",
+                        "description": "来自策略进化完成后自动复制为系统默认基础参数。",
                         "objective": models[0].get("objective"),
                         "return_pct": models[0].get("return_pct"),
                         "max_drawdown_pct": models[0].get("max_drawdown_pct"),

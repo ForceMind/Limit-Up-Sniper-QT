@@ -4185,7 +4185,7 @@ class QuantEngine:
             return {"name": name, "params": self._normalize_strategy_params({**base, **updates})}
 
         candidates = [
-            normalized_candidate("当前基准参数", {}),
+            normalized_candidate("当前默认基础参数", {}),
             normalized_candidate(
                 "进攻型",
                 {
@@ -4285,7 +4285,7 @@ class QuantEngine:
                 source={
                     "type": "fit_strategy",
                     "name": f"参数拟合：{best.get('name', '最佳方案')}",
-                    "description": "来自后台参数拟合并设为基准参数。",
+                    "description": "来自后台参数拟合并复制为系统默认基础参数。",
                     "model_id": "",
                 },
             )

@@ -1334,7 +1334,7 @@
           const id = String(this.userProfile.strategy_model_id || 'capital_10000');
           const model = this.strategyItems.find(item => String(item.id) === id) || this.followedModel || {};
           if (model.description) return model.description;
-          if (id === 'active') return '后台基准参数仅用于诊断，请选择资金档或策略库模型跟随。';
+          if (id === 'active') return '系统默认基础参数仅用于诊断和生成新策略，请选择资金档或策略库模型跟随。';
           return `资金档 ${this.userProfile.capital_label || '-'}，单票资金 ${this.money(this.rules.paper_position_value)}`;
         },
         followStartText() {
@@ -1573,26 +1573,25 @@
           const mobile = window.innerWidth <= 767;
           window.setTimeout(async () => {
             if (!this.isLoggedIn) return;
-            const pause = () => new Promise(resolve => window.setTimeout(resolve, 220));
             if (!mobile) {
-              if (!this.accountView.account) await this.loadMarketData(true);
-              await pause();
-              if (!this.recommendations.items) await this.loadRecommendations(true);
-              await pause();
-              if (!this.plan.as_of) await this.loadPlan(true);
+              const tasks = [];
+              if (!this.accountView.account) tasks.push(this.loadMarketData(true));
+              if (!this.recommendations.items) tasks.push(this.loadRecommendations(true));
+              if (!this.plan.as_of) tasks.push(this.loadPlan(true));
+              await Promise.all(tasks);
               return;
             }
+            const tasks = [];
             if (['overview', 'positions', 'deals'].includes(this.mobileView) && !this.accountView.account) {
-              await this.loadMarketData(true);
-              await pause();
+              tasks.push(this.loadMarketData(true));
             }
             if (['overview', 'buy'].includes(this.mobileView) && !this.recommendations.items) {
-              await this.loadRecommendations(true);
-              await pause();
+              tasks.push(this.loadRecommendations(true));
             }
             if (this.mobileView === 'buy' && !this.plan.as_of) {
-              await this.loadPlan(true);
+              tasks.push(this.loadPlan(true));
             }
+            await Promise.all(tasks);
           }, 0);
         },
         async loadMarketData(quiet = false, force = false) {

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
 import os
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -94,6 +96,8 @@ def _app_version() -> str:
 APP_VERSION = _app_version()
 _FRONTEND_ACCOUNT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _FRONTEND_ACCOUNT_CACHE_TTL = 300
+_MEMORY_PAYLOAD_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_MEMORY_PAYLOAD_CACHE_MAX = 256
 _FRONTEND_ACCOUNT_REPLAY_DAYS = max(20, min(int(safe_float(os.getenv("QT_FRONTEND_ACCOUNT_REPLAY_DAYS"), 90)), 260))
 
 
@@ -109,6 +113,58 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, "") or default)
     except Exception:
         return default
+
+
+def _copy_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return copy.deepcopy(payload)
+    except Exception:
+        return dict(payload)
+
+
+def _memory_cache_key(payload_type: str, parts: Dict[str, Any]) -> str:
+    text = json.dumps({"type": payload_type, "parts": parts}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _memory_cache_get(payload_type: str, parts: Dict[str, Any], ttl_seconds: int) -> Optional[Dict[str, Any]]:
+    ttl_seconds = max(0, int(ttl_seconds or 0))
+    if ttl_seconds <= 0:
+        return None
+    key = _memory_cache_key(payload_type, parts)
+    cached = _MEMORY_PAYLOAD_CACHE.get(key)
+    if not cached:
+        return None
+    created_at, payload = cached
+    if time.time() - created_at > ttl_seconds:
+        _MEMORY_PAYLOAD_CACHE.pop(key, None)
+        return None
+    result = _copy_payload(payload)
+    result["server_cache"] = "hit"
+    result["server_cache_type"] = payload_type
+    return result
+
+
+def _memory_cache_set(payload_type: str, parts: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    if len(_MEMORY_PAYLOAD_CACHE) >= _MEMORY_PAYLOAD_CACHE_MAX:
+        oldest = sorted(_MEMORY_PAYLOAD_CACHE.items(), key=lambda item: item[1][0])[: max(1, _MEMORY_PAYLOAD_CACHE_MAX // 8)]
+        for key, _item in oldest:
+            _MEMORY_PAYLOAD_CACHE.pop(key, None)
+    key = _memory_cache_key(payload_type, parts)
+    clean = _copy_payload(payload)
+    clean.pop("server_cache", None)
+    clean.pop("server_cache_type", None)
+    _MEMORY_PAYLOAD_CACHE[key] = (time.time(), clean)
+    result = _copy_payload(payload)
+    result["server_cache"] = "miss"
+    result["server_cache_type"] = payload_type
+    return result
+
+
+def _memory_cache_clear() -> None:
+    _MEMORY_PAYLOAD_CACHE.clear()
 
 
 def _create_data_backup() -> Dict[str, Any]:
@@ -159,6 +215,8 @@ def _refresh_quant_caches() -> None:
         quant_engine.clear_market_cache()
     except Exception:
         pass
+    _frontend_account_cache_clear()
+    _memory_cache_clear()
 
 
 DATA_IMPORT_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -518,6 +576,7 @@ def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(de
         updates["strategy_model_id"] = recommended_strategy_id(cash, _strategy_catalog_items(models_payload))
     result = update_frontend_user_profile(username, updates)
     _frontend_account_cache_clear()
+    _memory_cache_clear()
     context = _frontend_profile_context(request, include_catalog=True)
     _record_user_follow_period(
         username,
@@ -675,16 +734,21 @@ def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, An
 def _active_strategy_model() -> Dict[str, Any]:
     return {
         "id": "active",
-        "name": "后台基准参数（非跟随策略）",
+        "name": "系统默认基础参数（非跟随策略）",
         "source": "baseline",
         "reusable": False,
-        "description": "后台用于人工调参和默认计算的基准参数，不代表用户正在跟随的策略。",
+        "description": "用于人工调参、诊断和生成新策略的默认参数模板；每个策略模型仍保存自己的独立基础参数。",
         "params": quant_engine.strategy_params(),
         "strategy_source": quant_engine.strategy_source(),
     }
 
 
 def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str, Any]:
+    cache_parts = {"include_catalog": bool(include_catalog), "version": APP_VERSION}
+    cache_ttl = cache_env_int("QT_STRATEGY_MODELS_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+    cached = _memory_cache_get("strategy_models", cache_parts, cache_ttl)
+    if cached:
+        return cached
     if include_catalog:
         payload = strategy_evolution.models(limit=40, include_records=False)
     else:
@@ -714,7 +778,7 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
             }
         enriched_presets.append(enriched)
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
-    payload["active"]["name"] = "后台基准参数（非跟随策略）"
+    payload["active"]["name"] = "系统默认基础参数（非跟随策略）"
     payload["capital_presets"] = enriched_presets
     payload["capital_bands"] = CAPITAL_BANDS
     payload["capital_runtime_summary"] = {
@@ -723,7 +787,124 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
         "missing": sum(1 for item in enriched_presets if not item.get("has_runtime_data")),
     }
     payload["count"] = int(safe_float(payload.get("count"), 0)) + len(enriched_presets)
+    return _memory_cache_set("strategy_models", cache_parts, payload)
+
+
+def _admin_model_signal_feed(
+    as_of: Optional[str],
+    models_payload: Optional[Dict[str, Any]] = None,
+    limit_models: int = 24,
+    limit_per_model: int = 12,
+) -> Dict[str, Any]:
+    payload = strategy_evolution.model_signal_feed(
+        as_of=as_of,
+        limit_models=limit_models,
+        limit_per_model=limit_per_model,
+        fallback_latest=True,
+    )
+    catalog_payload = models_payload if isinstance(models_payload, dict) else _frontend_strategy_models_payload(include_catalog=True)
+    catalog_items = _strategy_catalog_items(catalog_payload)
+    catalog = {str(item.get("id") or ""): item for item in catalog_items}
+    catalog_order = {str(item.get("id") or ""): index for index, item in enumerate(catalog_items)}
+    for group in payload.get("items") if isinstance(payload.get("items"), list) else []:
+        if not isinstance(group, dict):
+            continue
+        model_id = str(group.get("model_id") or "")
+        meta = catalog.get(model_id)
+        if not isinstance(meta, dict):
+            continue
+        group["model_name"] = str(meta.get("name") or group.get("model_name") or model_id)
+        group["model_description"] = str(meta.get("description") or "")
+        group["model_source"] = str(meta.get("source") or group.get("source") or "")
+        for key in ("objective", "return_pct", "max_drawdown_pct", "win_rate", "closed_trades"):
+            if group.get(key) in (None, "", 0) and meta.get(key) not in (None, ""):
+                group[key] = meta.get(key)
+        if meta.get("capital_min") is not None:
+            group["capital_min"] = meta.get("capital_min")
+        if meta.get("capital_max") is not None:
+            group["capital_max"] = meta.get("capital_max")
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    items.sort(
+        key=lambda group: (
+            catalog_order.get(str(group.get("model_id") or ""), 999999),
+            -safe_float(group.get("objective"), 0),
+            str(group.get("model_id") or ""),
+        )
+    )
     return payload
+
+
+def _quant_db_scalar(sql: str, params: Optional[list[Any]] = None) -> Any:
+    db_path = DATA_DIR / "quant_data.sqlite3"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(sql, params or []).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    return row[0] if row else None
+
+
+def _quant_db_count(table: str) -> int:
+    if not table.replace("_", "").isalnum():
+        return 0
+    value = _quant_db_scalar(f"SELECT COUNT(*) FROM {table}")
+    return int(safe_float(value, 0))
+
+
+def _light_dashboard_payload(
+    as_of: Optional[str],
+    news_payload: Optional[Dict[str, Any]] = None,
+    model_signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    signal_items: list[Dict[str, Any]] = []
+    for group in model_signals.get("items") if isinstance(model_signals, dict) and isinstance(model_signals.get("items"), list) else []:
+        if not isinstance(group, dict):
+            continue
+        for signal in group.get("signals") if isinstance(group.get("signals"), list) else []:
+            if not isinstance(signal, dict):
+                continue
+            signal_items.append(
+                {
+                    **signal,
+                    "model_id": group.get("model_id"),
+                    "model_name": group.get("model_name"),
+                    "action": signal.get("action") or "买入候选",
+                }
+            )
+    signal_items.sort(key=lambda item: safe_float(item.get("buy_score"), 0), reverse=True)
+    news_items = news_payload.get("items") if isinstance(news_payload, dict) and isinstance(news_payload.get("items"), list) else []
+    news_events = news_payload.get("events") if isinstance(news_payload, dict) and isinstance(news_payload.get("events"), list) else []
+    kline_stock_count = _quant_db_scalar("SELECT COUNT(DISTINCT code) FROM market_daily_bars WHERE code IS NOT NULL AND code != ''")
+    return {
+        "status": "ok",
+        "as_of": str(as_of or (model_signals or {}).get("data_date") or ""),
+        "data": {
+            "news_count": _quant_db_count("news_raw") or len(news_items),
+            "ai_record_count": _quant_db_count("news_analysis"),
+            "event_count": _quant_db_count("news_events") or len(news_events),
+            "stock_count": len(getattr(quant_engine.universe, "code_to_name", {}) or {}),
+            "kline_stock_count": int(safe_float(kline_stock_count, 0)),
+            "lhb_record_count": _quant_db_count("lhb_records"),
+        },
+        "recommendations": {
+            "status": "ok",
+            "as_of": (model_signals or {}).get("data_date") or as_of,
+            "items": signal_items[:30],
+            "latest_events": news_events[:60],
+            "source": "strategy_daily_signals",
+        },
+        "timeline": {},
+        "portfolio": {},
+        "strategy_params": quant_engine.strategy_params(),
+        "strategy_source": quant_engine.strategy_source(),
+        "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "light": True,
+    }
 
 
 def _frontend_profile_context(request: Request, include_catalog: bool = True) -> Dict[str, Any]:
@@ -1026,7 +1207,13 @@ def _frontend_payload_cache_ttl(name: str, default: int) -> int:
     return cache_env_int(name, default, minimum=0, maximum=86400)
 
 
-def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], limit: int, force: bool = False) -> Dict[str, Any]:
+def _frontend_strategy_account(
+    context: Dict[str, Any],
+    as_of: Optional[str],
+    limit: int,
+    force: bool = False,
+    record_period: bool = True,
+) -> Dict[str, Any]:
     profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
     params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
@@ -1035,7 +1222,8 @@ def _frontend_strategy_account(context: Dict[str, Any], as_of: Optional[str], li
     replay_start_date = _frontend_follow_start_date(context, effective_as_of)
     model_version = _frontend_followed_model_version(context)
     username = str(context.get("username") or "").strip() or "anonymous"
-    _record_user_follow_period(username, profile, source="front_account", reason="account_view", created_at=context.get("created_at"))
+    if record_period:
+        _record_user_follow_period(username, profile, source="front_account", reason="account_view", created_at=context.get("created_at"))
 
     def persist_user_follow(account: Dict[str, Any], source: str) -> Dict[str, Any]:
         strategy_evolution.save_user_follow_account(
@@ -1384,13 +1572,31 @@ def frontend_public_snapshot(
     news_limit = 12 if mobile or light else 80
     jobs_payload = job_manager.status(light=True)
     light_jobs = _frontend_light_jobs(jobs_payload)
-    news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    effective_as_of = _frontend_account_as_of(as_of)
+    cache_parts = {
+        "as_of": effective_as_of,
+        "mobile": bool(mobile),
+        "light": bool(light),
+        "news_limit": news_limit,
+        "version": APP_VERSION,
+    }
+    cache_ttl = cache_env_int("QT_PUBLIC_SNAPSHOT_CACHE_TTL_SECONDS", 30, minimum=0, maximum=3600)
+    stable = _memory_cache_get("front_public_snapshot", cache_parts, cache_ttl)
+    if not stable:
+        news_payload = _safe_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+        stable = _memory_cache_set(
+            "front_public_snapshot",
+            cache_parts,
+            {
+                "news": news_payload,
+                "market_sentiment": _market_sentiment(news_payload),
+            },
+        )
     return {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=light_jobs),
+        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=light_jobs),
         "jobs": light_jobs,
-        "news": news_payload,
-        "market_sentiment": _market_sentiment(news_payload),
+        **stable,
     }
 
 
@@ -1405,34 +1611,63 @@ def frontend_snapshot(
     top_n = 12 if mobile else 30
     jobs_payload = job_manager.status(light=True)
     visible_jobs = _frontend_light_jobs(jobs_payload) if light else jobs_payload
-    news_payload = _safe_news_feed(as_of=as_of, limit=news_limit, fallback_latest=True)
+    effective_as_of = _frontend_account_as_of(as_of)
     context = _frontend_profile_context(request, include_catalog=True)
-    trading_account: Dict[str, Any] = {}
-    recommendations: Dict[str, Any] = {}
-    daily_plan: Dict[str, Any] = {}
-    if not light:
-        with quant_engine.temporary_strategy_params(context["strategy_params"]):
-            recommendations = quant_engine.recommendations(as_of=as_of, lookback_days=2, top_n=top_n)
-            daily_plan = quant_engine.daily_plan(as_of=as_of, limit_days=120)
-        trading_account = _frontend_strategy_account(context, as_of, limit=500)
-        trading_account = _frontend_trading_account(trading_account, context)
+    cache_parts = _frontend_payload_cache_parts(
+        context,
+        "front_snapshot",
+        {
+            "as_of": effective_as_of,
+            "mobile": bool(mobile),
+            "light": bool(light),
+            "news_limit": news_limit,
+            "top_n": top_n,
+            "version": APP_VERSION,
+        },
+    )
+    cache_ttl = cache_env_int("QT_FRONT_SNAPSHOT_CACHE_TTL_SECONDS", 45, minimum=0, maximum=3600)
+    stable = _memory_cache_get("front_snapshot", cache_parts, cache_ttl)
+    if not stable:
+        news_payload = _safe_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+        trading_account: Dict[str, Any] = {}
+        recommendations: Dict[str, Any] = {}
+        daily_plan: Dict[str, Any] = {}
+        try:
+            trading_account = _frontend_strategy_account(
+                context,
+                effective_as_of,
+                limit=80 if light else 500,
+                record_period=not light,
+            )
+            trading_account = _frontend_trading_account(trading_account, context)
+        except Exception as exc:
+            job_manager._append_log("warning", f"前台当前策略持仓快照失败：{exc}", job="frontend_snapshot", stage="account")
+            trading_account = {}
+        if not light:
+            with quant_engine.temporary_strategy_params(context["strategy_params"]):
+                recommendations = quant_engine.recommendations(as_of=effective_as_of, lookback_days=2, top_n=top_n)
+                daily_plan = quant_engine.daily_plan(as_of=effective_as_of, limit_days=120)
+        stable = {
+            "frontend_profile": context["profile"],
+            "followed_model": context["followed_model"],
+            "news": news_payload,
+            "strategy_models": context["models_payload"],
+            "market_sentiment": _market_sentiment(news_payload),
+        }
+        if trading_account:
+            stable["trading_account"] = trading_account
+        if recommendations:
+            stable["recommendations"] = recommendations
+        if daily_plan:
+            stable["daily_plan"] = daily_plan
+        stable = _memory_cache_set("front_snapshot", cache_parts, stable)
     payload = {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=as_of, jobs_payload=visible_jobs),
+        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=visible_jobs),
         "jobs": visible_jobs,
         "logs": job_manager.logs(limit=12),
-        "frontend_profile": context["profile"],
-        "followed_model": context["followed_model"],
-        "news": news_payload,
-        "strategy_models": context["models_payload"],
-        "market_sentiment": _market_sentiment(news_payload),
+        **stable,
     }
-    if trading_account:
-        payload["trading_account"] = trading_account
-    if recommendations:
-        payload["recommendations"] = recommendations
-    if daily_plan:
-        payload["daily_plan"] = daily_plan
     return payload
 
 
@@ -1516,20 +1751,37 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
     effective_as_of = _frontend_account_as_of(as_of)
     if light:
         jobs_payload = job_manager.status(light=True)
-        news_payload = _safe_news_feed(as_of=effective_as_of, limit=60, fallback_latest=True)
-        try:
-            dashboard = quant_engine.dashboard(as_of=effective_as_of, include_heavy=False)
-            dashboard["timeline"] = {}
-        except Exception as exc:
-            job_manager._append_log("warning", f"后台轻量信号快照失败：{exc}", job="admin_snapshot", stage="dashboard")
-            dashboard = {
-                "status": "ok",
-                "as_of": effective_as_of,
-                "strategy_params": quant_engine.strategy_params(),
-                "strategy_source": quant_engine.strategy_source(),
-                "recommendations": {"status": "error", "items": [], "latest_events": [], "error": str(exc)},
-                "timeline": {},
-            }
+        cache_parts = {"as_of": effective_as_of, "version": APP_VERSION}
+        cache_ttl = cache_env_int("QT_ADMIN_SNAPSHOT_CACHE_TTL_SECONDS", 20, minimum=0, maximum=3600)
+        stable = _memory_cache_get("admin_snapshot_light", cache_parts, cache_ttl)
+        if not stable:
+            news_payload = _safe_news_feed(as_of=effective_as_of, limit=60, fallback_latest=True)
+            models_payload = _frontend_strategy_models_payload(include_catalog=True)
+            model_signals = _admin_model_signal_feed(effective_as_of, models_payload=models_payload, limit_models=24, limit_per_model=12)
+            try:
+                dashboard = _light_dashboard_payload(effective_as_of, news_payload=news_payload, model_signals=model_signals)
+            except Exception as exc:
+                job_manager._append_log("warning", f"后台轻量信号快照失败：{exc}", job="admin_snapshot", stage="dashboard")
+                dashboard = {
+                    "status": "ok",
+                    "as_of": effective_as_of,
+                    "strategy_params": quant_engine.strategy_params(),
+                    "strategy_source": quant_engine.strategy_source(),
+                    "recommendations": {"status": "error", "items": [], "latest_events": [], "error": str(exc)},
+                    "timeline": {},
+                }
+            stable = _memory_cache_set(
+                "admin_snapshot_light",
+                cache_parts,
+                {
+                    "strategy_models": models_payload,
+                    "frontend_users": frontend_user_summary(),
+                    "dashboard": dashboard,
+                    "model_signals": model_signals,
+                    "news": news_payload,
+                    "market_sentiment": _market_sentiment(news_payload),
+                },
+            )
         return {
             "status": "ok",
             "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=jobs_payload),
@@ -1538,12 +1790,10 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
             "lhb": lhb_status(),
             "notification_status": trade_notifier.status(),
             "evolution_status": strategy_evolution.status(),
-            "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
-            "frontend_users": _admin_frontend_user_summary(),
-            "dashboard": dashboard,
-            "news": news_payload,
-            "market_sentiment": _market_sentiment(news_payload),
+            **stable,
         }
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    news_payload = quant_engine.news_feed(as_of=effective_as_of, limit=120, fallback_latest=True)
     return {
         "status": "ok",
         "status_payload": status(),
@@ -1553,28 +1803,116 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "ai_usage": ai_usage_summary(),
         "notification_status": trade_notifier.status(),
         "evolution_status": strategy_evolution.status(),
-        "strategy_models": _frontend_strategy_models_payload(include_catalog=True),
+        "strategy_models": models_payload,
         "access_logs": access_logs(limit=120),
         "frontend_users": _admin_frontend_user_summary(),
         "dashboard": quant_engine.dashboard(as_of=effective_as_of, include_heavy=False),
-        "trading_account": quant_engine.trading_account(as_of=effective_as_of, limit=1000),
-        "news": quant_engine.news_feed(as_of=effective_as_of, limit=120, fallback_latest=True),
+        "trading_account": _admin_strategy_trading_account(as_of=effective_as_of, limit=1000),
+        "model_signals": _admin_model_signal_feed(effective_as_of, models_payload=models_payload, limit_models=32, limit_per_model=20),
+        "news": news_payload,
         "coverage": data_coverage(as_of=effective_as_of, top_n=100),
         "ai_failures": ai_failures(limit=40),
         "ai_records": ai_records_feed(limit=80),
     }
 
 
+@app.get("/api/admin/model_signals")
+def admin_model_signals(
+    as_of: Optional[str] = Query(default=None),
+    limit_models: int = Query(default=24, ge=1, le=80),
+    limit_per_model: int = Query(default=12, ge=1, le=80),
+):
+    effective_as_of = _frontend_account_as_of(as_of)
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    return _admin_model_signal_feed(
+        effective_as_of,
+        models_payload=models_payload,
+        limit_models=limit_models,
+        limit_per_model=limit_per_model,
+    )
+
+
+def _admin_strategy_trading_account(
+    as_of: Optional[str] = None,
+    model_id: Optional[str] = None,
+    initial_cash: Optional[float] = None,
+    start_date: Optional[str] = None,
+    limit: int = 1000,
+) -> Dict[str, Any]:
+    effective_as_of = _frontend_account_as_of(as_of)
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    catalog = [item for item in _strategy_catalog_items(models_payload) if str((item or {}).get("id") or "") != "active"]
+    requested_id = str(model_id or "").strip()
+    if not requested_id:
+        ready = next((item for item in catalog if item.get("has_runtime_data")), None)
+        requested_id = str((ready or {}).get("id") or DEFAULT_FRONTEND_STRATEGY_ID)
+    model = next((item for item in catalog if str(item.get("id") or "") == requested_id), None)
+    if not model:
+        raise HTTPException(status_code=404, detail="strategy model not found")
+    base_params = model.get("params") if isinstance(model.get("params"), dict) else {}
+    cash = safe_float(initial_cash, safe_float(base_params.get("account_initial_cash"), safe_float(model.get("initial_cash"), 10_000)))
+    params = quant_engine.strategy_params(base_params)
+    params = apply_capital_constraints(params, cash)
+    selected_start = str(start_date or model.get("runtime_start_date") or quant_engine.first_data_date() or "").strip() or None
+    model_version = strategy_evolution.runtime_model_version(model)
+    payload = strategy_evolution.load_runtime_account(
+        requested_id,
+        cash,
+        selected_start,
+        effective_as_of,
+        limit,
+        model_version=model_version,
+        params=params,
+    )
+    if not payload:
+        payload = {
+            "status": "missing",
+            "as_of": effective_as_of,
+            "start_date": selected_start or "",
+            "account": {
+                "initial_cash": round(cash, 2),
+                "total_asset": round(cash, 2),
+                "cash": round(cash, 2),
+                "available_cash": round(cash, 2),
+                "market_value": 0,
+                "position_count": 0,
+                "deal_count": 0,
+                "return_pct": 0,
+            },
+            "positions": [],
+            "today_deals": [],
+            "history_deals": [],
+            "delivery_records": [],
+            "daily_settlements": [],
+            "message": "该策略还没有复盘运行表，请先运行策略复盘或上传合并本地复盘数据",
+        }
+    payload["strategy_name"] = str(model.get("name") or requested_id)
+    payload["strategy_model_id"] = requested_id
+    payload["strategy_model"] = model
+    payload["strategy_account_source"] = payload.get("strategy_account_source") or "strategy_runtime"
+    payload["strategy_scope"] = "strategy_runtime"
+    payload["strategy_params"] = params
+    payload["selected_initial_cash"] = round(cash, 2)
+    payload["selected_start_date"] = selected_start or ""
+    payload["selected_as_of"] = effective_as_of or ""
+    return payload
+
+
 @app.get("/api/admin/trading_account")
 def admin_trading_account(
     as_of: Optional[str] = Query(default=None),
+    model_id: Optional[str] = Query(default=None),
+    initial_cash: Optional[float] = Query(default=None, ge=1000),
+    start_date: Optional[str] = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=2000),
 ):
-    payload = quant_engine.trading_account(as_of=as_of, limit=limit)
-    payload["strategy_account_source"] = "runtime_state"
-    payload["strategy_scope"] = "system_runtime"
-    payload["strategy_name"] = "后台基准账户（仅用于诊断）"
-    return payload
+    return _admin_strategy_trading_account(
+        as_of=as_of,
+        model_id=model_id,
+        initial_cash=initial_cash,
+        start_date=start_date,
+        limit=limit,
+    )
 
 
 @app.websocket("/ws/admin/live")
@@ -1752,7 +2090,7 @@ def quant_apply_strategy_model(model_id: str = Query(...)):
             "type": source_type,
             "model_id": str(model.get("id") or ""),
             "name": str(model.get("name") or model.get("id") or ""),
-            "description": "来自资金档策略设为后台基准参数。" if source_type == "capital_preset" else "来自策略库模型设为后台基准参数。",
+            "description": "来自资金档策略复制为系统默认基础参数。" if source_type == "capital_preset" else "来自策略库模型复制为系统默认基础参数。",
             "objective": model.get("objective"),
             "return_pct": model.get("return_pct"),
             "max_drawdown_pct": model.get("max_drawdown_pct"),
@@ -2141,12 +2479,24 @@ def admin_database_table(
 
 @app.get("/api/admin/cache/status")
 def admin_cache_status():
-    return runtime_cache_status()
+    payload = runtime_cache_status()
+    if isinstance(payload, dict):
+        payload["memory_cache"] = {
+            "row_count": len(_MEMORY_PAYLOAD_CACHE),
+            "max_rows": _MEMORY_PAYLOAD_CACHE_MAX,
+        }
+    return payload
 
 
 @app.post("/api/admin/cache/clear")
 def admin_cache_clear(scope: str = Query(default="expired")):
-    return clear_runtime_cache(scope=scope)
+    scope_text = str(scope or "expired").strip().lower()
+    if scope_text in {"all", "memory", "payload", "expired"}:
+        _memory_cache_clear()
+    result = clear_runtime_cache(scope=scope)
+    if isinstance(result, dict):
+        result["memory_cache_cleared"] = scope_text in {"all", "memory", "payload", "expired"}
+    return result
 
 
 @app.post("/api/admin/data/import")
@@ -2228,6 +2578,7 @@ def admin_frontend_users():
 @app.post("/api/admin/frontend_users")
 def admin_create_frontend_user_api(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
     result = admin_create_frontend_user(payload, request)
+    _memory_cache_clear()
     user = result.get("user") if isinstance(result.get("user"), dict) else {}
     if user:
         _record_user_follow_period(user.get("username"), user.get("profile"), source="admin_create_user", reason="admin_create_user", created_at=user.get("created_at"))
@@ -2244,6 +2595,8 @@ def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body
     except Exception:
         previous = {}
     result = admin_update_frontend_user(username, payload)
+    _frontend_account_cache_clear()
+    _memory_cache_clear()
     user = result.get("user") if isinstance(result.get("user"), dict) else {}
     if user:
         _record_user_follow_period(
@@ -2260,22 +2613,30 @@ def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body
 
 @app.post("/api/admin/frontend_users/{username}/password")
 def admin_reset_frontend_user_password_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
-    return admin_reset_frontend_user_password(username, payload)
+    result = admin_reset_frontend_user_password(username, payload)
+    _memory_cache_clear()
+    return result
 
 
 @app.post("/api/admin/frontend_users/{username}/ban")
 def admin_ban_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
-    return admin_set_frontend_user_disabled(username, True, str((payload or {}).get("reason") or ""))
+    result = admin_set_frontend_user_disabled(username, True, str((payload or {}).get("reason") or ""))
+    _memory_cache_clear()
+    return result
 
 
 @app.post("/api/admin/frontend_users/{username}/unban")
 def admin_unban_frontend_user_api(username: str):
-    return admin_set_frontend_user_disabled(username, False)
+    result = admin_set_frontend_user_disabled(username, False)
+    _memory_cache_clear()
+    return result
 
 
 @app.delete("/api/admin/frontend_users/{username}")
 def admin_delete_frontend_user_api(username: str):
-    return admin_delete_frontend_user(username)
+    result = admin_delete_frontend_user(username)
+    _memory_cache_clear()
+    return result
 
 
 @app.post("/api/admin/restart")

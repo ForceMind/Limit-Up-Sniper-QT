@@ -1177,7 +1177,7 @@ class QuantJobManager:
             add(
                 {
                     "id": "active",
-                    "name": "后台基准参数（非跟随策略）",
+                    "name": "系统默认基础参数（非跟随策略）",
                     "source": "baseline",
                     "reusable": False,
                     "params": base_params,
