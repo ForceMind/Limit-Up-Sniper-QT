@@ -868,7 +868,11 @@
                   </thead>
                   <tbody class="divide-y divide-neutral-100">
                     <tr v-for="model in evolutionModels" :key="model.id" class="hover:bg-neutral-50">
-                      <td class="px-3 py-2"><div class="font-semibold">{{ model.name }}</div><div class="text-xs text-neutral-500">{{ model.id }}</div></td>
+                      <td class="px-3 py-2">
+                        <div class="font-semibold">{{ model.name }}</div>
+                        <div class="text-xs text-neutral-500">{{ model.id }}</div>
+                        <div class="mt-1 text-xs text-neutral-500">{{ strategyParamSummary(model) }}</div>
+                      </td>
                       <td class="px-3 py-2 text-right">{{ fixed(model.objective) }}</td>
                       <td class="px-3 py-2 text-right" :class="numClass(model.return_pct)">{{ pct(model.return_pct) }}</td>
                       <td class="px-3 py-2 text-right">{{ pct(model.max_drawdown_pct) }}</td>
@@ -2940,6 +2944,17 @@
           this.strategyForm = { ...(result.strategy_params || this.strategyForm) };
           this.dashboard.strategy_source = result.strategy_source || this.dashboard.strategy_source || {};
           await this.refreshAll();
+        },
+        strategyParamSummary(model) {
+          const params = (model || {}).params || {};
+          const parts = [
+            `买入阈值 ${this.fixed(params.buy_threshold)}`,
+            `单票 ${this.money(params.paper_position_value)}`,
+            `持仓 ${this.fixed(params.max_positions, 0)}`,
+            `止损 ${this.fixed(params.stop_loss_pct)}%`,
+            `止盈 ${this.fixed(params.take_profit_pct)}%`,
+          ];
+          return `基础参数：${parts.join(' · ')}`;
         },
         async loadStrategyBacktest(model) {
           if (!model || !model.id) return;
