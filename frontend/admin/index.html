@@ -225,7 +225,7 @@
               <div class="text-xs text-neutral-500">上次心跳 {{ shortTime(scheduler.last_tick_at) }}</div>
             </div>
             <div class="divide-y divide-neutral-100">
-              <div v-for="job in jobCards" :key="job.key" class="job-row p-4 grid gap-3 lg:grid-cols-[170px_1fr_180px] lg:items-center">
+              <div v-for="job in jobCards" :key="job.key" class="job-row p-4 grid gap-3 lg:grid-cols-[170px_1fr_minmax(220px,340px)_130px] lg:items-center">
                 <div>
                   <div class="font-semibold">{{ job.label }}</div>
                   <div class="text-xs text-neutral-500 mt-1">{{ job.desc }}</div>
@@ -260,6 +260,10 @@
                   </div>
                   <div class="mt-1 text-xs text-neutral-500">{{ jobState(job.key).progress_message || '' }}</div>
                 </div>
+                <div class="flex flex-wrap gap-2 lg:justify-end">
+                  <button v-if="isJobRunning(job.key)" @click="stopJob(job.key)" class="h-8 px-3 bg-white border border-red-300 text-red-700 text-xs hover:bg-red-50">停止当前</button>
+                  <button v-if="isJobRunning(job.key) || isJobPaused(job.key)" @click="pauseOrResumeJob(job.key)" class="h-8 px-3 bg-white border border-neutral-300 text-xs hover:bg-neutral-50">{{ jobActionText(job.key, '暂停后续') }}</button>
+                </div>
               </div>
             </div>
           </div>
@@ -289,14 +293,22 @@
 
         <section v-if="activeTab === 'signals'" class="space-y-4">
           <div class="panel">
-            <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
               <div>
                 <div class="font-semibold">不同模型买入信号</div>
-                <div class="text-xs text-neutral-500 mt-1">来自策略复盘表，新闻在下方按全局数据展示</div>
+                <div class="text-xs text-neutral-500 mt-1">先选择一个策略，下面只展示该策略的买入信号；全局新闻单独在下方展示</div>
               </div>
-              <div class="text-xs text-neutral-500 text-right">
-                <div>信号日期 {{ modelSignalDate || '-' }}</div>
-                <div v-if="modelSignals.fallback_latest">已自动切到最近有信号日期</div>
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-end">
+                <label class="block text-sm min-w-[260px]">
+                  <span class="block text-xs text-neutral-500 mb-1">策略筛选</span>
+                  <select v-model="signalForm.model_id" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+                    <option v-for="group in modelSignalGroups" :key="'signal-filter-' + group.model_id" :value="group.model_id">{{ group.model_name || group.model_id }}</option>
+                  </select>
+                </label>
+                <div class="text-xs text-neutral-500 sm:text-right">
+                  <div>信号日期 {{ modelSignalDate || '-' }}</div>
+                  <div v-if="modelSignals.fallback_latest">已自动切到最近有信号日期</div>
+                </div>
               </div>
             </div>
             <div class="table-wrap overflow-auto max-h-[520px]">
@@ -337,7 +349,10 @@
 
           <div class="grid grid-cols-1 2xl:grid-cols-[1fr_1fr] gap-4">
             <div class="panel">
-              <div class="px-4 py-3 border-b border-neutral-200 font-semibold">最新新闻</div>
+              <div class="px-4 py-3 border-b border-neutral-200">
+                <div class="font-semibold">全局新闻</div>
+                <div class="text-xs text-neutral-500 mt-1">新闻不按策略过滤，策略信号在上方按模型筛选</div>
+              </div>
               <div class="divide-y divide-neutral-100 max-h-[520px] overflow-auto">
                 <div v-for="item in latestNews" :key="item.id" class="p-3 hover:bg-neutral-50">
                   <div class="flex items-center justify-between gap-2 text-xs text-neutral-500">
@@ -494,7 +509,13 @@
         </section>
 
         <section v-if="activeTab === 'analysis'" class="space-y-4">
-          <div class="panel p-4 grid gap-3 lg:grid-cols-[130px_170px_170px_auto_1fr] lg:items-end">
+          <div class="panel p-4 grid gap-3 lg:grid-cols-[minmax(220px,1fr)_130px_170px_170px_auto_1fr] lg:items-end">
+            <label class="block text-sm">
+              <span class="block text-xs text-neutral-500 mb-1">复盘策略</span>
+              <select v-model="timelineForm.model_id" @change="loadTimeline(true)" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
+                <option v-for="model in evolutionModels" :key="'timeline-model-' + model.id" :value="model.id">{{ model.name || model.id }}</option>
+              </select>
+            </label>
             <label class="block text-sm">
               <span class="block text-xs text-neutral-500 mb-1">复盘类型</span>
               <select v-model="tradeMode" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
@@ -511,7 +532,10 @@
               <input v-model="timelineForm.end_date" type="date" class="w-full h-9 px-3 border border-neutral-300 bg-white text-sm">
             </label>
             <button @click="loadTimeline(false)" :disabled="timelineLoading" class="h-9 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ timelineLoading ? '加载中' : '加载复盘' }}</button>
-            <div class="text-sm text-neutral-500 lg:text-right">当前模式 {{ activeTimeline.mode || (tradeMode === 'intraday' ? 'intraday_5m' : 'daily') }}</div>
+            <div class="text-sm text-neutral-500 lg:text-right">
+              <div>当前策略 {{ activeTimeline.strategy_name || selectedTimelineModel.name || '-' }}</div>
+              <div class="text-xs">模式 {{ activeTimeline.mode || (tradeMode === 'intraday' ? 'intraday_5m' : 'daily') }}</div>
+            </div>
           </div>
 
           <div class="grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-7 gap-3">
@@ -1288,7 +1312,10 @@
               <label><span class="block text-xs text-neutral-500 mb-1">补数开始</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">补数结束</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="5000" class="w-full h-9 px-2 border border-neutral-300"></label>
-              <div class="text-xs text-neutral-500 flex items-end pb-2">系统启动、日K补齐、龙虎榜同步、策略复盘都会使用这个范围；不填开始则使用服务器已有数据最早日期。</div>
+              <div class="text-xs text-neutral-500 flex items-end pb-2">重启后默认不自动跑任务。系统启动、日K补齐、龙虎榜同步、策略复盘都会使用这个范围；不填开始则使用服务器已有数据最早日期。</div>
+            </div>
+            <div class="mx-4 mb-2 text-xs text-neutral-500">
+              策略复盘：{{ strategyReplayPlanText }}
             </div>
             <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-4">
               <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '系统启动') }}</button>
@@ -1566,14 +1593,14 @@
             { key: 'ops', label: '运维' },
           ],
           jobCards: [
-            { key: 'system_startup', label: '系统启动', desc: '自动补新闻、补日K、同步龙虎榜、重建模拟交易' },
+            { key: 'system_startup', label: '系统启动', desc: '手动执行新闻、AI、日K、龙虎榜、分时、交易和策略复盘流程' },
             { key: 'news_fetch', label: '新闻抓取', desc: '24小时新闻轮询' },
             { key: 'ai_analysis', label: 'AI结构化', desc: '情绪、事件、行业、个股' },
             { key: 'market_sync', label: '分时行情', desc: '交易时段同步必盈数据' },
             { key: 'kline_fill', label: '日K补齐', desc: '回测前补齐缺失K线' },
             { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
-            { key: 'strategy_replay', label: '策略复盘', desc: '从服务器已有数据起点滚动验证' },
+            { key: 'strategy_replay', label: '策略复盘', desc: '按日期窗口复盘全部资金档策略和策略库模型' },
           ],
           tradeViews: [
             { key: 'positions', label: '持仓' },
@@ -1635,6 +1662,7 @@
           tradingForm: { model_id: 'capital_10000', initial_cash: 10000, start_date: '' },
           newsFeed: {},
           modelSignals: {},
+          signalForm: { model_id: '' },
           biyingStatus: {},
           lhbStatus: {},
           coverage: {},
@@ -1694,7 +1722,7 @@
           showPayloads: false,
           syncForm: { date: '', source: 'auto', max_codes: 80, force: false },
           dataFillForm: { start_date: '', end_date: '', max_codes: 300, force: false },
-          timelineForm: { start_date: '', end_date: '' },
+          timelineForm: { model_id: 'capital_10000', start_date: '', end_date: '' },
           strategyForm: {},
           refreshTimer: null,
           logTimer: null,
@@ -1761,27 +1789,29 @@
         stockCount() { return this.data.stock_count || 0; },
         account() { return this.tradingAccount.account || {}; },
         timeline() {
-          const current = this.dashboard.timeline || {};
-          return Object.keys(current).length ? current : (this.activeTimeline || {});
+          return this.activeTimeline || {};
         },
         recommendations() { return (this.dashboard.recommendations || {}).items || []; },
         modelSignalGroups() { return (this.modelSignals.items || []).filter(item => (item.signals || []).length); },
+        selectedModelSignalGroup() {
+          const selectedId = String(this.signalForm.model_id || '');
+          return this.modelSignalGroups.find(group => String(group.model_id || '') === selectedId) || this.modelSignalGroups[0] || {};
+        },
         modelSignalDate() { return this.modelSignals.data_date || this.modelSignals.as_of || this.asOf || ''; },
         modelSignalRows() {
-          return this.modelSignalGroups.flatMap(group => {
-            const signals = Array.isArray(group.signals) ? group.signals : [];
-            return signals.map(signal => ({
-              ...signal,
-              row_key: `${group.model_id}-${signal.signal_id || `${signal.date}-${signal.code}`}`,
-              model_id: group.model_id,
-              model_name: group.model_name,
-              initial_cash: signal.initial_cash || group.initial_cash,
-              return_pct: group.return_pct,
-              max_drawdown_pct: group.max_drawdown_pct,
-              win_rate: group.win_rate,
-              model_signal_count: group.signal_count,
-            }));
-          });
+          const group = this.selectedModelSignalGroup || {};
+          const signals = Array.isArray(group.signals) ? group.signals : [];
+          return signals.map(signal => ({
+            ...signal,
+            row_key: `${group.model_id}-${signal.signal_id || `${signal.date}-${signal.code}`}`,
+            model_id: group.model_id,
+            model_name: group.model_name,
+            initial_cash: signal.initial_cash || group.initial_cash,
+            return_pct: group.return_pct,
+            max_drawdown_pct: group.max_drawdown_pct,
+            win_rate: group.win_rate,
+            model_signal_count: group.signal_count,
+          }));
         },
         buyList() {
           const planned = this.dailyPlan.buy_list || [];
@@ -1856,6 +1886,15 @@
         },
         selectedTradingModel() {
           return this.evolutionModels.find(item => String(item.id) === String(this.tradingForm.model_id)) || {};
+        },
+        selectedTimelineModel() {
+          return this.evolutionModels.find(item => String(item.id) === String(this.timelineForm.model_id)) || {};
+        },
+        strategyReplayPlanText() {
+          const start = this.timelineForm.start_date || this.dataFillForm.start_date || this.dataStartDate || '-';
+          const end = this.timelineForm.end_date || this.dataFillForm.end_date || this.asOf || '-';
+          const count = this.evolutionModels.length || ((this.strategyModels || {}).count || 0);
+          return `复盘全部资金档策略和策略库模型，约 ${count} 个；窗口 ${start} 到 ${end}；模式 ${this.tradeMode === 'daily' ? '日线' : '分时'}；后台按批次写入策略运行表。`;
         },
         minuteCacheCount() {
           const dates = this.biyingStatus.cache_dates || {};
@@ -2194,8 +2233,25 @@
           this.timelineForm.end_date = this.asOf || dashboard.as_of || this.timelineForm.end_date;
           this.strategyForm = { ...(dashboard.strategy_params || this.strategyForm || {}) };
           this.ensureTradingFormDefaults();
-          if (!this.activeTimeline.start_date) this.activeTimeline = dashboard.timeline || {};
+          this.ensureSignalFormDefaults();
+          this.ensureTimelineFormDefaults();
           if (!this.selectedDayDate && this.historyDays.length) this.selectedDayDate = this.historyDays[0].date;
+        },
+        ensureSignalFormDefaults() {
+          const groups = this.modelSignalGroups || [];
+          if (!groups.length) {
+            this.signalForm.model_id = '';
+            return;
+          }
+          const current = groups.find(group => String(group.model_id || '') === String(this.signalForm.model_id || ''));
+          if (!current) this.signalForm.model_id = groups[0].model_id || '';
+        },
+        ensureTimelineFormDefaults() {
+          const models = this.evolutionModels || [];
+          if (!models.length) return;
+          const current = models.find(item => String(item.id) === String(this.timelineForm.model_id));
+          const selected = current || models.find(item => item.has_runtime_data) || models[0];
+          if (!current && selected) this.timelineForm.model_id = selected.id;
         },
         ensureTradingFormDefaults() {
           const models = this.evolutionModels || [];
@@ -2614,8 +2670,13 @@
           if (this.isJobRunning('strategy_replay') || this.isJobPaused('strategy_replay')) return this.pauseOrResumeJob('strategy_replay');
           this.replayingStrategy = true;
           try {
-            const q = new URLSearchParams({ start_date: this.timelineForm.start_date || this.dataStartDate || '', mode: 'intraday', background: 'true', process: 'true' });
-            if (this.asOf) q.set('end_date', this.asOf);
+            const q = new URLSearchParams({
+              start_date: this.timelineForm.start_date || this.dataFillForm.start_date || this.dataStartDate || '',
+              mode: this.tradeMode || 'intraday',
+              background: 'true',
+              process: 'true',
+            });
+            if (this.timelineForm.end_date || this.dataFillForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.dataFillForm.end_date || this.asOf);
             await this.api(`/api/jobs/strategy/replay?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
@@ -2978,7 +3039,9 @@
         async loadTimeline(quiet = false) {
           this.timelineLoading = !quiet;
           try {
+            this.ensureTimelineFormDefaults();
             const q = new URLSearchParams();
+            if (this.timelineForm.model_id) q.set('model_id', this.timelineForm.model_id);
             if (this.timelineForm.start_date) q.set('start_date', this.timelineForm.start_date);
             if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
             const endpoint = this.tradeMode === 'intraday' ? '/api/quant/intraday_timeline' : '/api/quant/timeline';
@@ -3059,6 +3122,10 @@
         jobState(key) {
           return ((this.jobStatus.jobs || {})[key]) || {};
         },
+        jobPayload(key) {
+          const state = this.jobState(key);
+          return state.last_payload || {};
+        },
         isJobRunning(key) {
           return Boolean((this.runningJobs || {})[key] || this.jobState(key).status === 'running');
         },
@@ -3072,8 +3139,9 @@
           return Math.max(0, Math.min(100, Number(state.progress_pct || (state.status === 'ok' ? 100 : 0))));
         },
         jobActionText(key, idleText) {
-          if (this.isJobRunning(key)) return '暂停';
-          if (this.isJobPaused(key)) return '恢复';
+          const label = this.logJobLabel(key);
+          if (this.isJobRunning(key)) return `暂停后续${label}`;
+          if (this.isJobPaused(key)) return `恢复${label}`;
           return idleText;
         },
         async pauseOrResumeJob(key) {
@@ -3082,16 +3150,31 @@
           await this.refreshAll();
           if (!this.liveConnected) await this.fetchLogs();
         },
+        async stopJob(key) {
+          const label = this.logJobLabel(key);
+          if (!window.confirm(`确认停止当前${label}任务吗？正在执行的独立进程会被终止，普通后台任务会在检查点结束。`)) return;
+          await this.api(`/api/jobs/${key}/stop`, { method: 'POST' });
+          await this.refreshAll();
+          if (!this.liveConnected) await this.fetchLogs();
+        },
         jobSummary(key) {
           const result = this.jobState(key).last_result || {};
-          if (key === 'system_startup') return this.jobState(key).progress_message || `范围 ${result.start_date || '-'} 到 ${result.date || '-'}`;
-          if (key === 'news_fetch') return `抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
-          if (key === 'ai_analysis') return `选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
-          if (key === 'market_sync') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，写入 ${result.rows_written || 0}`;
-          if (key === 'kline_fill') return `请求 ${result.requested || 0}，成功 ${result.fetched || 0}，新增 ${result.added_rows || 0}`;
-          if (key === 'lhb_sync') return `股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}，新增 ${result.added_rows || 0}`;
-          if (key === 'trade_cycle') return `交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
-          if (key === 'strategy_replay') return `收益 ${this.pct(result.return_pct)}，交易 ${result.trade_count || 0}，闭环 ${result.closed_trades || 0}`;
+          const payload = this.jobPayload(key);
+          const start = result.start_date || payload.start_date || '-';
+          const end = result.end_date || result.date || payload.end_date || payload.date || '-';
+          if (key === 'system_startup') return `手动启动流程：新闻、AI、日K、龙虎榜、分时、交易、策略复盘；范围 ${start} 到 ${end}`;
+          if (key === 'news_fetch') return `新闻抓取：最近 ${payload.hours || 24} 小时，抓取 ${result.fetched || 0}，入库 ${result.inserted || 0}，总数 ${result.total || 0}`;
+          if (key === 'ai_analysis') return `AI分析：截至 ${payload.as_of || this.asOf || '-'}，选中 ${result.selected || 0}，入库 ${result.records_added || 0}，股票 ${result.stocks || 0}`;
+          if (key === 'market_sync') return `分时行情：日期 ${payload.date || result.date || this.asOf || '-'}，来源 ${payload.source || '-'}，请求 ${result.requested || 0}，成功 ${result.fetched || 0}`;
+          if (key === 'kline_fill') return `日K补齐：${start} 到 ${end}，上限 ${payload.max_codes || '-'}，请求 ${result.requested || 0}，新增 ${result.added_rows || 0}`;
+          if (key === 'lhb_sync') return `龙虎榜同步：${start} 到 ${end}，股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}`;
+          if (key === 'trade_cycle') return `交易循环：日期 ${payload.date || result.date || this.asOf || '-'}，交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
+          if (key === 'strategy_replay') {
+            const modelCount = result.model_count || payload.target_count || 0;
+            const requestedStart = result.requested_start_date || payload.requested_start_date || start;
+            const requestedEnd = result.requested_end_date || payload.requested_end_date || end;
+            return `策略复盘：${payload.target_scope || result.target_scope || '全部策略'}，${modelCount} 个；本批 ${start} 到 ${end}，请求范围 ${requestedStart} 到 ${requestedEnd}，模式 ${result.mode || payload.mode || '-'}`;
+          }
           if (key === 'strategy_evolution') return `模型 ${(result.models || []).length || 0}，最佳收益 ${this.pct(((result.best_model || result.best || {}).return_pct))}`;
           return '-';
         },
@@ -3099,6 +3182,7 @@
           const text = String(status || '').toLowerCase();
           if (text === 'running') return 'bg-sky-100 text-sky-800';
           if (text === 'ok') return 'bg-emerald-100 text-emerald-800';
+          if (text === 'stopped' || text === 'stop_requested') return 'bg-amber-100 text-amber-800';
           if (text === 'failed') return 'bg-red-100 text-red-800';
           return 'bg-neutral-100 text-neutral-700';
         },

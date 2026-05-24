@@ -1,4 +1,5 @@
 import io
+from contextlib import nullcontext
 import json
 import sqlite3
 import sys
@@ -15,6 +16,7 @@ if str(BACKEND_DIR) not in sys.path:
 from app import main as main_module
 from app.quant import access_audit as access_audit_module
 from app.quant import database_inspector as database_inspector_module
+from app.quant import jobs as jobs_module
 from app.quant import security as security_module
 
 
@@ -286,6 +288,55 @@ def test_admin_snapshot_trading_account_and_access_logs(tmp_path, monkeypatch):
     assert logs.json()["status"] == "ok"
 
 
+def test_quant_timeline_can_run_against_selected_strategy(tmp_path, monkeypatch):
+    client, headers, _data_dir, _backup_dir = _client(tmp_path, monkeypatch)
+    captured = {}
+
+    monkeypatch.setattr(
+        main_module,
+        "_find_strategy_model",
+        lambda model_id: {
+            "id": model_id,
+            "name": "小资金策略",
+            "params": {
+                "account_initial_cash": 12000,
+                "max_positions": 2,
+                "max_hold_days": 4,
+                "top_n": 3,
+            },
+        },
+    )
+    monkeypatch.setattr(main_module.quant_engine, "temporary_strategy_params", lambda params: nullcontext())
+
+    def fake_intraday(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "ok",
+            "mode": "intraday_5m",
+            "start_date": kwargs.get("start_date"),
+            "end_date": kwargs.get("end_date"),
+            "return_pct": 1.2,
+            "trades": [],
+        }
+
+    monkeypatch.setattr(main_module.quant_engine, "walk_forward_intraday", fake_intraday)
+
+    response = client.get(
+        "/api/quant/intraday_timeline?model_id=capital_10000&start_date=2026-03-01&end_date=2026-03-08",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["strategy_model_id"] == "capital_10000"
+    assert payload["strategy_name"] == "小资金策略"
+    assert payload["strategy_scope"] == "strategy_model"
+    assert captured["initial_cash"] == 12000
+    assert captured["max_positions"] == 2
+    assert captured["hold_days"] == 4
+    assert captured["top_n"] == 3
+
+
 def test_admin_system_startup_and_restart_are_controlled(tmp_path, monkeypatch):
     client, headers, _data_dir, _backup_dir = _client(tmp_path, monkeypatch)
     captured = {}
@@ -310,3 +361,44 @@ def test_admin_system_startup_and_restart_are_controlled(tmp_path, monkeypatch):
     assert captured["payload"]["market_codes"] == 12
     assert restart.status_code == 200
     assert restart.json()["status"] == "disabled"
+
+
+def test_jobs_stop_marks_running_task_stop_requested(tmp_path, monkeypatch):
+    client, headers, data_dir, _backup_dir = _client(tmp_path, monkeypatch)
+    state_file = data_dir / "quant_job_state.json"
+    log_file = data_dir / "quant_runtime_logs.jsonl"
+    monkeypatch.setattr(main_module.job_manager, "state_file", state_file)
+    monkeypatch.setattr(jobs_module, "JOB_LOG_FILE", log_file)
+    state_file.write_text(
+        json.dumps(
+            {
+                "scheduler": {},
+                "paused_jobs": {},
+                "jobs": {
+                    "strategy_replay": {
+                        "name": "strategy_replay",
+                        "status": "running",
+                        "process": False,
+                        "progress_pct": 35,
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with main_module.job_manager._lock:
+        main_module.job_manager._running["strategy_replay"] = True
+    try:
+        response = client.post("/api/jobs/strategy_replay/stop", headers=headers)
+    finally:
+        with main_module.job_manager._lock:
+            main_module.job_manager._running.pop("strategy_replay", None)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "stop_requested"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    current = state["jobs"]["strategy_replay"]
+    assert current["status"] == "running"
+    assert current["stop_requested"] is True
+    assert current["progress_message"] == "已请求停止当前任务"

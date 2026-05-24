@@ -5,6 +5,7 @@ import ctypes
 import gc
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -145,6 +146,8 @@ class QuantJobManager:
             "process_pid",
             "started_at",
             "finished_at",
+            "last_started_at",
+            "last_finished_at",
             "updated_at",
             "duration_ms",
             "progress_pct",
@@ -152,8 +155,47 @@ class QuantJobManager:
             "message",
             "error",
             "exit_code",
+            "stop_requested",
+            "stop_requested_at",
+            "stop_message",
         )
         compact = {key: item.get(key) for key in keep_keys if key in item}
+        summary_keys = {
+            "status",
+            "message",
+            "date",
+            "as_of",
+            "start_date",
+            "end_date",
+            "requested_start_date",
+            "requested_end_date",
+            "mode",
+            "hours",
+            "pages",
+            "page_size",
+            "source",
+            "max_codes",
+            "target_scope",
+            "target_count",
+            "fetched",
+            "inserted",
+            "total",
+            "selected",
+            "records_added",
+            "stocks",
+            "requested",
+            "added_rows",
+            "requested_stock_days",
+            "seat_rows_fetched",
+            "trades",
+            "buys",
+            "sells",
+            "model_count",
+            "return_pct",
+            "trade_count",
+            "closed_trades",
+            "signal_count",
+        }
         payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
         if payload:
             compact["payload_summary"] = {
@@ -161,6 +203,12 @@ class QuantJobManager:
                 for key, value in payload.items()
                 if key in {"status", "as_of", "date", "start_date", "end_date", "count", "processed", "fetched", "added_rows", "updated_rows"}
             }
+        last_payload = item.get("last_payload") if isinstance(item.get("last_payload"), dict) else {}
+        if last_payload:
+            compact["last_payload"] = {key: value for key, value in last_payload.items() if key in summary_keys}
+        last_result = item.get("last_result") if isinstance(item.get("last_result"), dict) else {}
+        if last_result:
+            compact["last_result"] = {key: value for key, value in last_result.items() if key in summary_keys}
         return compact
 
     def _compact_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -266,7 +314,8 @@ class QuantJobManager:
             for name, current in jobs.items():
                 if not isinstance(current, dict):
                     continue
-                if current.get("status") != "running" or not current.get("process"):
+                status_text = str(current.get("status") or "")
+                if status_text not in {"running", "stop_requested"} or not current.get("process"):
                     continue
                 pid = current.get("process_pid")
                 started_at = self._parse_iso_ts(current.get("last_started_at") or current.get("started_at"))
@@ -274,26 +323,32 @@ class QuantJobManager:
                     continue
                 if self._pid_alive(pid):
                     continue
-                message = "独立进程已退出但没有写入完成状态，任务已标记失败"
+                stopped = bool(current.get("stop_requested")) or status_text == "stop_requested"
+                message = "停止请求后的独立进程已退出" if stopped else "独立进程已退出但没有写入完成状态，任务已标记失败"
                 current.update(
                     {
-                        "status": "failed",
+                        "status": "stopped" if stopped else "failed",
                         "progress_message": message,
-                        "progress_pct": current.get("progress_pct") or 1,
-                        "last_error": message,
+                        "progress_pct": 100 if stopped else current.get("progress_pct") or 1,
+                        "last_error": "" if stopped else message,
                         "last_finished_at": _iso_now(),
                         "updated_at": _iso_now(),
+                        "process": False,
+                        "process_pid": "",
+                        "stop_requested": False,
+                        "stop_requested_at": "",
+                        "stop_message": "",
                     }
                 )
-                stale_jobs.append({"job": name, "pid": pid, "message": message})
+                stale_jobs.append({"job": name, "pid": pid, "message": message, "stopped": stopped})
             if stale_jobs:
                 self._save_state(state)
         for item in stale_jobs:
             self._append_log(
-                "error",
+                "warning" if item.get("stopped") else "error",
                 item["message"],
                 job=str(item["job"]),
-                stage="process_stale",
+                stage="process_stopped" if item.get("stopped") else "process_stale",
                 payload={"pid": item.get("pid")},
             )
         return {"status": "ok", "stale_jobs": stale_jobs, "count": len(stale_jobs)}
@@ -378,6 +433,9 @@ class QuantJobManager:
                     "last_payload": payload,
                 }
             )
+            current.pop("stop_requested", None)
+            current.pop("stop_requested_at", None)
+            current.pop("stop_message", None)
             self._save_state(state)
         self._append_log("info", f"{_job_label(name)}已开始", job=name, stage="start", payload=payload)
 
@@ -391,24 +449,39 @@ class QuantJobManager:
             current = jobs.setdefault(name, {})
             success_count = int(current.get("success_count", 0) or 0)
             failure_count = int(current.get("failure_count", 0) or 0)
+            stopped_count = int(current.get("stopped_count", 0) or 0)
+            result_status = str(result.get("status") if isinstance(result, dict) else "").strip().lower()
+            stop_requested = bool(current.get("stop_requested"))
             if error:
                 failure_count += 1
                 status = "failed"
+                progress_message = "任务失败"
+            elif result_status in {"stopped", "cancelled", "canceled", "stop_requested"} or stop_requested:
+                stopped_count += 1
+                status = "stopped"
+                progress_message = str(result.get("message") if isinstance(result, dict) else "") or "任务已停止"
             else:
                 success_count += 1
                 status = "ok"
+                progress_message = "任务完成"
             current.update(
                 {
                     "name": name,
                     "status": status,
                     "progress_pct": 100,
-                    "progress_message": "任务失败" if error else "任务完成",
+                    "progress_message": progress_message,
                     "last_finished_at": _iso_now(),
                     "duration_ms": round((time.time() - started) * 1000, 2),
                     "success_count": success_count,
                     "failure_count": failure_count,
+                    "stopped_count": stopped_count,
                     "last_error": error,
                     "last_result": result,
+                    "process": False,
+                    "process_pid": "",
+                    "stop_requested": False,
+                    "stop_requested_at": "",
+                    "stop_message": "",
                 }
             )
             self._save_state(state)
@@ -475,6 +548,164 @@ class QuantJobManager:
             self._save_state(state)
         self._append_log("info", f"{_job_label(name)}已恢复调度", job=name, stage="resume")
         return {"status": "ok", "job": name, "paused": False}
+
+    def is_stop_requested(self, name: str) -> bool:
+        name = str(name or "").strip()
+        if not name:
+            return False
+        state = self._load_state()
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        current = jobs.get(name) if isinstance(jobs.get(name), dict) else {}
+        return bool(current.get("stop_requested"))
+
+    def _terminate_process_tree(self, pid: Any) -> Dict[str, Any]:
+        try:
+            value = int(pid)
+        except Exception:
+            return {"status": "error", "message": "进程号无效", "pid": pid}
+        if value <= 0:
+            return {"status": "error", "message": "进程号无效", "pid": value}
+        if not self._pid_alive(value):
+            return {"status": "ok", "message": "进程已经退出", "pid": value, "alive": False}
+        if os.name == "nt":
+            try:
+                completed = subprocess.run(
+                    ["taskkill", "/PID", str(value), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                return {
+                    "status": "ok" if completed.returncode == 0 else "error",
+                    "pid": value,
+                    "return_code": completed.returncode,
+                    "stdout": (completed.stdout or "").strip()[:500],
+                    "stderr": (completed.stderr or "").strip()[:500],
+                    "alive": self._pid_alive(value),
+                }
+            except Exception as exc:
+                return {"status": "error", "message": str(exc), "pid": value, "alive": self._pid_alive(value)}
+
+        errors = []
+        try:
+            os.killpg(value, signal.SIGTERM)
+        except Exception as exc:
+            errors.append(f"killpg SIGTERM: {exc}")
+            try:
+                os.kill(value, signal.SIGTERM)
+            except Exception as inner_exc:
+                errors.append(f"kill SIGTERM: {inner_exc}")
+        time.sleep(0.5)
+        if self._pid_alive(value):
+            try:
+                os.killpg(value, signal.SIGKILL)
+            except Exception as exc:
+                errors.append(f"killpg SIGKILL: {exc}")
+                try:
+                    os.kill(value, signal.SIGKILL)
+                except Exception as inner_exc:
+                    errors.append(f"kill SIGKILL: {inner_exc}")
+        return {
+            "status": "ok" if not self._pid_alive(value) else "error",
+            "pid": value,
+            "alive": self._pid_alive(value),
+            "errors": errors,
+        }
+
+    def stop_job(self, name: str) -> Dict[str, Any]:
+        name = str(name or "").strip()
+        if not name:
+            return {"status": "error", "message": "任务名称不能为空"}
+        self.reconcile_process_jobs()
+        with self._state_lock:
+            state = self._load_state()
+            jobs = state.setdefault("jobs", {})
+            current = jobs.setdefault(name, {"name": name})
+            state_running = current.get("status") == "running"
+            process_pid = current.get("process_pid")
+            process_running = bool(current.get("process") and process_pid)
+            with self._lock:
+                memory_running = bool(self._running.get(name))
+            if not state_running and not memory_running:
+                current["progress_message"] = "当前没有正在运行的任务"
+                current["updated_at"] = _iso_now()
+                self._save_state(state)
+                return {"status": "idle", "job": name, "message": "当前没有正在运行的任务"}
+
+            if state_running and not memory_running and not process_running:
+                current.update(
+                    {
+                        "status": "stopped",
+                        "progress_pct": 100,
+                        "progress_message": "任务状态已清理：当前进程没有运行该任务",
+                        "last_finished_at": _iso_now(),
+                        "updated_at": _iso_now(),
+                    }
+                )
+                self._save_state(state)
+                self._append_log("warning", f"{_job_label(name)}运行状态已清理", job=name, stage="stop")
+                return {"status": "stopped", "job": name, "message": "任务状态已清理：当前进程没有运行该任务"}
+
+            current.update(
+                {
+                    "stop_requested": True,
+                    "stop_requested_at": _iso_now(),
+                    "stop_message": "已请求停止当前任务",
+                    "progress_message": "已请求停止当前任务",
+                    "updated_at": _iso_now(),
+                }
+            )
+            self._save_state(state)
+
+        if process_running:
+            kill_result = self._terminate_process_tree(process_pid)
+            kill_ok = kill_result.get("status") == "ok" and not bool(kill_result.get("alive"))
+            with self._state_lock:
+                state = self._load_state()
+                jobs = state.setdefault("jobs", {})
+                current = jobs.setdefault(name, {"name": name})
+                stopped_count = int(current.get("stopped_count", 0) or 0) + 1
+                current.update(
+                    {
+                        "name": name,
+                        "status": "stopped" if kill_ok else "stop_requested",
+                        "progress_pct": 100 if kill_ok else current.get("progress_pct", 1),
+                        "progress_message": "当前任务已停止" if kill_ok else "已请求停止当前任务，请稍后查看进程状态",
+                        "last_finished_at": _iso_now() if kill_ok else current.get("last_finished_at", ""),
+                        "updated_at": _iso_now(),
+                        "stopped_count": stopped_count,
+                        "last_result": {
+                            "status": "stopped" if kill_ok else "stop_requested",
+                            "message": "当前任务已停止" if kill_ok else "停止信号已发送，但进程仍需稍后确认",
+                            "terminate": kill_result,
+                        },
+                        "process": False if kill_ok else True,
+                        "process_pid": "" if kill_ok else process_pid,
+                        "stop_requested": False if kill_ok else True,
+                        "stop_requested_at": "" if kill_ok else current.get("stop_requested_at", ""),
+                        "stop_message": "" if kill_ok else "已请求停止当前任务",
+                    }
+                )
+                self._save_state(state)
+            with self._lock:
+                self._running[name] = False
+            self._append_log(
+                "warning",
+                f"{_job_label(name)}{'已停止当前独立进程' if kill_ok else '已发送停止信号'}",
+                job=name,
+                stage="stop",
+                payload=kill_result,
+            )
+            return {"status": "stopped" if kill_ok else "stop_requested", "job": name, "process": True, "terminate": kill_result}
+
+        self._append_log("warning", f"{_job_label(name)}已请求停止，将在下一个检查点结束", job=name, stage="stop")
+        return {
+            "status": "stop_requested",
+            "job": name,
+            "process": False,
+            "message": "已请求停止当前任务；非独立进程任务会在下一个检查点结束",
+        }
 
     def is_running(self, name: str) -> bool:
         name = str(name or "").strip()
@@ -837,6 +1068,16 @@ class QuantJobManager:
             batch_days=batch_days,
             use_cursor=use_cursor,
         )
+        target_preview = self._strategy_replay_targets()
+        target_names = [
+            {
+                "model_id": str(model.get("id") or ""),
+                "model_name": str(model.get("name") or model.get("id") or ""),
+                "source": str(model.get("source") or ""),
+            }
+            for model in target_preview[:12]
+            if isinstance(model, dict)
+        ]
         payload = {
             "start_date": replay_start_date,
             "end_date": replay_end_date,
@@ -845,12 +1086,25 @@ class QuantJobManager:
             "mode": mode,
             "batch_days": replay_cursor.get("batch_days"),
             "cursor_enabled": replay_cursor.get("enabled"),
+            "target_scope": "全部资金档策略和策略库模型",
+            "target_count": len(target_preview),
+            "target_preview": target_names,
+            "description": (
+                f"复盘全部资金档策略和策略库模型，共 {len(target_preview)} 个；"
+                f"本批窗口 {replay_start_date} 到 {replay_end_date}，请求范围 {requested_start_date} 到 {requested_end_date}"
+            ),
         }
         if process:
-            return self.run_job_process("strategy_replay", payload=payload, message="策略复盘已转入独立进程运行")
+            return self.run_job_process("strategy_replay", payload=payload, message=payload["description"])
 
         def execute() -> Dict[str, Any]:
-            targets = self._strategy_replay_targets()
+            targets = target_preview
+            self.update_progress(
+                "strategy_replay",
+                3,
+                f"准备复盘 {len(targets)} 个策略，窗口 {replay_start_date} 到 {replay_end_date}",
+                payload,
+            )
             fill_result = quant_engine.ensure_daily_kline_for_events(
                 start_date=replay_start_date,
                 end_date=replay_end_date,
@@ -869,8 +1123,36 @@ class QuantJobManager:
                 "closed_trades": 0,
             }
             first_result: Dict[str, Any] = {}
-            for model in targets:
+            total_targets = max(1, len(targets))
+            stopped = self.is_stop_requested("strategy_replay")
+            for index, model in enumerate(targets, start=1):
+                if stopped or self.is_stop_requested("strategy_replay"):
+                    stopped = True
+                    self.update_progress(
+                        "strategy_replay",
+                        5 + (index - 1) / total_targets * 90,
+                        "已请求停止策略复盘，正在结束当前批次",
+                        {
+                            "processed_models": len(model_results),
+                            "target_count": len(targets),
+                            "start_date": replay_start_date,
+                            "end_date": replay_end_date,
+                        },
+                    )
+                    break
                 params = model.get("params") if isinstance(model.get("params"), dict) else {}
+                self.update_progress(
+                    "strategy_replay",
+                    5 + (index - 1) / total_targets * 90,
+                    f"复盘 {index}/{len(targets)}：{model.get('name') or model.get('id')}，{replay_start_date} 到 {replay_end_date}",
+                    {
+                        "model_id": model.get("id"),
+                        "model_name": model.get("name"),
+                        "start_date": replay_start_date,
+                        "end_date": replay_end_date,
+                        "mode": mode,
+                    },
+                )
                 with quant_engine.temporary_strategy_params(params):
                     if mode == "daily":
                         result = quant_engine.walk_forward(
@@ -935,7 +1217,8 @@ class QuantJobManager:
             days = result.get("days") if isinstance(result.get("days"), list) else []
             trades = result.get("trades") if isinstance(result.get("trades"), list) else []
             output = {
-                "status": "ok",
+                "status": "stopped" if stopped else "ok",
+                "message": "策略复盘已按请求停止" if stopped else "策略复盘完成",
                 "mode": result.get("mode") or mode,
                 "start_date": result.get("start_date") or replay_start_date,
                 "end_date": result.get("end_date") or replay_end_date,
@@ -956,12 +1239,16 @@ class QuantJobManager:
                 "models": model_results,
                 "runtime_tables": aggregate,
                 "batch": replay_cursor,
+                "target_scope": payload["target_scope"],
+                "target_count": len(targets),
+                "target_preview": target_names,
             }
-            self._advance_strategy_replay_cursor(output)
+            if not stopped:
+                self._advance_strategy_replay_cursor(output)
             return output
 
         if background:
-            return self.run_job_background("strategy_replay", execute, payload=payload, message="策略复盘已转入后台运行")
+            return self.run_job_background("strategy_replay", execute, payload=payload, message=payload["description"])
         return self.run_job("strategy_replay", execute, payload=payload)
 
     def run_strategy_evolution(

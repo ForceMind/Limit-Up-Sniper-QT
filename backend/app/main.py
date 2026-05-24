@@ -468,7 +468,9 @@ async def api_auth_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup_jobs():
-    if _env_flag("QUANT_SCHEDULER_ENABLED", default=True):
+    if _env_flag("QT_MANUAL_TASK_START_ONLY", default=True):
+        job_manager.mark_scheduler_disabled("QT_MANUAL_TASK_START_ONLY=1，服务重启后只允许手动启动任务")
+    elif _env_flag("QUANT_SCHEDULER_ENABLED", default=False):
         job_manager.start()
     else:
         job_manager.mark_scheduler_disabled("QUANT_SCHEDULER_ENABLED=0")
@@ -1563,6 +1565,78 @@ def _model_backtest_payload(
     }
 
 
+def _quant_timeline_payload(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool = True,
+    auto_fill: bool = True,
+) -> Dict[str, Any]:
+    clean_model_id = str(model_id or "").strip()
+    if not clean_model_id:
+        if intraday:
+            return quant_engine.walk_forward_intraday(
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=initial_cash,
+                max_positions=max_positions,
+                hold_days=hold_days,
+                top_n=top_n,
+                use_daily_fallback=use_daily_fallback,
+                auto_fill=auto_fill,
+            )
+        return quant_engine.walk_forward(
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=hold_days,
+            top_n=top_n,
+            auto_fill=auto_fill,
+        )
+
+    model = _find_strategy_model(clean_model_id)
+    params = quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {})
+    effective_initial_cash = initial_cash if initial_cash is not None else safe_float(params.get("account_initial_cash"), 100000)
+    effective_max_positions = max_positions if max_positions is not None else int(safe_float(params.get("max_positions"), 5))
+    effective_hold_days = hold_days if hold_days is not None else int(safe_float(params.get("max_hold_days"), 3))
+    effective_top_n = top_n if top_n is not None else int(safe_float(params.get("top_n"), 5))
+    with quant_engine.temporary_strategy_params(params):
+        if intraday:
+            payload = quant_engine.walk_forward_intraday(
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=effective_initial_cash,
+                max_positions=effective_max_positions,
+                hold_days=effective_hold_days,
+                top_n=effective_top_n,
+                use_daily_fallback=use_daily_fallback,
+                auto_fill=auto_fill,
+            )
+        else:
+            payload = quant_engine.walk_forward(
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=effective_initial_cash,
+                max_positions=effective_max_positions,
+                hold_days=effective_hold_days,
+                top_n=effective_top_n,
+                auto_fill=auto_fill,
+            )
+    if isinstance(payload, dict):
+        payload["strategy_model_id"] = str(model.get("id") or clean_model_id)
+        payload["strategy_name"] = str(model.get("name") or clean_model_id)
+        payload["strategy_params"] = params
+        payload["strategy_scope"] = "strategy_model"
+    return payload
+
+
 @app.get("/api/front/public_snapshot")
 def frontend_public_snapshot(
     as_of: Optional[str] = Query(default=None),
@@ -2215,6 +2289,11 @@ def jobs_resume(job_name: str):
     return job_manager.resume_job(job_name)
 
 
+@app.post("/api/jobs/{job_name}/stop")
+def jobs_stop(job_name: str):
+    return job_manager.stop_job(job_name)
+
+
 @app.get("/api/logs/runtime")
 def runtime_logs(
     limit: int = Query(default=200, ge=1, le=1000),
@@ -2319,16 +2398,38 @@ def _run_system_startup_flow(
 ) -> Dict[str, Any]:
     steps = []
 
+    def stopped_before(stage: str) -> Optional[Dict[str, Any]]:
+        if not job_manager.is_stop_requested("system_startup"):
+            return None
+        message = f"系统启动流程已在{stage}前停止"
+        job_manager.update_progress("system_startup", 100, message, {"step": stage, "stopped": True})
+        return {
+            "status": "stopped",
+            "message": message,
+            "start_date": replay_start_date,
+            "date": target_date,
+            "steps": steps,
+        }
+
+    stopped = stopped_before("新闻抓取")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 8, "抓取新闻", {"step": "news_fetch"})
     news_result = job_manager.run_news_fetch(hours=news_hours, pages=news_pages, page_size=20)
     if news_result.get("status") == "ok":
         quant_engine.events(force=True)
     steps.append({"name": "新闻抓取", "job": "news_fetch", "result": news_result})
 
+    stopped = stopped_before("AI 分析")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 22, "AI 分析", {"step": "ai_analysis"})
     ai_result = job_manager.run_ai_analysis(as_of=target_date, max_items=ai_items, batch_size=4)
     steps.append({"name": "AI 分析", "job": "ai_analysis", "result": ai_result})
 
+    stopped = stopped_before("补齐日K")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 38, "补齐日K", {"step": "kline_fill", "start_date": replay_start_date, "end_date": target_date})
     kline_result = job_manager.run_kline_fill(
         start_date=replay_start_date,
@@ -2338,6 +2439,9 @@ def _run_system_startup_flow(
     )
     steps.append({"name": "日K补齐", "job": "kline_fill", "result": kline_result})
 
+    stopped = stopped_before("同步龙虎榜")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 54, "同步龙虎榜", {"step": "lhb_sync", "start_date": replay_start_date, "end_date": target_date})
     lhb_result = job_manager.run_lhb_sync(
         start_date=replay_start_date,
@@ -2347,6 +2451,9 @@ def _run_system_startup_flow(
     )
     steps.append({"name": "龙虎榜同步", "job": "lhb_sync", "result": lhb_result})
 
+    stopped = stopped_before("同步分时行情")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 68, "同步分时行情", {"step": "market_sync"})
     market_result = job_manager.run_market_sync(
         date=target_date,
@@ -2357,10 +2464,16 @@ def _run_system_startup_flow(
     )
     steps.append({"name": "行情同步", "job": "market_sync", "result": market_result})
 
+    stopped = stopped_before("交易循环")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 82, "从数据起点重建模拟交易", {"step": "trade_cycle", "start_date": replay_start_date})
     trade_result = job_manager.run_trade_cycle(date=target_date, notify=notify)
     steps.append({"name": "交易循环", "job": "trade_cycle", "result": trade_result})
 
+    stopped = stopped_before("策略复盘")
+    if stopped:
+        return stopped
     job_manager.update_progress("system_startup", 94, "策略复盘", {"step": "strategy_replay", "start_date": replay_start_date})
     replay_result = job_manager.run_strategy_replay(
         start_date=replay_start_date,
@@ -2681,19 +2794,22 @@ def quant_correlation(as_of: Optional[str] = Query(default=None), hold_days: int
 def quant_timeline(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    model_id: Optional[str] = Query(default=None),
     initial_cash: Optional[float] = Query(default=None, gt=0),
     max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
     auto_fill: bool = Query(default=True),
 ):
-    return quant_engine.walk_forward(
+    return _quant_timeline_payload(
+        model_id=model_id,
         start_date=start_date,
         end_date=end_date,
         initial_cash=initial_cash,
         max_positions=max_positions,
         hold_days=hold_days,
         top_n=top_n,
+        intraday=False,
         auto_fill=auto_fill,
     )
 
@@ -2702,6 +2818,7 @@ def quant_timeline(
 def quant_intraday_timeline(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    model_id: Optional[str] = Query(default=None),
     initial_cash: Optional[float] = Query(default=None, gt=0),
     max_positions: Optional[int] = Query(default=None, ge=1, le=20),
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
@@ -2709,13 +2826,15 @@ def quant_intraday_timeline(
     use_daily_fallback: bool = Query(default=True),
     auto_fill: bool = Query(default=True),
 ):
-    return quant_engine.walk_forward_intraday(
+    return _quant_timeline_payload(
+        model_id=model_id,
         start_date=start_date,
         end_date=end_date,
         initial_cash=initial_cash,
         max_positions=max_positions,
         hold_days=hold_days,
         top_n=top_n,
+        intraday=True,
         use_daily_fallback=use_daily_fallback,
         auto_fill=auto_fill,
     )
