@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import shutil
 import sqlite3
 import subprocess
@@ -14,9 +15,10 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -52,6 +54,10 @@ from app.quant.data_transfer import (
 from app.quant.database_inspector import database_overview, database_table_rows
 from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, quant_engine, safe_float
 from app.quant.evolution import strategy_evolution
+from app.quant.front_profile import (
+    resolve_front_profile_updates as _resolve_front_profile_updates,
+    strategy_catalog_items as _strategy_catalog_items,
+)
 from app.quant.lhb_sync import lhb_status
 from app.quant.jobs import job_manager
 from app.quant.monitoring import ai_failures, ai_records_feed, ai_usage_summary, data_coverage
@@ -62,6 +68,23 @@ from app.quant.notifier import trade_notifier
 from app.quant.runtime_cache import env_int as cache_env_int
 from app.quant.runtime_cache import clear_runtime_cache, runtime_cache_status
 from app.quant.runtime_cache import load_payload_cache, save_payload_cache
+from app.quant.strategy_runtime_matrix import (
+    build_strategy_runtime_matrix_payload,
+    clean_strategy_runtime_matrix_limit,
+    strategy_runtime_catalog_items,
+)
+from app.routers.admin_access import build_admin_access_router
+from app.routers.admin_data_cache import build_admin_data_cache_router
+from app.routers.admin_frontend_users import build_admin_frontend_users_router
+from app.routers.admin_job_runs import build_admin_job_runs_router
+from app.routers.admin_jobs import build_admin_jobs_router
+from app.routers.admin_overview import build_admin_overview_router
+from app.routers.admin_strategy_runtime import build_admin_strategy_runtime_router
+from app.routers.core_system import build_core_system_router
+from app.routers.frontend_profile import build_frontend_profile_router
+from app.routers.frontend_runtime import build_frontend_runtime_router
+from app.routers.frontend_signal import build_frontend_signal_router
+from app.routers.quant_basic import build_quant_basic_router
 from app.quant.security import (
     admin_create_frontend_user,
     admin_delete_frontend_user,
@@ -104,6 +127,12 @@ def _app_version() -> str:
 APP_VERSION = _app_version()
 _FRONTEND_ACCOUNT_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _FRONTEND_ACCOUNT_CACHE_TTL = 300
+_FRONTEND_ACCOUNT_PRECOMPUTE_QUEUE_LOCK = threading.Lock()
+_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_LOCK = threading.Lock()
+_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING: Dict[str, float] = {}
+_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_TASKS: "queue.Queue[Callable[[], None]]" = queue.Queue()
+_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKER_LOCK = threading.Lock()
+_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED = 0
 _MEMORY_PAYLOAD_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _MEMORY_PAYLOAD_CACHE_MAX = 256
 _FRONTEND_ACCOUNT_REPLAY_DAYS = max(20, min(int(safe_float(os.getenv("QT_FRONTEND_ACCOUNT_REPLAY_DAYS"), 90)), 260))
@@ -132,7 +161,8 @@ def _copy_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _memory_cache_key(payload_type: str, parts: Dict[str, Any]) -> str:
     text = json.dumps({"type": payload_type, "parts": parts}, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+    return f"{payload_type}:{digest}"
 
 
 def _memory_cache_get(payload_type: str, parts: Dict[str, Any], ttl_seconds: int) -> Optional[Dict[str, Any]]:
@@ -171,8 +201,23 @@ def _memory_cache_set(payload_type: str, parts: Dict[str, Any], payload: Dict[st
     return result
 
 
-def _memory_cache_clear() -> None:
-    _MEMORY_PAYLOAD_CACHE.clear()
+def _memory_cache_clear(payload_types: Optional[Any] = None) -> None:
+    if payload_types is None:
+        _MEMORY_PAYLOAD_CACHE.clear()
+        return
+    if isinstance(payload_types, str):
+        target_types = {payload_types}
+    else:
+        try:
+            target_types = {str(item) for item in payload_types if str(item)}
+        except Exception:
+            target_types = {str(payload_types)}
+    if not target_types:
+        return
+    prefixes = tuple(f"{item}:" for item in target_types)
+    for key in list(_MEMORY_PAYLOAD_CACHE.keys()):
+        if str(key).startswith(prefixes):
+            _MEMORY_PAYLOAD_CACHE.pop(key, None)
 
 
 def _create_data_backup() -> Dict[str, Any]:
@@ -386,7 +431,7 @@ def _log_key(item: Dict[str, Any]) -> str:
     )
 
 
-def _latest_news_time() -> str:
+def _latest_news_time_uncached() -> str:
     try:
         latest = latest_sqlite_news_time()
         if latest:
@@ -397,6 +442,82 @@ def _latest_news_time() -> str:
         return news_fetcher.latest_history_time()
     except Exception:
         return ""
+
+
+def _latest_news_time() -> str:
+    cache_ttl = cache_env_int("QT_LATEST_NEWS_TIME_CACHE_TTL_SECONDS", 5, minimum=0, maximum=300)
+    cache_parts = {"version": APP_VERSION}
+    cached = _memory_cache_get("latest_news_time", cache_parts, cache_ttl)
+    if cached:
+        return str(cached.get("latest_news_time") or "")
+    latest = _latest_news_time_uncached()
+    _memory_cache_set("latest_news_time", cache_parts, {"latest_news_time": latest})
+    return latest
+
+
+def _data_date_bounds_uncached() -> Dict[str, str]:
+    db_path = DATA_DIR / "quant_data.sqlite3"
+    first_dates: list[str] = []
+    latest_dates: list[str] = []
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                for table, column in (
+                    ("news_events", "date"),
+                    ("news_raw", "date"),
+                    ("market_daily_bars", "date"),
+                    ("lhb_records", "trade_date"),
+                ):
+                    try:
+                        row = conn.execute(
+                            f"SELECT MIN({column}), MAX({column}) FROM {table} WHERE {column} IS NOT NULL AND {column} != ''"
+                        ).fetchone()
+                    except Exception:
+                        continue
+                    first = str((row or ["", ""])[0] or "").strip()[:10]
+                    latest = str((row or ["", ""])[1] or "").strip()[:10]
+                    if first:
+                        first_dates.append(first)
+                    if latest:
+                        latest_dates.append(latest)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+    first_date = min(first_dates) if first_dates else ""
+    latest_date = max(latest_dates) if latest_dates else ""
+    allow_engine_fallback = _env_flag("QT_DATA_DATE_ENGINE_FALLBACK_ENABLED", False)
+    if allow_engine_fallback and not first_date:
+        try:
+            first_date = str(quant_engine.first_data_date() or "").strip()[:10]
+        except Exception:
+            first_date = ""
+    if allow_engine_fallback and not latest_date:
+        try:
+            latest_date = str(quant_engine.latest_event_date() or "").strip()[:10]
+        except Exception:
+            latest_date = ""
+    if not latest_date:
+        latest_date = datetime.now().strftime("%Y-%m-%d")
+    return {"first": first_date, "latest": latest_date}
+
+
+def _data_date_bounds() -> Dict[str, str]:
+    cache_ttl = cache_env_int("QT_DATA_DATE_CACHE_TTL_SECONDS", 10, minimum=0, maximum=300)
+    cache_parts = {"version": APP_VERSION, "data_dir": str(DATA_DIR)}
+    cached = _memory_cache_get("data_date_bounds", cache_parts, cache_ttl)
+    if cached:
+        return {"first": str(cached.get("first") or ""), "latest": str(cached.get("latest") or "")}
+    return _memory_cache_set("data_date_bounds", cache_parts, _data_date_bounds_uncached())
+
+
+def _latest_data_date() -> str:
+    return str(_data_date_bounds().get("latest") or "")
+
+
+def _first_data_date() -> str:
+    return str(_data_date_bounds().get("first") or "")
 
 
 def _git_ref() -> Dict[str, str]:
@@ -492,18 +613,7 @@ async def shutdown_jobs():
     await job_manager.stop()
 
 
-@app.get("/api/version")
-def api_version():
-    return app_version_payload()
-
-
-@app.get("/api/auth/status")
-def api_auth_status():
-    return auth_status()
-
-
-@app.get("/api/debug/status")
-def api_debug_status(request: Request):
+def _debug_status_payload(request: Request) -> Dict[str, Any]:
     payload = getattr(request.state, "auth_payload", None)
     return {
         "status": "ok",
@@ -518,8 +628,7 @@ def api_debug_status(request: Request):
     }
 
 
-@app.get("/api/debug/routes")
-def api_debug_routes():
+def _debug_routes_payload() -> Dict[str, Any]:
     paths = app.openapi().get("paths", {})
     modules: Dict[str, Dict[str, int]] = {}
     for path, operations in paths.items():
@@ -538,24 +647,23 @@ def api_debug_routes():
     }
 
 
-@app.post("/api/auth/setup")
-def api_auth_setup(payload: Dict[str, Any] = Body(default_factory=dict)):
-    return setup_auth(payload)
-
-
-@app.post("/api/auth/login")
-def api_auth_login(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _auth_login_payload(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     return login(payload, request)
 
 
-@app.post("/api/auth/register")
-def api_auth_register(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _auth_register_payload(request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
     result = register_frontend_user(payload, request)
     username = str(result.get("username") or "").strip()
     if username:
         try:
             profile_payload = frontend_user_profile(username)
             _record_user_follow_period(username, profile_payload.get("profile"), source="front_register", reason="register", created_at=profile_payload.get("created_at"))
+            result["account_precompute"] = _queue_frontend_account_precompute_for_user(
+                username,
+                reason="register",
+                start_worker=False,
+                async_enqueue=True,
+            )
         except Exception:
             pass
     return result
@@ -568,13 +676,31 @@ def _request_username(request: Request) -> str:
     return str(payload.get("sub") or "").strip()
 
 
-@app.get("/api/front/profile")
-def api_front_profile(request: Request):
+def _frontend_profile_payload(request: Request):
     return frontend_user_profile(_request_username(request))
 
 
-@app.post("/api/front/profile")
-def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _frontend_profile_update_payload(
+    request: Request,
+    payload: Dict[str, Any],
+    include_catalog: bool,
+):
+    started = time.time()
+    last_stage_at = started
+    profile_trace: list[Dict[str, Any]] = []
+
+    def mark_profile_stage(stage: str) -> None:
+        nonlocal last_stage_at
+        now = time.time()
+        profile_trace.append(
+            {
+                "stage": stage,
+                "elapsed_ms": int((now - started) * 1000),
+                "duration_ms": int((now - last_stage_at) * 1000),
+            }
+        )
+        last_stage_at = now
+
     username = _request_username(request)
     previous = {}
     try:
@@ -582,54 +708,74 @@ def api_update_front_profile(request: Request, payload: Dict[str, Any] = Body(de
         previous = previous_payload.get("profile") if isinstance(previous_payload.get("profile"), dict) else {}
     except Exception:
         previous = {}
-    updates = dict(payload) if isinstance(payload, dict) else {}
-    if updates.get("auto_recommend"):
-        cash = max(10_000.0, min(10_000_000.0, safe_float(updates.get("simulated_cash"), 10_000.0)))
-        models_payload = _frontend_strategy_models_payload(include_catalog=True)
-        updates["strategy_model_id"] = recommended_strategy_id(cash, _strategy_catalog_items(models_payload))
+    mark_profile_stage("load_previous_profile")
+    updates, resolved_model = _resolve_front_profile_updates(
+        dict(payload) if isinstance(payload, dict) else {},
+        previous,
+        include_catalog,
+        _frontend_strategy_models_payload,
+        strategy_evolution.model,
+    )
+    mark_profile_stage("resolve_updates")
     result = update_frontend_user_profile(username, updates)
-    _frontend_account_cache_clear()
-    _memory_cache_clear()
-    context = _frontend_profile_context(request, include_catalog=True)
-    _record_user_follow_period(
+    mark_profile_stage("save_profile")
+    context = _frontend_profile_context(
+        request,
+        include_catalog=include_catalog,
+        fallback_catalog_on_missing=include_catalog,
+        profile_payload=result,
+        resolved_model=resolved_model,
+    )
+    mark_profile_stage("build_profile_context")
+    follow_reason = _follow_period_reason(previous, context.get("profile"))
+    follow_period_record = _queue_user_follow_period_record(
         username,
         context.get("profile"),
         previous_profile=previous,
         source="front_profile",
-        reason=_follow_period_reason(previous, context.get("profile")),
+        reason=follow_reason,
         created_at=context.get("created_at"),
     )
-    return {
+    mark_profile_stage("queue_follow_period")
+    account_precompute = _queue_frontend_account_precompute_for_user(
+        username,
+        reason=follow_reason,
+        start_worker=False,
+        async_enqueue=True,
+    )
+    mark_profile_stage("queue_account_precompute")
+    elapsed_ms = int((time.time() - started) * 1000)
+    slow_stage = max(profile_trace, key=lambda item: int(item.get("duration_ms") or 0), default={})
+    response = {
         **result,
         "profile": context["profile"],
         "followed_model": context["followed_model"],
-        "strategy_models": context["models_payload"],
         "strategy_params": context["strategy_params"],
-        "account_cache_cleared": True,
+        "account_cache_cleared": False,
+        "account_cache_scope": "profile_keyed",
+        "account_precompute": account_precompute,
+        "account_precompute_queued": bool(account_precompute.get("queued")),
+        "follow_period_record": follow_period_record,
+        "profile_catalog_included": bool(include_catalog),
+        "profile_update_elapsed_ms": elapsed_ms,
+        "profile_update_trace": profile_trace,
+        "profile_update_slow_stage": slow_stage,
     }
+    if include_catalog:
+        response["strategy_models"] = context["models_payload"]
+    return response
 
 
-@app.get("/api/config/status")
-def api_config_status():
-    return runtime_config_status()
-
-
-@app.get("/api/config/runtime")
-def api_config_runtime():
-    return runtime_config_form()
-
-
-@app.post("/api/config/runtime")
-def api_update_config_runtime(payload: Dict[str, Any] = Body(default_factory=dict)):
+def _config_update_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     result = update_runtime_config(payload)
     job_manager._append_log("warning", "后台运行配置已保存", job="admin_config", stage="saved")
     return result
 
 
-@app.get("/api/status")
-def status():
+def _status_payload() -> Dict[str, Any]:
     now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
     latest_news_time = _latest_news_time()
+    data_bounds = _data_date_bounds()
     data_date = latest_news_time[:10] if latest_news_time else quant_engine.latest_event_date()
     return {
         "status": "ok",
@@ -644,32 +790,62 @@ def status():
         "latest_event_date": data_date,
         "latest_news_time": latest_news_time,
         "data_date": data_date,
+        "first_data_date": data_bounds.get("first", ""),
+        "latest_data_date": data_bounds.get("latest", ""),
+        "data_date_bounds": data_bounds,
         "ai_model": DEFAULT_AI_MODEL,
-        "jobs": job_manager.status(light=True),
+        "jobs": _frontend_light_jobs(job_manager.frontend_status()),
     }
 
 
-def _light_status_payload(as_of: Optional[str] = None, jobs_payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+app.include_router(
+    build_core_system_router(
+        version_payload=app_version_payload,
+        auth_status_payload=auth_status,
+        debug_status_payload=_debug_status_payload,
+        debug_routes_payload=_debug_routes_payload,
+        auth_setup_payload=setup_auth,
+        auth_login_payload=_auth_login_payload,
+        auth_register_payload=_auth_register_payload,
+        config_status_payload=runtime_config_status,
+        config_runtime_payload=runtime_config_form,
+        config_update_payload=_config_update_payload,
+        status_payload=_status_payload,
+    )
+)
+
+
+def _light_status_payload(
+    as_of: Optional[str] = None,
+    jobs_payload: Optional[Dict[str, Any]] = None,
+    include_data_dir: bool = True,
+) -> Dict[str, Any]:
     now_cn = datetime.now(ZoneInfo("Asia/Shanghai"))
     latest_news_time = _latest_news_time()
+    data_bounds = _data_date_bounds()
     data_date = str(as_of or "").strip() or (latest_news_time[:10] if latest_news_time else "")
     jobs = jobs_payload if isinstance(jobs_payload, dict) else {}
-    return {
+    payload = {
         "status": "ok",
         "system": "quant",
         "app": "涨停狙击手",
         "version": APP_VERSION,
         "backend_version": APP_VERSION,
         "frontend_version": APP_VERSION,
-        "data_dir": str(DATA_DIR),
         "current_date": now_cn.strftime("%Y-%m-%d"),
         "current_time": now_cn.isoformat(timespec="seconds"),
         "latest_event_date": data_date,
         "latest_news_time": latest_news_time,
         "data_date": data_date,
+        "first_data_date": data_bounds.get("first", ""),
+        "latest_data_date": data_bounds.get("latest", ""),
+        "data_date_bounds": data_bounds,
         "ai_model": DEFAULT_AI_MODEL,
         "jobs": jobs,
     }
+    if include_data_dir:
+        payload["data_dir"] = str(DATA_DIR)
+    return payload
 
 
 def _frontend_light_jobs(jobs_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -679,6 +855,25 @@ def _frontend_light_jobs(jobs_payload: Dict[str, Any]) -> Dict[str, Any]:
         "running": jobs.get("running", {}),
         "paused_jobs": jobs.get("paused_jobs", {}),
     }
+
+
+def _frontend_jobs_payload() -> Dict[str, Any]:
+    cache_ttl = cache_env_int("QT_FRONT_JOBS_CACHE_TTL_SECONDS", 3, minimum=0, maximum=60)
+    cache_parts = {"version": APP_VERSION}
+    cached = _memory_cache_get("front_jobs", cache_parts, cache_ttl)
+    if cached:
+        return _frontend_light_jobs(cached)
+    payload = _frontend_light_jobs(job_manager.frontend_status())
+    _memory_cache_set("front_jobs", cache_parts, payload)
+    return payload
+
+
+def _jobs_status_payload(light: bool = True) -> Dict[str, Any]:
+    payload = job_manager.status(light=light)
+    if isinstance(payload, dict):
+        payload["frontend_account_precompute_queue"] = _frontend_account_precompute_queue_status()
+        payload["frontend_account_precompute_async"] = _frontend_account_precompute_async_status()
+    return payload
 
 
 def _safe_news_feed(**kwargs: Any) -> Dict[str, Any]:
@@ -701,6 +896,22 @@ def _safe_news_feed(**kwargs: Any) -> Dict[str, Any]:
         }
 
 
+def _frontend_light_news_feed(**kwargs: Any) -> Dict[str, Any]:
+    try:
+        lightweight = lightweight_news_feed(**kwargs)
+        if isinstance(lightweight, dict):
+            return lightweight
+    except Exception as exc:
+        job_manager._append_log("warning", f"前台轻量新闻快照读取失败，返回空快照：{exc}", job="frontend_snapshot", stage="news_light")
+    return {
+        "status": "pending",
+        "items": [],
+        "events": [],
+        "count": 0,
+        "message": "lightweight news unavailable",
+    }
+
+
 def _market_sentiment(news_payload: Dict[str, Any]) -> Dict[str, Any]:
     events = news_payload.get("events") if isinstance(news_payload.get("events"), list) else []
     scores = [float(item.get("sentiment") or 0) for item in events if isinstance(item, dict)]
@@ -720,28 +931,6 @@ def _market_sentiment(news_payload: Dict[str, Any]) -> Dict[str, Any]:
         "negative_count": negative,
         "sample_count": len(scores),
     }
-
-
-def _strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, Any]]:
-    items: list[Dict[str, Any]] = []
-    for item in models_payload.get("capital_presets") if isinstance(models_payload.get("capital_presets"), list) else []:
-        if isinstance(item, dict):
-            items.append(item)
-    active = models_payload.get("active") if isinstance(models_payload.get("active"), dict) else {}
-    if active:
-        items.append({**active, "id": str(active.get("id") or "active")})
-    for item in models_payload.get("items") if isinstance(models_payload.get("items"), list) else []:
-        if isinstance(item, dict):
-            items.append(item)
-    seen = set()
-    unique = []
-    for item in items:
-        model_id = str(item.get("id") or "").strip()
-        if not model_id or model_id in seen:
-            continue
-        seen.add(model_id)
-        unique.append(item)
-    return unique
 
 
 def _active_strategy_model() -> Dict[str, Any]:
@@ -770,7 +959,7 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
         payload = {"status": "ok", "active": _active_strategy_model(), "items": [], "count": 0}
     base_params = quant_engine.strategy_params()
     presets = capital_presets(base_params)
-    runtime_summaries = strategy_evolution.runtime_model_summaries(presets)
+    runtime_summaries = strategy_evolution.runtime_model_summaries(presets) if include_catalog else {}
     enriched_presets: list[Dict[str, Any]] = []
     for preset in presets:
         model_id = str(preset.get("id") or "")
@@ -782,18 +971,25 @@ def _frontend_strategy_models_payload(include_catalog: bool = True) -> Dict[str,
                 f"{summary.get('runtime_end_date') or '-'}，"
                 f"{int(safe_float(summary.get('trade_count'), 0))} 笔成交"
             )
-        else:
+        elif include_catalog:
             enriched = {
                 **preset,
                 "runtime_data_status": "missing",
                 "has_runtime_data": False,
                 "runtime_data_note": "等待本地或服务器策略复盘生成数据",
             }
+        else:
+            enriched = {
+                **preset,
+                "runtime_data_status": "not_loaded",
+                "runtime_data_summary_loaded": False,
+            }
         enriched_presets.append(enriched)
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
     payload["active"]["name"] = "系统默认基础参数（非跟随策略）"
     payload["capital_presets"] = enriched_presets
     payload["capital_bands"] = CAPITAL_BANDS
+    payload["catalog_included"] = bool(include_catalog)
     payload["capital_runtime_summary"] = {
         "total": len(enriched_presets),
         "ready": sum(1 for item in enriched_presets if item.get("has_runtime_data")),
@@ -845,6 +1041,35 @@ def _admin_model_signal_feed(
         )
     )
     return payload
+
+
+def _admin_strategy_runtime_matrix_payload(
+    as_of: Optional[str] = None,
+    limit_models: int = 80,
+    include_signals: bool = True,
+) -> Dict[str, Any]:
+    effective_as_of = _frontend_account_as_of(as_of)
+    clean_limit = clean_strategy_runtime_matrix_limit(limit_models)
+    models_payload = _frontend_strategy_models_payload(include_catalog=True)
+    catalog_items = strategy_runtime_catalog_items(models_payload, clean_limit)
+    runtime_summaries = strategy_evolution.runtime_model_summaries(catalog_items)
+    signal_feed = (
+        _admin_model_signal_feed(
+            effective_as_of,
+            models_payload=models_payload,
+            limit_models=min(clean_limit, 80),
+            limit_per_model=1,
+        )
+        if include_signals
+        else {"status": "skipped", "items": [], "data_date": ""}
+    )
+    return build_strategy_runtime_matrix_payload(
+        effective_as_of=effective_as_of,
+        catalog_items=catalog_items,
+        runtime_summaries=runtime_summaries,
+        signal_feed=signal_feed,
+        include_signals=include_signals,
+    )
 
 
 def _quant_db_scalar(sql: str, params: Optional[list[Any]] = None) -> Any:
@@ -920,16 +1145,43 @@ def _light_dashboard_payload(
     }
 
 
-def _frontend_profile_context(request: Request, include_catalog: bool = True) -> Dict[str, Any]:
-    username = _request_username(request)
-    profile_payload = frontend_user_profile(username)
+def _frontend_profile_context_for_username(
+    username: str,
+    include_catalog: bool = True,
+    fallback_catalog_on_missing: bool = True,
+    profile_payload: Optional[Dict[str, Any]] = None,
+    resolved_model: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    username = str(username or "").strip()
+    if not isinstance(profile_payload, dict):
+        profile_payload = frontend_user_profile(username)
     profile = profile_payload.get("profile") if isinstance(profile_payload.get("profile"), dict) else {}
     simulated_cash = max(10_000.0, min(10_000_000.0, safe_float(profile.get("simulated_cash"), 10_000.0)))
     original_selected_id = str(profile.get("strategy_model_id") or "").strip()
     selected_id = original_selected_id
-    models_payload = _frontend_strategy_models_payload(include_catalog=include_catalog or selected_id not in {"", "active"})
+    models_payload = _frontend_strategy_models_payload(include_catalog=include_catalog)
     model_items = _strategy_catalog_items(models_payload)
     selected = next((item for item in model_items if str(item.get("id")) == selected_id), None)
+    if selected is None and isinstance(resolved_model, dict) and str(resolved_model.get("id") or "") == selected_id:
+        selected = resolved_model
+        model_items.append(selected)
+        items = models_payload.setdefault("items", [])
+        if isinstance(items, list) and not any(str(item.get("id") or "") == selected_id for item in items if isinstance(item, dict)):
+            items.append(selected)
+    if not include_catalog and selected_id and selected_id != "active" and selected is None:
+        try:
+            selected = strategy_evolution.model(selected_id, include_records=False) or None
+        except Exception:
+            selected = None
+        if selected:
+            model_items.append(selected)
+            items = models_payload.setdefault("items", [])
+            if isinstance(items, list) and not any(str(item.get("id") or "") == selected_id for item in items if isinstance(item, dict)):
+                items.append(selected)
+        elif fallback_catalog_on_missing:
+            models_payload = _frontend_strategy_models_payload(include_catalog=True)
+            model_items = _strategy_catalog_items(models_payload)
+            selected = next((item for item in model_items if str(item.get("id")) == selected_id), None)
     recommended_id = recommended_strategy_id(simulated_cash, model_items)
     should_recommend = (
         not selected_id
@@ -972,6 +1224,22 @@ def _frontend_profile_context(request: Request, include_catalog: bool = True) ->
         "followed_model": selected or {},
         "strategy_params": params,
     }
+
+
+def _frontend_profile_context(
+    request: Request,
+    include_catalog: bool = True,
+    fallback_catalog_on_missing: bool = True,
+    profile_payload: Optional[Dict[str, Any]] = None,
+    resolved_model: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _frontend_profile_context_for_username(
+        _request_username(request),
+        include_catalog=include_catalog,
+        fallback_catalog_on_missing=fallback_catalog_on_missing,
+        profile_payload=profile_payload,
+        resolved_model=resolved_model,
+    )
 
 
 def _frontend_full_model(model_id: str) -> Dict[str, Any]:
@@ -1121,6 +1389,57 @@ def _record_user_follow_period(
     )
 
 
+def _queue_user_follow_period_record(
+    username: str,
+    profile: Any,
+    previous_profile: Optional[Dict[str, Any]] = None,
+    source: str = "",
+    reason: str = "",
+    created_at: Any = "",
+) -> Dict[str, Any]:
+    if not _env_flag("QT_FRONT_PROFILE_FOLLOW_PERIOD_ASYNC", True):
+        return _record_user_follow_period(
+            username,
+            profile,
+            previous_profile=previous_profile,
+            source=source,
+            reason=reason,
+            created_at=created_at,
+        )
+    if not isinstance(profile, dict):
+        return {"status": "invalid", "async": True}
+    clean_username = str(username or "").strip()
+    if not clean_username:
+        return {"status": "invalid", "async": True}
+    profile_copy = _copy_payload(profile)
+    previous_copy = _copy_payload(previous_profile) if isinstance(previous_profile, dict) else None
+    reason_text = str(reason or "profile_sync")
+    source_text = str(source or "frontend_profile")
+    created_text = str(created_at or "")
+
+    def worker() -> None:
+        try:
+            _record_user_follow_period(
+                clean_username,
+                profile_copy,
+                previous_profile=previous_copy,
+                source=source_text,
+                reason=reason_text,
+                created_at=created_text,
+            )
+        except Exception as exc:
+            job_manager._append_log(
+                "warning",
+                f"用户跟随周期异步记录失败：{exc}",
+                job="front_profile",
+                stage="follow_period",
+                payload={"username": clean_username, "reason": reason_text, "source": source_text},
+            )
+
+    threading.Thread(target=worker, name=f"qt-follow-period-{clean_username}", daemon=True).start()
+    return {"status": "queued", "async": True, "username": clean_username, "reason": reason_text, "source": source_text}
+
+
 def _frontend_user_with_diagnostics(item: Dict[str, Any]) -> Dict[str, Any]:
     row = dict(item)
     username = str(row.get("username") or "").strip()
@@ -1152,7 +1471,7 @@ def _admin_frontend_user_summary() -> Dict[str, Any]:
 
 
 def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
-    latest = str(quant_engine.latest_event_date() or "").strip()
+    latest = str(_latest_data_date() or "").strip()
     requested = str(as_of or "").strip()
     if requested and latest and requested > latest:
         return latest
@@ -1160,7 +1479,7 @@ def _frontend_account_as_of(as_of: Optional[str]) -> Optional[str]:
 
 
 def _frontend_replay_start_date(end_date: Optional[str]) -> Optional[str]:
-    first = str(quant_engine.first_data_date() or "").strip()
+    first = str(_first_data_date() or "").strip()
     if not end_date:
         return first or None
     try:
@@ -1178,8 +1497,8 @@ def _frontend_follow_start_date(context: Dict[str, Any], end_date: Optional[str]
         str(profile.get("follow_started_at") or "").strip()[:10],
         str(context.get("created_at") or "").strip()[:10],
     ]
-    first = str(quant_engine.first_data_date() or "").strip()
-    latest = str(end_date or quant_engine.latest_event_date() or "").strip()[:10]
+    first = str(_first_data_date() or "").strip()
+    latest = str(end_date or _latest_data_date() or "").strip()[:10]
     start = next((item for item in candidates if item), "")
     if not start:
         start = latest or first
@@ -1210,6 +1529,8 @@ def _frontend_payload_cache_parts(context: Dict[str, Any], payload_type: str, ex
         "payload_type": payload_type,
         "strategy_model_id": str(profile.get("strategy_model_id") or ""),
         "simulated_cash": round(safe_float(profile.get("simulated_cash"), 0), 2),
+        "follow_start_date": str(profile.get("follow_start_date") or ""),
+        "follow_started_at": str(profile.get("follow_started_at") or ""),
         "model_version": _frontend_followed_model_version(context),
         "strategy_params": context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {},
         **extra,
@@ -1220,26 +1541,68 @@ def _frontend_payload_cache_ttl(name: str, default: int) -> int:
     return cache_env_int(name, default, minimum=0, maximum=86400)
 
 
+def _frontend_payload_precompute_enabled() -> bool:
+    return _env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", False)
+
+
+def _frontend_payload_auto_precompute_on_miss() -> bool:
+    return _frontend_payload_precompute_enabled() and _env_flag("QT_FRONT_PAYLOAD_AUTO_PRECOMPUTE_ON_MISS", False)
+
+
+def _deferred_job_response_state(
+    job_result: Dict[str, Any],
+    default_message: str,
+    cache_state: str = "miss_deferred",
+) -> tuple[str, str, str]:
+    result = job_result if isinstance(job_result, dict) else {}
+    status = str(result.get("status") or "").strip().lower()
+    message = str(result.get("message") or default_message)
+    if status == "busy":
+        return "busy", "busy", message
+    if status == "paused":
+        return "paused", "paused", message
+    if status == "disabled":
+        return "pending", "disabled", message
+    if status in {"error", "failed"}:
+        return "error", "error", message
+    if status == "running" and not (result.get("background") or result.get("process_pid")):
+        return "running", "running", message
+    return "pending", cache_state, default_message
+
+
 def _queue_frontend_payload_precompute(
     context: Dict[str, Any],
     effective_as_of: Optional[str],
     lookback_days: int = 2,
     top_n: int = 30,
-    limit_days: int = 120,
+    limit_days: int = 30,
     force: bool = False,
 ) -> Dict[str, Any]:
     username = str(context.get("username") or "").strip()
+    auto_on_miss = _frontend_payload_auto_precompute_on_miss()
+    if not auto_on_miss:
+        return {
+            "status": "disabled",
+            "job": "frontend_payload_precompute",
+            "background": False,
+            "process": False,
+            "queued": False,
+            "message": "缓存未命中自动预计算已关闭，请在后台手动预计算前台缓存。",
+            "frontend_payload_precompute_enabled": _frontend_payload_precompute_enabled(),
+            "frontend_payload_auto_precompute_on_miss": auto_on_miss,
+        }
     try:
         return job_manager.run_frontend_payload_precompute(
             as_of=effective_as_of,
             usernames=[username] if username else None,
-            limit_users=1 if username else cache_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_LIMIT_USERS", 50, minimum=1, maximum=500),
+            limit_users=1 if username else cache_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_LIMIT_USERS", 8, minimum=1, maximum=500),
             force=force,
             background=True,
             process=_env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True),
             lookback_days=lookback_days,
             top_n=top_n,
             limit_days=limit_days,
+            max_seconds=cache_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_MAX_SECONDS", 20, minimum=0, maximum=86400),
         )
     except Exception as exc:
         job_manager._append_log("warning", f"前台推荐和日计划预计算排队失败：{exc}", job="frontend_payload_precompute", stage="queue")
@@ -1247,17 +1610,22 @@ def _queue_frontend_payload_precompute(
 
 
 def _frontend_pending_payload(payload_type: str, effective_as_of: Optional[str], job_result: Dict[str, Any], **extra: Any) -> Dict[str, Any]:
+    default_message = "缓存未命中，后台正在预计算，请稍后刷新。"
+    status, cache_state, message = _deferred_job_response_state(job_result, default_message, cache_state="queued")
     payload: Dict[str, Any] = {
-        "status": "pending",
+        "status": status,
         "as_of": effective_as_of,
-        "frontend_payload_cache": "queued",
+        "frontend_payload_cache": cache_state,
         "frontend_payload_job": {
             "status": job_result.get("status"),
             "job": job_result.get("job"),
             "background": bool(job_result.get("background") or job_result.get("process")),
             "message": job_result.get("message"),
+            "queued": bool(job_result.get("queued", status == "pending" and cache_state == "queued")),
+            "frontend_payload_precompute_enabled": job_result.get("frontend_payload_precompute_enabled"),
+            "frontend_payload_auto_precompute_on_miss": job_result.get("frontend_payload_auto_precompute_on_miss"),
         },
-        "message": "缓存未命中，后台正在预计算，请稍后刷新。",
+        "message": message,
         **extra,
     }
     if payload_type == "front_recommendations":
@@ -1269,13 +1637,59 @@ def _frontend_pending_payload(payload_type: str, effective_as_of: Optional[str],
     return payload
 
 
+def _frontend_pending_account(
+    context: Dict[str, Any],
+    effective_as_of: Optional[str],
+    replay_start_date: Optional[str],
+    limit: int,
+    reason: str,
+) -> Dict[str, Any]:
+    profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+    params = context.get("strategy_params") if isinstance(context.get("strategy_params"), dict) else {}
+    target_cash = safe_float(params.get("account_initial_cash"), safe_float(profile.get("simulated_cash"), 10_000))
+    model_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
+    message = "账户运行结果缓存未命中，已跳过同步回放。请先在后台手动运行策略复盘，或导入本地策略运行结果小包。"
+    return {
+        "status": "pending",
+        "as_of": effective_as_of,
+        "start_date": replay_start_date or "",
+        "follow_start_date": replay_start_date or "",
+        "strategy_model_id": model_id,
+        "strategy_account_source": "pending_runtime_missing",
+        "strategy_account_cache": "miss_deferred",
+        "frontend_account_deferred": True,
+        "frontend_account_defer_reason": reason,
+        "message": message,
+        "account": {
+            "status": "pending",
+            "initial_cash": round(target_cash, 2),
+            "simulated_cash": round(target_cash, 2),
+            "total_asset": round(target_cash, 2),
+            "cash": round(target_cash, 2),
+            "available_cash": round(target_cash, 2),
+            "market_value": 0.0,
+            "total_pnl": 0.0,
+            "return_pct": 0.0,
+            "position_count": 0,
+            "deal_count": 0,
+        },
+        "positions": [],
+        "today_deals": [],
+        "history_deals": [],
+        "delivery_records": [],
+        "daily_settlements": [],
+        "portfolio": {"cash": round(target_cash, 2), "total_value": round(target_cash, 2), "strategy_params": params},
+        "limit": limit,
+    }
+
+
 def _frontend_cached_recommendations_and_plan(
     context: Dict[str, Any],
     effective_as_of: Optional[str],
     top_n: int,
     limit_days: int,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    rec_ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900)
+    rec_ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 1800)
     plan_ttl = _frontend_payload_cache_ttl("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800)
     effective_start = _frontend_replay_start_date(effective_as_of)
     rec_parts = _frontend_payload_cache_parts(
@@ -1318,6 +1732,9 @@ def _frontend_strategy_account(
     limit: int,
     force: bool = False,
     record_period: bool = True,
+    defer_miss: bool = True,
+    persist_derived: bool = True,
+    hydrate_runtime_trades: bool = True,
 ) -> Dict[str, Any]:
     profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
     followed_id = str(profile.get("strategy_model_id") or "active").strip() or "active"
@@ -1331,6 +1748,12 @@ def _frontend_strategy_account(
         _record_user_follow_period(username, profile, source="front_account", reason="account_view", created_at=context.get("created_at"))
 
     def persist_user_follow(account: Dict[str, Any], source: str) -> Dict[str, Any]:
+        if not persist_derived:
+            marked = dict(account)
+            marked["user_follow_persist_deferred"] = True
+            marked["user_follow_persist_source"] = source
+            marked["frontend_account_precompute_reason"] = "account_persist_deferred"
+            return marked
         strategy_evolution.save_user_follow_account(
             username,
             followed_id,
@@ -1354,6 +1777,7 @@ def _frontend_strategy_account(
         limit,
         model_version=model_version,
         params=params,
+        hydrate_trades=hydrate_runtime_trades,
     )
     if user_cached:
         return user_cached
@@ -1368,17 +1792,18 @@ def _frontend_strategy_account(
         params=params,
     )
     if runtime_account:
-        strategy_evolution.save_account_cache(
-            followed_id,
-            params,
-            target_cash,
-            replay_start_date,
-            effective_as_of,
-            limit,
-            runtime_account,
-            model_version=model_version,
-            source="runtime_tables",
-        )
+        if persist_derived:
+            strategy_evolution.save_account_cache(
+                followed_id,
+                params,
+                target_cash,
+                replay_start_date,
+                effective_as_of,
+                limit,
+                runtime_account,
+                model_version=model_version,
+                source="runtime_tables",
+            )
         return persist_user_follow(runtime_account, "runtime_tables")
 
     sqlite_cached = None if force else strategy_evolution.load_account_cache(
@@ -1394,33 +1819,36 @@ def _frontend_strategy_account(
         return persist_user_follow(sqlite_cached, str(sqlite_cached.get("strategy_account_source") or "strategy_runtime_snapshot"))
 
     if followed_id != "active":
-        model = _frontend_full_model(followed_id)
-        raw_records = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
-        if raw_records:
-            trade_records = _scale_model_trades_for_cash(model, target_cash)
-            account = quant_engine.account_from_trades(
-                trade_records,
-                initial_cash=target_cash,
-                as_of=effective_as_of,
-                start_date=replay_start_date,
-                limit=limit,
-                drop_unmatched_sells=True,
-            )
-            account["strategy_account_source"] = "model_records"
-            account["follow_start_date"] = replay_start_date
-            account["strategy_account_cache"] = "miss"
-            strategy_evolution.save_account_cache(
-                followed_id,
-                params,
-                target_cash,
-                replay_start_date,
-                effective_as_of,
-                limit,
-                account,
-                model_version=model_version,
-                source="model_records",
-            )
-            return persist_user_follow(account, "model_records")
+        allow_model_records = bool(force or _env_flag("QT_FRONT_ACCOUNT_MODEL_RECORDS_FALLBACK", False))
+        if allow_model_records:
+            model = _frontend_full_model(followed_id)
+            raw_records = model.get("trade_records") if isinstance(model.get("trade_records"), list) else []
+            if raw_records:
+                trade_records = _scale_model_trades_for_cash(model, target_cash)
+                account = quant_engine.account_from_trades(
+                    trade_records,
+                    initial_cash=target_cash,
+                    as_of=effective_as_of,
+                    start_date=replay_start_date,
+                    limit=limit,
+                    drop_unmatched_sells=True,
+                )
+                account["strategy_account_source"] = "model_records"
+                account["follow_start_date"] = replay_start_date
+                account["strategy_account_cache"] = "miss"
+                if persist_derived:
+                    strategy_evolution.save_account_cache(
+                        followed_id,
+                        params,
+                        target_cash,
+                        replay_start_date,
+                        effective_as_of,
+                        limit,
+                        account,
+                        model_version=model_version,
+                        source="model_records",
+                    )
+                return persist_user_follow(account, "model_records")
 
         fingerprint = hashlib.sha256(
             json.dumps(
@@ -1442,6 +1870,14 @@ def _frontend_strategy_account(
         if cached:
             cached["strategy_account_cache"] = "hit"
             return cached
+        if defer_miss:
+            return _frontend_pending_account(
+                context,
+                effective_as_of,
+                replay_start_date,
+                limit,
+                reason="strategy_runtime_cache_miss",
+            )
         with quant_engine.temporary_strategy_params(params):
             timeline = quant_engine.walk_forward(
                 start_date=replay_start_date,
@@ -1475,6 +1911,34 @@ def _frontend_strategy_account(
             "max_drawdown_pct": timeline.get("max_drawdown_pct", 0),
         }
         _frontend_account_cache_set(cache_key, account)
+        if persist_derived:
+            strategy_evolution.save_account_cache(
+                followed_id,
+                params,
+                target_cash,
+                replay_start_date,
+                effective_as_of,
+                limit,
+                account,
+                model_version=model_version,
+                source="strategy_replay",
+            )
+        return persist_user_follow(account, "strategy_replay")
+
+    if defer_miss:
+        return _frontend_pending_account(
+            context,
+            effective_as_of,
+            replay_start_date,
+            limit,
+            reason="baseline_runtime_cache_miss",
+        )
+    with quant_engine.temporary_strategy_params(params):
+        account = quant_engine.trading_account(as_of=effective_as_of, limit=limit)
+    account["strategy_account_source"] = "baseline_replay"
+    account["follow_start_date"] = replay_start_date
+    account["strategy_account_cache"] = "miss"
+    if persist_derived:
         strategy_evolution.save_account_cache(
             followed_id,
             params,
@@ -1484,27 +1948,630 @@ def _frontend_strategy_account(
             limit,
             account,
             model_version=model_version,
-            source="strategy_replay",
+            source="baseline_replay",
         )
-        return persist_user_follow(account, "strategy_replay")
-
-    with quant_engine.temporary_strategy_params(params):
-        account = quant_engine.trading_account(as_of=effective_as_of, limit=limit)
-    account["strategy_account_source"] = "baseline_replay"
-    account["follow_start_date"] = replay_start_date
-    account["strategy_account_cache"] = "miss"
-    strategy_evolution.save_account_cache(
-        followed_id,
-        params,
-        target_cash,
-        replay_start_date,
-        effective_as_of,
-        limit,
-        account,
-        model_version=model_version,
-        source="baseline_replay",
-    )
     return persist_user_follow(account, "baseline_replay")
+
+
+def _split_usernames(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item or "").strip() for item in value if str(item or "").strip()]
+    return [str(value or "").strip()] if str(value or "").strip() else []
+
+
+def _frontend_account_precompute_queue_file() -> Path:
+    return DATA_DIR / "frontend_account_precompute_queue.json"
+
+
+def _frontend_account_precompute_queue_lock_file() -> Path:
+    return DATA_DIR / "frontend_account_precompute_queue.lock"
+
+
+@contextmanager
+def _frontend_account_precompute_queue_file_lock():
+    path = _frontend_account_precompute_queue_lock_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timeout_ms = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_LOCK_TIMEOUT_MS", 5000, minimum=100, maximum=60000)
+    stale_ms = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_LOCK_STALE_MS", 30000, minimum=1000, maximum=600000)
+    deadline = time.time() + timeout_ms / 1000
+    fd: Optional[int] = None
+    while True:
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            payload = {
+                "pid": os.getpid(),
+                "created_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+            }
+            os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - path.stat().st_mtime > stale_ms / 1000:
+                    path.unlink(missing_ok=True)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.time() >= deadline:
+                raise TimeoutError(f"frontend account precompute queue lock timeout: {path}")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _load_frontend_account_precompute_queue() -> list[Dict[str, Any]]:
+    path = _frontend_account_precompute_queue_file()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+    clean: list[Dict[str, Any]] = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("username") or "").strip()
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        clean.append(
+            {
+                "username": username,
+                "reason": str(item.get("reason") or ""),
+                "as_of": str(item.get("as_of") or ""),
+                "queued_at": str(item.get("queued_at") or ""),
+            }
+        )
+    return clean
+
+
+def _save_frontend_account_precompute_queue(items: list[Dict[str, Any]]) -> None:
+    path = _frontend_account_precompute_queue_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+        "items": items,
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _enqueue_frontend_account_precompute(username: str, reason: str, as_of: Optional[str] = None) -> Dict[str, Any]:
+    username = str(username or "").strip()
+    if not username:
+        return {"status": "skipped", "queued": False, "reason": "missing_username"}
+    with _FRONTEND_ACCOUNT_PRECOMPUTE_QUEUE_LOCK:
+        with _frontend_account_precompute_queue_file_lock():
+            items = _load_frontend_account_precompute_queue()
+            items = [item for item in items if str(item.get("username") or "") != username]
+            items.append(
+                {
+                    "username": username,
+                    "reason": str(reason or ""),
+                    "as_of": str(as_of or ""),
+                    "queued_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+                }
+            )
+            max_items = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_MAX_USERS", 500, minimum=1, maximum=5000)
+            if len(items) > max_items:
+                items = items[-max_items:]
+            _save_frontend_account_precompute_queue(items)
+            return {"status": "queued", "queued": True, "queue_size": len(items), "username": username}
+
+
+def _dequeue_frontend_account_precompute(limit_users: int) -> list[Dict[str, Any]]:
+    clean_limit = max(1, min(int(limit_users or 50), 500))
+    with _FRONTEND_ACCOUNT_PRECOMPUTE_QUEUE_LOCK:
+        with _frontend_account_precompute_queue_file_lock():
+            items = _load_frontend_account_precompute_queue()
+            batch = items[:clean_limit]
+            remaining = items[clean_limit:]
+            _save_frontend_account_precompute_queue(remaining)
+            return batch
+
+
+def _frontend_account_precompute_queue_size() -> int:
+    with _FRONTEND_ACCOUNT_PRECOMPUTE_QUEUE_LOCK:
+        with _frontend_account_precompute_queue_file_lock():
+            return len(_load_frontend_account_precompute_queue())
+
+
+def _frontend_account_precompute_queue_status() -> Dict[str, Any]:
+    path = _frontend_account_precompute_queue_file()
+    lock_path = _frontend_account_precompute_queue_lock_file()
+    now = time.time()
+    stale_ms = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_LOCK_STALE_MS", 30000, minimum=1000, maximum=600000)
+    payload: Dict[str, Any] = {
+        "status": "ok",
+        "queued": 0,
+        "empty": True,
+        "updated_at": "",
+        "oldest_queued_at": "",
+        "newest_queued_at": "",
+        "reason_counts": {},
+        "queue_file_exists": path.exists(),
+        "lock": {
+            "exists": lock_path.exists(),
+            "age_ms": 0,
+            "stale": False,
+            "stale_after_ms": stale_ms,
+        },
+    }
+    try:
+        if path.exists():
+            payload["updated_at"] = datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict) and raw.get("updated_at"):
+                    payload["updated_at"] = str(raw.get("updated_at") or "")
+            except Exception:
+                pass
+        items = _load_frontend_account_precompute_queue()
+        queued_at_values = [str(item.get("queued_at") or "") for item in items if str(item.get("queued_at") or "")]
+        reason_counts: Dict[str, int] = {}
+        for item in items:
+            reason = str(item.get("reason") or "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        payload.update(
+            {
+                "queued": len(items),
+                "empty": len(items) <= 0,
+                "oldest_queued_at": min(queued_at_values) if queued_at_values else "",
+                "newest_queued_at": max(queued_at_values) if queued_at_values else "",
+                "reason_counts": reason_counts,
+            }
+        )
+    except Exception as exc:
+        payload.update({"status": "error", "message": str(exc)})
+
+    if lock_path.exists():
+        try:
+            age_ms = max(0, int((now - lock_path.stat().st_mtime) * 1000))
+            payload["lock"] = {
+                "exists": True,
+                "age_ms": age_ms,
+                "stale": age_ms > stale_ms,
+                "stale_after_ms": stale_ms,
+            }
+        except Exception as exc:
+            payload["lock"] = {"exists": True, "age_ms": 0, "stale": False, "stale_after_ms": stale_ms, "error": str(exc)}
+    return payload
+
+
+def _frontend_account_precompute_async_status() -> Dict[str, Any]:
+    now = time.time()
+    debounce_seconds = max(0.0, min(_env_float("QT_FRONT_ACCOUNT_PRECOMPUTE_ASYNC_DEBOUNCE_SECONDS", 5.0), 300.0))
+    stale_after = max(debounce_seconds, 60.0)
+    reason_counts: Dict[str, int] = {}
+    mode_counts: Dict[str, int] = {}
+    ages_ms: list[int] = []
+    with _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_LOCK:
+        for key, ts in list(_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING.items()):
+            if now - ts > stale_after:
+                _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING.pop(key, None)
+                continue
+            parts = str(key).split("|")
+            reason = parts[1] if len(parts) > 1 and parts[1] else "unknown"
+            mode = parts[3] if len(parts) > 3 and parts[3] else "queue_only"
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+            ages_ms.append(max(0, int((now - ts) * 1000)))
+        pending_count = len(_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING)
+    return {
+        "status": "ok",
+        "pending_count": pending_count,
+        "empty": pending_count <= 0,
+        "debounce_seconds": round(debounce_seconds, 3),
+        "stale_after_seconds": round(stale_after, 3),
+        "oldest_age_ms": max(ages_ms) if ages_ms else 0,
+        "newest_age_ms": min(ages_ms) if ages_ms else 0,
+        "queued_tasks": _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_TASKS.qsize(),
+        "worker_started": _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED > 0,
+        "worker_count": _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED,
+        "worker_target": cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS", 4, minimum=1, maximum=16),
+        "reason_counts": reason_counts,
+        "mode_counts": mode_counts,
+    }
+
+
+def _ensure_frontend_account_precompute_async_worker() -> None:
+    global _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED
+    worker_target = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS", 4, minimum=1, maximum=16)
+    if _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED >= worker_target:
+        return
+    with _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKER_LOCK:
+        if _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED >= worker_target:
+            return
+
+        def run() -> None:
+            while True:
+                task = _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_TASKS.get()
+                try:
+                    delay_ms = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_ASYNC_DISPATCH_DELAY_MS", 25, minimum=0, maximum=1000)
+                    if delay_ms > 0:
+                        time.sleep(delay_ms / 1000)
+                    task()
+                except Exception as exc:
+                    try:
+                        job_manager._append_log(
+                            "warning",
+                            f"用户账户预热异步任务失败：{exc}",
+                            job="frontend_account_precompute",
+                            stage="queue_async",
+                        )
+                    except Exception:
+                        pass
+                finally:
+                    _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_TASKS.task_done()
+
+        while _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED < worker_target:
+            next_index = _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED + 1
+            threading.Thread(target=run, name=f"qt-account-precompute-async-{next_index}", daemon=True).start()
+            _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_WORKERS_STARTED = next_index
+
+
+def _submit_frontend_account_precompute_async(task: Callable[[], None]) -> None:
+    _ensure_frontend_account_precompute_async_worker()
+    _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_TASKS.put(task)
+
+
+def _start_frontend_account_precompute_worker_for_queue(as_of: Optional[str] = None, reason: str = "") -> Dict[str, Any]:
+    try:
+        queue_size = _frontend_account_precompute_queue_size()
+    except Exception as exc:
+        job_manager._append_log("warning", f"账户预热队列状态读取失败：{exc}", job="frontend_account_precompute", stage="queue")
+        return {"status": "error", "queued": False, "worker_started": False, "reason": reason, "message": str(exc)}
+    if queue_size <= 0:
+        return {"status": "skipped", "queued": False, "worker_started": False, "reason": reason or "queue_empty", "queue_size": 0}
+
+    payload = {
+        "as_of": as_of,
+        "usernames": None,
+        "limit_users": cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_BATCH_USERS", 50, minimum=1, maximum=500),
+        "limit": cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_LIMIT", 160, minimum=1, maximum=2000),
+        "force": False,
+        "drain_queue": True,
+    }
+
+    def execute() -> Dict[str, Any]:
+        return _precompute_frontend_accounts(**payload)
+
+    try:
+        if _env_flag("QT_FRONT_ACCOUNT_PRECOMPUTE_PROCESS_ENABLED", True):
+            result = job_manager.run_job_process(
+                "frontend_account_precompute",
+                payload=payload,
+                message="前台账户快照队列预热已转入独立进程运行",
+            )
+        else:
+            result = job_manager.run_job_background(
+                "frontend_account_precompute",
+                execute,
+                payload=payload,
+                message="前台账户快照队列预热已转入后台运行",
+            )
+    except Exception as exc:
+        job_manager._append_log("warning", f"账户预热队列 worker 启动失败：{exc}", job="frontend_account_precompute", stage="queue")
+        return {"status": "queued", "queued": True, "worker_started": False, "reason": reason, "queue_size": queue_size, "message": str(exc)}
+
+    if isinstance(result, dict):
+        worker_started = bool(result.get("process_pid") or result.get("progress_pct") is not None)
+        return {**result, "queued": True, "worker_started": worker_started, "reason": reason, "queue_size": queue_size}
+    return {"status": "ok", "queued": True, "worker_started": True, "reason": reason, "queue_size": queue_size}
+
+
+def _merge_frontend_account_precompute_result(target: Dict[str, Any], result: Dict[str, Any]) -> None:
+    target["user_count"] += int(safe_float(result.get("user_count"), 0))
+    target["saved"] += int(safe_float(result.get("saved"), 0))
+    target["cached"] += int(safe_float(result.get("cached"), 0))
+    target["pending"] += int(safe_float(result.get("pending"), 0))
+    target["error_count"] += int(safe_float(result.get("error_count"), 0))
+    target["items"].extend(result.get("items") if isinstance(result.get("items"), list) else [])
+    target["errors"].extend(result.get("errors") if isinstance(result.get("errors"), list) else [])
+
+
+def _precompute_frontend_accounts_once(
+    as_of: Optional[str] = None,
+    usernames: Optional[Any] = None,
+    limit_users: int = 50,
+    limit: int = 160,
+    force: bool = False,
+) -> Dict[str, Any]:
+    effective_as_of = _frontend_account_as_of(as_of)
+    requested = set(_split_usernames(usernames))
+    clean_limit_users = max(1, min(int(limit_users or 50), 500))
+    clean_limit = max(1, min(int(limit or 160), 2000))
+    users_payload = frontend_user_summary()
+    candidates = []
+    for item in users_payload.get("items", []) if isinstance(users_payload.get("items"), list) else []:
+        if not isinstance(item, dict) or item.get("disabled"):
+            continue
+        username = str(item.get("username") or "").strip()
+        if not username:
+            continue
+        if requested and username not in requested:
+            continue
+        candidates.append(username)
+        if len(candidates) >= clean_limit_users:
+            break
+
+    results = []
+    saved = 0
+    cached = 0
+    pending = 0
+    errors = []
+    for username in candidates:
+        row: Dict[str, Any] = {"username": username}
+        try:
+            context = _frontend_profile_context_for_username(username, include_catalog=False)
+            account = _frontend_strategy_account(
+                context,
+                effective_as_of,
+                limit=clean_limit,
+                force=force,
+                record_period=True,
+                defer_miss=True,
+            )
+            source = str(account.get("strategy_account_source") or "")
+            cache_state = str(account.get("strategy_account_cache") or "")
+            row.update(
+                {
+                    "status": "pending" if account.get("frontend_account_deferred") else "ok",
+                    "strategy_model_id": str((context.get("profile") or {}).get("strategy_model_id") or ""),
+                    "follow_start_date": str(account.get("follow_start_date") or ""),
+                    "source": source,
+                    "cache": cache_state,
+                    "message": account.get("message") or "",
+                }
+            )
+            if account.get("frontend_account_deferred"):
+                pending += 1
+            elif cache_state == "user_follow":
+                cached += 1
+            else:
+                saved += 1
+        except Exception as exc:
+            row.update({"status": "error", "error": str(exc)})
+            errors.append({"username": username, "error": str(exc)})
+        results.append(row)
+
+    status = "ok" if not errors else ("partial" if saved or cached or pending else "error")
+    return {
+        "status": status,
+        "job": "frontend_account_precompute",
+        "as_of": effective_as_of,
+        "user_count": len(candidates),
+        "saved": saved,
+        "cached": cached,
+        "pending": pending,
+        "error_count": len(errors),
+        "errors": errors[:20],
+        "items": results,
+        "force": bool(force),
+        "limit": clean_limit,
+        "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _precompute_frontend_accounts(
+    as_of: Optional[str] = None,
+    usernames: Optional[Any] = None,
+    limit_users: int = 50,
+    limit: int = 160,
+    force: bool = False,
+    drain_queue: bool = False,
+) -> Dict[str, Any]:
+    if not drain_queue:
+        return _precompute_frontend_accounts_once(as_of=as_of, usernames=usernames, limit_users=limit_users, limit=limit, force=force)
+
+    clean_limit_users = max(1, min(int(limit_users or 50), 500))
+    summary: Dict[str, Any] = {
+        "status": "ok",
+        "job": "frontend_account_precompute",
+        "as_of": _frontend_account_as_of(as_of),
+        "drain_queue": True,
+        "batches": 0,
+        "user_count": 0,
+        "saved": 0,
+        "cached": 0,
+        "pending": 0,
+        "error_count": 0,
+        "errors": [],
+        "items": [],
+        "force": bool(force),
+        "limit": max(1, min(int(limit or 160), 2000)),
+        "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+    max_batches = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_MAX_BATCHES", 20, minimum=1, maximum=200)
+    idle_grace_ms = cache_env_int("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_IDLE_GRACE_MS", 500, minimum=0, maximum=5000)
+    idle_checked = False
+    for _index in range(max_batches):
+        batch = _dequeue_frontend_account_precompute(clean_limit_users)
+        if not batch:
+            if idle_grace_ms > 0 and not idle_checked:
+                idle_checked = True
+                time.sleep(idle_grace_ms / 1000)
+                continue
+            break
+        idle_checked = False
+        usernames_batch = [str(item.get("username") or "").strip() for item in batch if str(item.get("username") or "").strip()]
+        if not usernames_batch:
+            continue
+        batch_as_of = as_of or next((str(item.get("as_of") or "").strip() for item in batch if str(item.get("as_of") or "").strip()), None)
+        result = _precompute_frontend_accounts_once(
+            as_of=batch_as_of,
+            usernames=usernames_batch,
+            limit_users=len(usernames_batch),
+            limit=limit,
+            force=force,
+        )
+        summary["batches"] += 1
+        _merge_frontend_account_precompute_result(summary, result)
+
+    if summary["error_count"]:
+        summary["status"] = "partial" if summary["saved"] or summary["cached"] or summary["pending"] else "error"
+    summary["errors"] = summary["errors"][:20]
+    return summary
+
+
+def _queue_frontend_account_precompute_for_user(
+    username: str,
+    reason: str = "",
+    as_of: Optional[str] = None,
+    start_worker: Optional[bool] = None,
+    async_enqueue: bool = False,
+) -> Dict[str, Any]:
+    username = str(username or "").strip()
+    reason = str(reason or "").strip()
+    if not username:
+        return {"status": "skipped", "reason": "missing_username"}
+    if reason not in {"profile_strategy_changed", "profile_cash_changed", "profile_cash_and_strategy_changed", "register", "account_runtime_missing"}:
+        return {"status": "skipped", "reason": reason or "profile_unchanged"}
+    if not _env_flag("QT_FRONT_ACCOUNT_AUTO_PRECOMPUTE_ENABLED", True):
+        return {"status": "disabled", "reason": reason}
+
+    should_start_worker = (
+        _env_flag("QT_FRONT_ACCOUNT_START_WORKER_ON_PROFILE", False)
+        if start_worker is None
+        else bool(start_worker)
+    )
+    if async_enqueue and _env_flag("QT_FRONT_ACCOUNT_PRECOMPUTE_QUEUE_ASYNC_ON_PROFILE", True):
+        clean_username = username
+        reason_text = reason
+        as_of_text = as_of
+        start_worker_value = should_start_worker
+        async_key = "|".join([clean_username, reason_text, str(as_of_text or ""), "start_worker" if start_worker_value else "queue_only"])
+        debounce_seconds = max(0.0, min(_env_float("QT_FRONT_ACCOUNT_PRECOMPUTE_ASYNC_DEBOUNCE_SECONDS", 5.0), 300.0))
+        now_ts = time.time()
+        with _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_LOCK:
+            stale_after = max(debounce_seconds, 60.0)
+            for key, ts in list(_FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING.items()):
+                if now_ts - ts > stale_after:
+                    _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING.pop(key, None)
+            previous_ts = _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING.get(async_key)
+            if debounce_seconds > 0 and previous_ts and now_ts - previous_ts < debounce_seconds:
+                return {
+                    "status": "queued_async",
+                    "queued": True,
+                    "async": True,
+                    "deduped": True,
+                    "queue_pending": True,
+                    "reason": reason,
+                    "username": username,
+                    "worker_started": False,
+                    "worker_start_deferred": not should_start_worker,
+                    "worker_start_pending": bool(should_start_worker),
+                    "debounce_seconds": round(debounce_seconds, 3),
+                }
+            _FRONTEND_ACCOUNT_PRECOMPUTE_ASYNC_PENDING[async_key] = now_ts
+
+        def worker() -> None:
+            result = _queue_frontend_account_precompute_for_user(
+                clean_username,
+                reason=reason_text,
+                as_of=as_of_text,
+                start_worker=start_worker_value,
+                async_enqueue=False,
+            )
+            if str(result.get("status") or "") == "error":
+                job_manager._append_log(
+                    "warning",
+                    f"用户账户预热异步入队失败：{result.get('message') or 'unknown error'}",
+                    job="frontend_account_precompute",
+                    stage="queue_async",
+                    payload={"username": clean_username, "reason": reason_text},
+                )
+
+        _submit_frontend_account_precompute_async(worker)
+        return {
+            "status": "queued_async",
+            "queued": True,
+            "async": True,
+            "deduped": False,
+            "queue_pending": True,
+            "reason": reason,
+            "username": username,
+            "worker_started": False,
+            "worker_start_deferred": not should_start_worker,
+            "worker_start_pending": bool(should_start_worker),
+            "debounce_seconds": round(debounce_seconds, 3),
+        }
+
+    try:
+        queue_result = _enqueue_frontend_account_precompute(username, reason=reason, as_of=as_of)
+    except Exception as exc:
+        job_manager._append_log("warning", f"用户账户预热入队失败：{exc}", job="frontend_account_precompute", stage="queue")
+        return {"status": "error", "queued": False, "reason": reason, "username": username, "message": str(exc)}
+    if not queue_result.get("queued"):
+        return {**queue_result, "reason": reason, "username": username}
+
+    if not should_start_worker:
+        return {
+            **queue_result,
+            "reason": reason,
+            "username": username,
+            "queued": True,
+            "worker_started": False,
+            "worker_start_deferred": True,
+        }
+
+    worker_result = _start_frontend_account_precompute_worker_for_queue(as_of=as_of, reason=reason)
+    return {**worker_result, **queue_result, "reason": reason, "username": username, "queued": True}
+
+
+def _frontend_account_needs_precompute(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+    return bool(
+        payload.get("frontend_account_deferred")
+        or payload.get("user_follow_persist_deferred")
+        or str(payload.get("status") or "") == "pending"
+        or str(account.get("status") or "") == "pending"
+    )
+
+
+def _attach_frontend_account_precompute(
+    payload: Dict[str, Any],
+    context: Dict[str, Any],
+    as_of: Optional[str],
+    reason: str = "account_runtime_missing",
+) -> Dict[str, Any]:
+    if not _env_flag("QT_FRONT_ACCOUNT_AUTO_PRECOMPUTE_ENABLED", True):
+        return payload
+    if not _frontend_account_needs_precompute(payload):
+        return payload
+    effective_reason = str(payload.get("frontend_account_precompute_reason") or reason or "account_runtime_missing")
+    rescue = _queue_frontend_account_precompute_for_user(
+        str(context.get("username") or ""),
+        reason=effective_reason,
+        as_of=as_of,
+        start_worker=True,
+        async_enqueue=True,
+    )
+    if rescue.get("queued") or rescue.get("status") == "error":
+        payload["account_precompute"] = rescue
+        payload["account_precompute_queued"] = bool(rescue.get("queued"))
+    return payload
 
 
 def _scale_row(row: Dict[str, Any], scale: float, keys: tuple[str, ...]) -> Dict[str, Any]:
@@ -1582,9 +2649,9 @@ def _frontend_trading_account(account_payload: Dict[str, Any], context: Dict[str
     return next_payload
 
 
-def _find_strategy_model(model_id: str) -> Dict[str, Any]:
+def _find_strategy_model(model_id: str, include_records: bool = True) -> Dict[str, Any]:
     model_id = str(model_id or "active").strip() or "active"
-    model = strategy_evolution.model(model_id, include_records=True)
+    model = strategy_evolution.model(model_id, include_records=include_records)
     if model:
         return model
     models_payload = _frontend_strategy_models_payload(include_catalog=True)
@@ -1666,6 +2733,210 @@ def _model_backtest_payload(
         "days": timeline.get("days", []),
         "strategy_params": params,
     }
+
+
+def _model_backtest_cache_ttl() -> int:
+    return cache_env_int("QT_MODEL_BACKTEST_CACHE_TTL_SECONDS", 600, minimum=0, maximum=86400)
+
+
+def _model_backtest_cache_parts(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+) -> Dict[str, Any]:
+    params = model.get("params") if isinstance(model.get("params"), dict) else {}
+    params_hash = hashlib.sha256(
+        json.dumps(params, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return {
+        "model_id": str(model.get("id") or ""),
+        "model_version": strategy_evolution.runtime_model_version(model),
+        "params_hash": params_hash,
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "mode": str(mode or "intraday").strip().lower(),
+        "limit": max(0, min(int(limit or 0), 5000)),
+        "version": APP_VERSION,
+    }
+
+
+def _compact_model_backtest_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "status": payload.get("status") or "ok",
+        "job": "model_backtest",
+        "model_id": payload.get("model_id") or "",
+        "model_name": payload.get("model_name") or "",
+        "mode": payload.get("mode") or "",
+        "start_date": payload.get("start_date") or "",
+        "end_date": payload.get("end_date") or "",
+        "return_pct": summary.get("return_pct", 0),
+        "trade_count": summary.get("trade_count", 0),
+        "closed_trades": summary.get("closed_trades", 0),
+        "generated_at": payload.get("generated_at") or datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _compute_model_backtest_cached(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+) -> Dict[str, Any]:
+    clean_limit = max(0, min(int(limit or 0), 5000))
+    payload = _model_backtest_payload(
+        model=model,
+        start_date=start_date,
+        end_date=end_date,
+        mode=mode,
+        limit=clean_limit,
+    )
+    if isinstance(payload, dict):
+        payload["source"] = "model_backtest_recompute"
+        payload["model_backtest_cache"] = "refresh"
+        payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        save_payload_cache(
+            "model_backtest",
+            _model_backtest_cache_parts(model, start_date, end_date, mode, clean_limit),
+            payload,
+            _model_backtest_cache_ttl(),
+        )
+        return payload
+    return payload
+
+
+def _queue_model_backtest_recompute(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+    process: bool = True,
+) -> Dict[str, Any]:
+    clean_limit = max(0, min(int(limit or 0), 5000))
+    payload = {
+        "model_id": str(model.get("id") or ""),
+        "model_name": str(model.get("name") or model.get("id") or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "mode": str(mode or "intraday").strip().lower(),
+        "limit": clean_limit,
+    }
+    if process:
+        return job_manager.run_job_process(
+            "model_backtest",
+            payload=payload,
+            message="模型回测重算已转入独立进程运行",
+        )
+
+    def execute() -> Dict[str, Any]:
+        result = _compute_model_backtest_cached(model, start_date, end_date, mode, clean_limit)
+        return _compact_model_backtest_result(result if isinstance(result, dict) else {})
+
+    return job_manager.run_job_background(
+        "model_backtest",
+        execute,
+        payload=payload,
+        message="模型回测重算已转入后台运行",
+    )
+
+
+def _pending_model_backtest(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+    job_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    status, cache_state, message = _deferred_job_response_state(
+        job_result,
+        "模型回测重算正在后台生成，请稍后刷新。",
+    )
+    return {
+        "status": status,
+        "source": "model_backtest_recompute",
+        "model_backtest_cache": cache_state,
+        "message": message,
+        "model": model,
+        "model_id": model.get("id"),
+        "model_name": model.get("name"),
+        "mode": str(mode or "intraday").strip().lower(),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "summary": {},
+        "account": {},
+        "positions": [],
+        "trade_records": [],
+        "delivery_records": [],
+        "daily_settlements": [],
+        "equity_curve": [],
+        "days": [],
+        "strategy_params": quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {}),
+        "limit": max(0, min(int(limit or 0), 5000)),
+        "job_result": job_result,
+    }
+
+
+def _manual_required_heavy_job(job: str, message: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": "manual_required",
+        "job": job,
+        "manual_required": True,
+        "message": message,
+        **payload,
+    }
+
+
+def _model_backtest_recompute_payload(
+    model: Dict[str, Any],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    limit: int,
+    force: bool = False,
+    defer: bool = True,
+    manual: bool = False,
+    process: bool = True,
+) -> Dict[str, Any]:
+    clean_limit = max(0, min(int(limit or 0), 5000))
+    cache_parts = _model_backtest_cache_parts(model, start_date, end_date, mode, clean_limit)
+    cached = None if force else load_payload_cache("model_backtest", cache_parts, _model_backtest_cache_ttl())
+    if cached:
+        cached["model_backtest_cache"] = "hit"
+        return cached
+    if _env_flag("QT_MODEL_BACKTEST_REQUIRE_MANUAL_TRIGGER", True) and not manual:
+        return _manual_required_heavy_job(
+            "model_backtest",
+            "模型回测重算需要显式手动触发；普通刷新只读取已保存记录或短缓存。",
+            {
+                "source": "model_backtest_recompute",
+                "model_backtest_cache": "manual_required",
+                "model": model,
+                "model_id": model.get("id"),
+                "model_name": model.get("name"),
+                "mode": str(mode or "intraday").strip().lower(),
+                "start_date": str(start_date or ""),
+                "end_date": str(end_date or ""),
+                "summary": {},
+                "account": {},
+                "positions": [],
+                "trade_records": [],
+                "delivery_records": [],
+                "daily_settlements": [],
+                "equity_curve": [],
+                "days": [],
+                "strategy_params": quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {}),
+                "limit": clean_limit,
+            },
+        )
+    if defer:
+        job_result = _queue_model_backtest_recompute(model, start_date, end_date, mode, clean_limit, process=process)
+        return _pending_model_backtest(model, start_date, end_date, mode, clean_limit, job_result)
+    return _compute_model_backtest_cached(model, start_date, end_date, mode, clean_limit)
 
 
 def _stored_model_backtest_payload(model: Dict[str, Any], limit: int = 0) -> Dict[str, Any]:
@@ -1762,7 +3033,7 @@ def _quant_timeline_payload(
             auto_fill=auto_fill,
         )
 
-    model = _find_strategy_model(clean_model_id)
+    model = _find_strategy_model(clean_model_id, include_records=False)
     params = quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {})
     effective_initial_cash = initial_cash if initial_cash is not None else safe_float(params.get("account_initial_cash"), 100000)
     effective_max_positions = max_positions if max_positions is not None else int(safe_float(params.get("max_positions"), 5))
@@ -1798,15 +3069,354 @@ def _quant_timeline_payload(
     return payload
 
 
-@app.get("/api/front/public_snapshot")
-def frontend_public_snapshot(
-    as_of: Optional[str] = Query(default=None),
-    mobile: bool = Query(default=False),
-    light: bool = Query(default=True),
+def _quant_timeline_cache_ttl() -> int:
+    return cache_env_int("QT_TIMELINE_CACHE_TTL_SECONDS", 600, minimum=0, maximum=86400)
+
+
+def _quant_timeline_cache_parts(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool = True,
+    auto_fill: bool = True,
+) -> Dict[str, Any]:
+    clean_model_id = str(model_id or "").strip()
+    identity: Dict[str, Any] = {}
+    if clean_model_id:
+        model = _find_strategy_model(clean_model_id, include_records=False)
+        params = quant_engine.strategy_params(model.get("params") if isinstance(model.get("params"), dict) else {})
+        identity["model_version"] = strategy_evolution.runtime_model_version(model)
+        identity["strategy_name"] = str(model.get("name") or clean_model_id)
+    else:
+        params = quant_engine.strategy_params()
+        identity["strategy_source"] = quant_engine.strategy_source()
+    params_hash = hashlib.sha256(
+        json.dumps(params, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return {
+        "model_id": clean_model_id,
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": None if initial_cash is None else round(safe_float(initial_cash), 2),
+        "max_positions": None if max_positions is None else int(max_positions),
+        "hold_days": None if hold_days is None else int(hold_days),
+        "top_n": None if top_n is None else int(top_n),
+        "intraday": bool(intraday),
+        "use_daily_fallback": bool(use_daily_fallback),
+        "auto_fill": bool(auto_fill),
+        "params_hash": params_hash,
+        "version": APP_VERSION,
+        **identity,
+    }
+
+
+def _compact_quant_timeline_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    trades = payload.get("trades") if isinstance(payload.get("trades"), list) else []
+    days = payload.get("days") if isinstance(payload.get("days"), list) else []
+    return {
+        "status": payload.get("status") or "ok",
+        "job": "quant_timeline",
+        "mode": payload.get("mode") or "",
+        "start_date": payload.get("start_date") or "",
+        "end_date": payload.get("end_date") or "",
+        "strategy_model_id": payload.get("strategy_model_id") or "",
+        "strategy_name": payload.get("strategy_name") or "",
+        "return_pct": payload.get("return_pct", 0),
+        "trade_count": len(trades),
+        "closed_trades": payload.get("closed_trades", 0),
+        "day_count": len(days),
+        "generated_at": payload.get("generated_at") or datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _compute_quant_timeline_cached(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool = True,
+    auto_fill: bool = True,
+) -> Dict[str, Any]:
+    payload = _quant_timeline_payload(
+        model_id=model_id,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=hold_days,
+        top_n=top_n,
+        intraday=intraday,
+        use_daily_fallback=use_daily_fallback,
+        auto_fill=auto_fill,
+    )
+    if isinstance(payload, dict):
+        payload["timeline_cache"] = "refresh"
+        payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        save_payload_cache(
+            "quant_timeline",
+            _quant_timeline_cache_parts(
+                model_id=model_id,
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=initial_cash,
+                max_positions=max_positions,
+                hold_days=hold_days,
+                top_n=top_n,
+                intraday=intraday,
+                use_daily_fallback=use_daily_fallback,
+                auto_fill=auto_fill,
+            ),
+            payload,
+            _quant_timeline_cache_ttl(),
+        )
+        return payload
+    return payload
+
+
+def _queue_quant_timeline_precompute(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool = True,
+    auto_fill: bool = True,
+    process: bool = True,
+) -> Dict[str, Any]:
+    payload = {
+        "model_id": str(model_id or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": initial_cash,
+        "max_positions": max_positions,
+        "hold_days": hold_days,
+        "top_n": top_n,
+        "intraday": bool(intraday),
+        "mode": "intraday" if intraday else "daily",
+        "use_daily_fallback": bool(use_daily_fallback),
+        "auto_fill": bool(auto_fill),
+    }
+    if process:
+        return job_manager.run_job_process(
+            "quant_timeline",
+            payload=payload,
+            message="策略时间线回测已转入独立进程运行",
+        )
+
+    def execute() -> Dict[str, Any]:
+        result = _compute_quant_timeline_cached(
+            model_id=model_id,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=hold_days,
+            top_n=top_n,
+            intraday=intraday,
+            use_daily_fallback=use_daily_fallback,
+            auto_fill=auto_fill,
+        )
+        return _compact_quant_timeline_result(result if isinstance(result, dict) else {})
+
+    return job_manager.run_job_background(
+        "quant_timeline",
+        execute,
+        payload=payload,
+        message="策略时间线回测已转入后台运行",
+    )
+
+
+def _pending_quant_timeline(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool,
+    auto_fill: bool,
+    job_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    status, cache_state, message = _deferred_job_response_state(
+        job_result,
+        "策略时间线回测正在后台生成，请稍后刷新。",
+    )
+    return {
+        "status": status,
+        "source": "quant_timeline",
+        "timeline_cache": cache_state,
+        "message": message,
+        "mode": "intraday" if intraday else "daily",
+        "model_id": str(model_id or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": initial_cash,
+        "max_positions": max_positions,
+        "hold_days": hold_days,
+        "top_n": top_n,
+        "intraday": bool(intraday),
+        "use_daily_fallback": bool(use_daily_fallback),
+        "auto_fill": bool(auto_fill),
+        "trades": [],
+        "equity_curve": [],
+        "days": [],
+        "job_result": job_result,
+    }
+
+
+def _quant_timeline_cached_or_deferred(
+    *,
+    model_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: Optional[int],
+    top_n: Optional[int],
+    intraday: bool,
+    use_daily_fallback: bool = True,
+    auto_fill: bool = True,
+    force: bool = False,
+    defer: bool = True,
+    process: bool = True,
+    manual: bool = False,
+) -> Dict[str, Any]:
+    cache_parts = _quant_timeline_cache_parts(
+        model_id=model_id,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=hold_days,
+        top_n=top_n,
+        intraday=intraday,
+        use_daily_fallback=use_daily_fallback,
+        auto_fill=auto_fill,
+    )
+    cached = None if force else load_payload_cache("quant_timeline", cache_parts, _quant_timeline_cache_ttl())
+    if cached:
+        cached["timeline_cache"] = "hit"
+        return cached
+    if _env_flag("QT_TIMELINE_REQUIRE_MANUAL_TRIGGER", True) and not manual:
+        return _manual_required_heavy_job(
+            "quant_timeline",
+            "策略时间线回测需要显式手动触发；普通刷新只读取短缓存，不自动启动重计算。",
+            {
+                "source": "quant_timeline",
+                "timeline_cache": "manual_required",
+                "mode": "intraday" if intraday else "daily",
+                "model_id": str(model_id or ""),
+                "start_date": str(start_date or ""),
+                "end_date": str(end_date or ""),
+                "initial_cash": initial_cash,
+                "max_positions": max_positions,
+                "hold_days": hold_days,
+                "top_n": top_n,
+                "intraday": bool(intraday),
+                "use_daily_fallback": bool(use_daily_fallback),
+                "auto_fill": bool(auto_fill),
+                "trades": [],
+                "equity_curve": [],
+                "days": [],
+            },
+        )
+    if defer:
+        job_result = _queue_quant_timeline_precompute(
+            model_id=model_id,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=hold_days,
+            top_n=top_n,
+            intraday=intraday,
+            use_daily_fallback=use_daily_fallback,
+            auto_fill=auto_fill,
+            process=process,
+        )
+        return _pending_quant_timeline(
+            model_id=model_id,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=hold_days,
+            top_n=top_n,
+            intraday=intraday,
+            use_daily_fallback=use_daily_fallback,
+            auto_fill=auto_fill,
+            job_result=job_result,
+        )
+    return _compute_quant_timeline_cached(
+        model_id=model_id,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=hold_days,
+        top_n=top_n,
+        intraday=intraday,
+        use_daily_fallback=use_daily_fallback,
+        auto_fill=auto_fill,
+    )
+
+
+def _frontend_snapshot_news_stable(
+    effective_as_of: str,
+    mobile: bool,
+    light: bool,
+    news_limit: int,
+) -> Dict[str, Any]:
+    cache_parts = {
+        "as_of": effective_as_of,
+        "mobile": bool(mobile),
+        "light": bool(light),
+        "news_limit": int(news_limit),
+        "version": APP_VERSION,
+    }
+    cache_ttl = cache_env_int("QT_FRONT_SNAPSHOT_NEWS_CACHE_TTL_SECONDS", 30, minimum=0, maximum=3600)
+    cached = _memory_cache_get("front_snapshot_news", cache_parts, cache_ttl)
+    if cached:
+        return cached
+    if light and _env_flag("QT_FRONT_SNAPSHOT_LIGHT_NEWS_NO_ENGINE_FALLBACK", True):
+        news_payload = _frontend_light_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+    else:
+        news_payload = _safe_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+    return _memory_cache_set(
+        "front_snapshot_news",
+        cache_parts,
+        {
+            "news": news_payload,
+            "market_sentiment": _market_sentiment(news_payload),
+        },
+    )
+
+
+def _frontend_public_snapshot_payload(
+    as_of: Optional[str] = None,
+    mobile: bool = False,
+    light: bool = True,
 ):
     news_limit = 12 if mobile or light else 80
-    jobs_payload = job_manager.status(light=True)
-    light_jobs = _frontend_light_jobs(jobs_payload)
+    light_jobs = _frontend_jobs_payload()
     effective_as_of = _frontend_account_as_of(as_of)
     cache_parts = {
         "as_of": effective_as_of,
@@ -1818,36 +3428,33 @@ def frontend_public_snapshot(
     cache_ttl = cache_env_int("QT_PUBLIC_SNAPSHOT_CACHE_TTL_SECONDS", 30, minimum=0, maximum=3600)
     stable = _memory_cache_get("front_public_snapshot", cache_parts, cache_ttl)
     if not stable:
-        news_payload = _safe_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+        news_stable = _frontend_snapshot_news_stable(effective_as_of, bool(mobile), bool(light), news_limit)
         stable = _memory_cache_set(
             "front_public_snapshot",
             cache_parts,
-            {
-                "news": news_payload,
-                "market_sentiment": _market_sentiment(news_payload),
-            },
+            news_stable,
         )
     return {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=light_jobs),
+        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=light_jobs, include_data_dir=False),
         "jobs": light_jobs,
         **stable,
     }
 
 
-@app.get("/api/front/snapshot")
-def frontend_snapshot(
+def _frontend_snapshot_payload(
     request: Request,
-    as_of: Optional[str] = Query(default=None),
-    mobile: bool = Query(default=False),
-    light: bool = Query(default=True),
+    as_of: Optional[str] = None,
+    mobile: bool = False,
+    light: bool = True,
+    include_catalog: bool = False,
 ):
     news_limit = 12 if mobile or light else 80
     top_n = 12 if mobile else 30
-    jobs_payload = job_manager.status(light=True)
-    visible_jobs = _frontend_light_jobs(jobs_payload) if light else jobs_payload
+    visible_jobs = _frontend_jobs_payload()
     effective_as_of = _frontend_account_as_of(as_of)
-    context = _frontend_profile_context(request, include_catalog=True)
+    catalog_included = bool(include_catalog or not light)
+    context = _frontend_profile_context(request, include_catalog=catalog_included)
     cache_parts = _frontend_payload_cache_parts(
         context,
         "front_snapshot",
@@ -1857,13 +3464,14 @@ def frontend_snapshot(
             "light": bool(light),
             "news_limit": news_limit,
             "top_n": top_n,
+            "include_catalog": catalog_included,
             "version": APP_VERSION,
         },
     )
     cache_ttl = cache_env_int("QT_FRONT_SNAPSHOT_CACHE_TTL_SECONDS", 45, minimum=0, maximum=3600)
     stable = _memory_cache_get("front_snapshot", cache_parts, cache_ttl)
     if not stable:
-        news_payload = _safe_news_feed(as_of=effective_as_of, limit=news_limit, fallback_latest=True)
+        news_stable = _frontend_snapshot_news_stable(effective_as_of, bool(mobile), bool(light), news_limit)
         trading_account: Dict[str, Any] = {}
         recommendations: Dict[str, Any] = {}
         daily_plan: Dict[str, Any] = {}
@@ -1873,6 +3481,8 @@ def frontend_snapshot(
                 effective_as_of,
                 limit=80 if light else 500,
                 record_period=not light,
+                persist_derived=not light,
+                hydrate_runtime_trades=not light,
             )
             trading_account = _frontend_trading_account(trading_account, context)
         except Exception as exc:
@@ -1883,9 +3493,9 @@ def frontend_snapshot(
         stable = {
             "frontend_profile": context["profile"],
             "followed_model": context["followed_model"],
-            "news": news_payload,
             "strategy_models": context["models_payload"],
-            "market_sentiment": _market_sentiment(news_payload),
+            "strategy_catalog_included": catalog_included,
+            **news_stable,
         }
         if trading_account:
             stable["trading_account"] = trading_account
@@ -1894,36 +3504,65 @@ def frontend_snapshot(
         if daily_plan:
             stable["daily_plan"] = daily_plan
         stable = _memory_cache_set("front_snapshot", cache_parts, stable)
+    if isinstance(stable.get("trading_account"), dict):
+        stable = dict(stable)
+        stable["trading_account"] = _attach_frontend_account_precompute(
+            _copy_payload(stable["trading_account"]),
+            context,
+            effective_as_of,
+            reason="account_runtime_missing",
+        )
     payload = {
         "status": "ok",
-        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=visible_jobs),
+        "status_payload": _light_status_payload(as_of=effective_as_of, jobs_payload=visible_jobs, include_data_dir=False),
         "jobs": visible_jobs,
-        "logs": job_manager.logs(limit=12),
         **stable,
     }
     return payload
 
 
-@app.get("/api/front/trading_account")
-def frontend_trading_account(
+def _frontend_strategy_models_route_payload(request: Request):
+    context = _frontend_profile_context(request, include_catalog=True)
+    return {
+        "status": "ok",
+        "frontend_profile": context["profile"],
+        "followed_model": context["followed_model"],
+        "strategy_models": context["models_payload"],
+        "strategy_catalog_included": True,
+    }
+
+
+def _frontend_trading_account_payload(
     request: Request,
-    as_of: Optional[str] = Query(default=None),
-    limit: int = Query(default=500, ge=1, le=2000),
-    force: bool = Query(default=False),
+    as_of: Optional[str] = None,
+    limit: int = 500,
+    force: bool = False,
+    defer: bool = True,
 ):
     context = _frontend_profile_context(request, include_catalog=False)
-    account = _frontend_strategy_account(context, as_of, limit=limit, force=force)
-    return _frontend_trading_account(account, context)
+    persist_on_read = bool(force or _env_flag("QT_FRONT_ACCOUNT_PERSIST_ON_READ", False))
+    account = _frontend_strategy_account(
+        context,
+        as_of,
+        limit=limit,
+        force=force,
+        record_period=persist_on_read,
+        defer_miss=bool(defer and not force),
+        persist_derived=persist_on_read,
+    )
+    payload = _frontend_trading_account(account, context)
+    if not force:
+        payload = _attach_frontend_account_precompute(payload, context, as_of, reason="account_runtime_missing")
+    return payload
 
 
-@app.get("/api/front/recommendations")
-def frontend_recommendations(
+def _frontend_recommendations_payload(
     request: Request,
-    as_of: Optional[str] = Query(default=None),
-    lookback_days: int = Query(default=2, ge=1, le=20),
-    top_n: int = Query(default=30, ge=1, le=100),
-    force: bool = Query(default=False),
-    defer: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_DEFER_MISSES", True)),
+    as_of: Optional[str] = None,
+    lookback_days: int = 2,
+    top_n: int = 30,
+    force: bool = False,
+    defer: bool = True,
 ):
     context = _frontend_profile_context(request, include_catalog=False)
     effective_as_of = _frontend_account_as_of(as_of)
@@ -1936,7 +3575,7 @@ def frontend_recommendations(
             "top_n": top_n,
         },
     )
-    ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900)
+    ttl = _frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 1800)
     cached = None if force else load_payload_cache("front_recommendations", cache_parts, ttl)
     if cached:
         return cached
@@ -1963,14 +3602,13 @@ def frontend_recommendations(
     return payload
 
 
-@app.get("/api/front/daily_plan")
-def frontend_daily_plan(
+def _frontend_daily_plan_payload(
     request: Request,
-    as_of: Optional[str] = Query(default=None),
-    start_date: Optional[str] = Query(default=None),
-    limit_days: int = Query(default=120, ge=1, le=500),
-    force: bool = Query(default=False),
-    defer: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_DEFER_MISSES", True)),
+    as_of: Optional[str] = None,
+    start_date: Optional[str] = None,
+    limit_days: int = 120,
+    force: bool = False,
+    defer: bool = True,
 ):
     context = _frontend_profile_context(request, include_catalog=False)
     effective_as_of = _frontend_account_as_of(as_of)
@@ -2011,11 +3649,10 @@ def frontend_daily_plan(
     return payload
 
 
-@app.get("/api/admin/snapshot")
-def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Query(default=True)):
+def _admin_snapshot_payload(as_of: Optional[str] = None, light: bool = True):
     effective_as_of = _frontend_account_as_of(as_of)
     if light:
-        jobs_payload = job_manager.status(light=True)
+        jobs_payload = _jobs_status_payload(light=True)
         cache_parts = {"as_of": effective_as_of, "version": APP_VERSION}
         cache_ttl = cache_env_int("QT_ADMIN_SNAPSHOT_CACHE_TTL_SECONDS", 20, minimum=0, maximum=3600)
         stable = _memory_cache_get("admin_snapshot_light", cache_parts, cache_ttl)
@@ -2061,8 +3698,8 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
     news_payload = quant_engine.news_feed(as_of=effective_as_of, limit=120, fallback_latest=True)
     return {
         "status": "ok",
-        "status_payload": status(),
-        "jobs": job_manager.status(light=True),
+        "status_payload": _status_payload(),
+        "jobs": _jobs_status_payload(light=True),
         "biying": biying_minute_sync.status(),
         "lhb": lhb_status(),
         "ai_usage": ai_usage_summary(),
@@ -2075,17 +3712,20 @@ def admin_snapshot(as_of: Optional[str] = Query(default=None), light: bool = Que
         "trading_account": _admin_strategy_trading_account(as_of=effective_as_of, limit=1000),
         "model_signals": _admin_model_signal_feed(effective_as_of, models_payload=models_payload, limit_models=32, limit_per_model=20),
         "news": news_payload,
-        "coverage": data_coverage(as_of=effective_as_of, top_n=100),
+        "coverage": _data_coverage_payload(
+            as_of=effective_as_of,
+            top_n=100,
+            defer=_env_flag("QT_DATA_COVERAGE_DEFER_MISSES", True),
+        ),
         "ai_failures": ai_failures(limit=40),
         "ai_records": ai_records_feed(limit=80),
     }
 
 
-@app.get("/api/admin/model_signals")
-def admin_model_signals(
-    as_of: Optional[str] = Query(default=None),
-    limit_models: int = Query(default=24, ge=1, le=80),
-    limit_per_model: int = Query(default=12, ge=1, le=80),
+def _admin_model_signals_payload(
+    as_of: Optional[str] = None,
+    limit_models: int = 24,
+    limit_per_model: int = 12,
 ):
     effective_as_of = _frontend_account_as_of(as_of)
     models_payload = _frontend_strategy_models_payload(include_catalog=True)
@@ -2253,38 +3893,49 @@ def _admin_strategy_runtime_replay(
     }
 
 
-@app.get("/api/admin/trading_account")
-def admin_trading_account(
-    as_of: Optional[str] = Query(default=None),
-    model_id: Optional[str] = Query(default=None),
-    initial_cash: Optional[float] = Query(default=None, ge=1000),
-    start_date: Optional[str] = Query(default=None),
-    limit: int = Query(default=1000, ge=1, le=2000),
-):
-    return _admin_strategy_trading_account(
-        as_of=as_of,
-        model_id=model_id,
-        initial_cash=initial_cash,
-        start_date=start_date,
-        limit=limit,
+app.include_router(
+    build_frontend_profile_router(
+        profile_payload=_frontend_profile_payload,
+        update_profile_payload=_frontend_profile_update_payload,
     )
+)
 
 
-@app.get("/api/admin/strategy_runtime/replay")
-def admin_strategy_runtime_replay(
-    as_of: Optional[str] = Query(default=None),
-    model_id: Optional[str] = Query(default=None),
-    initial_cash: Optional[float] = Query(default=None, ge=1000),
-    start_date: Optional[str] = Query(default=None),
-    limit: int = Query(default=1000, ge=1, le=2000),
-):
-    return _admin_strategy_runtime_replay(
-        as_of=as_of,
-        model_id=model_id,
-        initial_cash=initial_cash,
-        start_date=start_date,
-        limit=limit,
+app.include_router(
+    build_frontend_runtime_router(
+        public_snapshot_payload=_frontend_public_snapshot_payload,
+        snapshot_payload=_frontend_snapshot_payload,
+        strategy_models_payload=_frontend_strategy_models_route_payload,
+        trading_account_payload=_frontend_trading_account_payload,
+        account_defer_default=_env_flag("QT_FRONT_ACCOUNT_DEFER_MISSES", True),
     )
+)
+
+
+app.include_router(
+    build_frontend_signal_router(
+        recommendations_payload=_frontend_recommendations_payload,
+        daily_plan_payload=_frontend_daily_plan_payload,
+        payload_defer_default=_env_flag("QT_FRONT_PAYLOAD_DEFER_MISSES", True),
+    )
+)
+
+
+app.include_router(
+    build_admin_overview_router(
+        snapshot_payload=_admin_snapshot_payload,
+        model_signals_payload=_admin_model_signals_payload,
+    )
+)
+
+
+app.include_router(
+    build_admin_strategy_runtime_router(
+        matrix_payload=_admin_strategy_runtime_matrix_payload,
+        trading_account_payload=_admin_strategy_trading_account,
+        replay_payload=_admin_strategy_runtime_replay,
+    )
+)
 
 
 @app.websocket("/ws/admin/live")
@@ -2303,7 +3954,7 @@ async def admin_live(websocket: WebSocket):
     biying_fp = ""
     try:
         while True:
-            jobs_payload = job_manager.status(light=True)
+            jobs_payload = _jobs_status_payload(light=True)
             status_payload = _light_status_payload(jobs_payload=jobs_payload)
             biying_payload = biying_minute_sync.status()
             logs_payload = job_manager.logs(limit=120)
@@ -2344,31 +3995,27 @@ async def admin_live(websocket: WebSocket):
         return
 
 
-@app.get("/api/quant/dashboard")
-def quant_dashboard(as_of: Optional[str] = Query(default=None), light: bool = Query(default=False)):
+def _quant_dashboard_payload(as_of: Optional[str] = None, light: bool = False) -> Dict[str, Any]:
     return quant_engine.dashboard(as_of=as_of, include_heavy=not light)
 
 
-@app.get("/api/quant/recommendations")
-def quant_recommendations(
-    as_of: Optional[str] = Query(default=None),
-    lookback_days: int = Query(default=2, ge=1, le=20),
-    top_n: int = Query(default=30, ge=1, le=100),
-):
+def _quant_recommendations_payload(
+    as_of: Optional[str] = None,
+    lookback_days: int = 2,
+    top_n: int = 30,
+) -> Dict[str, Any]:
     return quant_engine.recommendations(as_of=as_of, lookback_days=lookback_days, top_n=top_n)
 
 
-@app.get("/api/quant/daily_plan")
-def quant_daily_plan(
-    as_of: Optional[str] = Query(default=None),
-    start_date: Optional[str] = Query(default=None),
-    limit_days: int = Query(default=80, ge=1, le=500),
-):
+def _quant_daily_plan_payload(
+    as_of: Optional[str] = None,
+    start_date: Optional[str] = None,
+    limit_days: int = 80,
+) -> Dict[str, Any]:
     return quant_engine.daily_plan(as_of=as_of, start_date=start_date, limit_days=limit_days)
 
 
-@app.get("/api/quant/strategy_params")
-def quant_strategy_params():
+def _quant_strategy_params_payload() -> Dict[str, Any]:
     return {
         "status": "ok",
         "strategy_params": quant_engine.strategy_params(),
@@ -2377,14 +4024,220 @@ def quant_strategy_params():
     }
 
 
-@app.post("/api/quant/strategy_params")
-def quant_update_strategy_params(payload: Dict[str, Any] = Body(default_factory=dict)):
+def _quant_update_strategy_params_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return quant_engine.update_strategy_params(payload)
 
 
-@app.post("/api/quant/strategy_params/reset")
-def quant_reset_strategy_params():
+def _quant_reset_strategy_params_payload() -> Dict[str, Any]:
     return quant_engine.reset_strategy_params()
+
+
+def _quant_events_payload(as_of: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+    events = quant_engine.events()
+    if as_of:
+        events = [event for event in events if event.date <= as_of]
+    return {"items": [event.compact() for event in events[:limit]], "count": len(events)}
+
+
+def _quant_news_payload(
+    as_of: Optional[str] = None,
+    limit: int = 120,
+    fallback_latest: bool = True,
+    source: Optional[str] = None,
+    keyword: Optional[str] = None,
+    code: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _safe_news_feed(
+        as_of=as_of,
+        limit=limit,
+        fallback_latest=fallback_latest,
+        source=source,
+        keyword=keyword,
+        code=code,
+    )
+
+
+def _quant_correlation_payload(as_of: Optional[str] = None, hold_days: int = 3) -> Dict[str, Any]:
+    return quant_engine.correlation(as_of=as_of, hold_days=hold_days)
+
+
+def _quant_portfolio_payload(as_of: Optional[str] = None) -> Dict[str, Any]:
+    return quant_engine.paper_portfolio(as_of=as_of)
+
+
+def _quant_trading_account_basic_payload(as_of: Optional[str] = None, limit: int = 500) -> Dict[str, Any]:
+    return quant_engine.trading_account(as_of=as_of, limit=limit)
+
+
+def _quant_run_payload(as_of: Optional[str] = None, calibrate: bool = True) -> Dict[str, Any]:
+    calibration = quant_engine.calibrate_model(as_of=as_of) if calibrate else None
+    portfolio = quant_engine.run_paper_trading(as_of=as_of)
+    notification = trade_notifier.notify_trade_events(
+        portfolio.get("trades", []) if isinstance(portfolio.get("trades"), list) else [],
+        as_of=portfolio["as_of"],
+        source="manual_quant_run",
+    )
+    recommendations = quant_engine.recommendations(as_of=portfolio["as_of"], lookback_days=2, top_n=30)
+    return {
+        "status": "ok",
+        "as_of": portfolio["as_of"],
+        "calibration": calibration,
+        "portfolio": portfolio,
+        "notification": notification,
+        "recommendations": recommendations,
+    }
+
+
+def _news_history_payload(limit: int = 200) -> Dict[str, Any]:
+    items = quant_engine.load_news_history()[:limit]
+    return {"items": items, "count": len(items)}
+
+
+app.include_router(
+    build_quant_basic_router(
+        dashboard_payload=_quant_dashboard_payload,
+        recommendations_payload=_quant_recommendations_payload,
+        daily_plan_payload=_quant_daily_plan_payload,
+        strategy_params_payload=_quant_strategy_params_payload,
+        strategy_params_update_payload=_quant_update_strategy_params_payload,
+        strategy_params_reset_payload=_quant_reset_strategy_params_payload,
+        events_payload=_quant_events_payload,
+        news_payload=_quant_news_payload,
+        correlation_payload=_quant_correlation_payload,
+        portfolio_payload=_quant_portfolio_payload,
+        trading_account_payload=_quant_trading_account_basic_payload,
+        run_payload=_quant_run_payload,
+        news_history_payload=_news_history_payload,
+    )
+)
+
+
+def _compact_quant_fit_strategy_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    best = payload.get("best") if isinstance(payload.get("best"), dict) else {}
+    return {
+        "status": payload.get("status") or "ok",
+        "job": "fit_strategy",
+        "as_of": payload.get("as_of") or "",
+        "start_date": payload.get("start_date") or "",
+        "applied": bool(payload.get("applied")),
+        "best_name": best.get("name") or "",
+        "objective": best.get("objective", 0),
+        "return_pct": best.get("return_pct", 0),
+        "candidate_count": len(payload.get("candidates") if isinstance(payload.get("candidates"), list) else []),
+        "generated_at": payload.get("generated_at") or datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _compute_quant_fit_strategy(
+    *,
+    as_of: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    apply_best: bool = True,
+) -> Dict[str, Any]:
+    payload = quant_engine.fit_strategy(
+        as_of=as_of,
+        start_date=start_date,
+        end_date=end_date,
+        apply_best=apply_best,
+    )
+    if isinstance(payload, dict):
+        payload["source"] = "fit_strategy"
+        payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+    return payload
+
+
+def _queue_quant_fit_strategy(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    apply_best: bool,
+    process: bool = True,
+) -> Dict[str, Any]:
+    payload = {
+        "as_of": str(as_of or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "apply_best": bool(apply_best),
+    }
+    if process:
+        return job_manager.run_job_process(
+            "fit_strategy",
+            payload=payload,
+            message="参数拟合已转入独立进程运行",
+        )
+
+    def execute() -> Dict[str, Any]:
+        result = _compute_quant_fit_strategy(**payload)
+        return _compact_quant_fit_strategy_result(result if isinstance(result, dict) else {})
+
+    return job_manager.run_job_background(
+        "fit_strategy",
+        execute,
+        payload=payload,
+        message="参数拟合已转入后台运行",
+    )
+
+
+def _pending_quant_fit_strategy(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    apply_best: bool,
+    job_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    status, _cache_state, message = _deferred_job_response_state(
+        job_result,
+        "参数拟合正在后台生成，请查看任务状态，完成后刷新策略参数。",
+    )
+    return {
+        "status": status,
+        "source": "fit_strategy",
+        "message": message,
+        "as_of": str(as_of or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "apply_best": bool(apply_best),
+        "applied": False,
+        "best": {},
+        "candidates": [],
+        "strategy_params": quant_engine.strategy_params(),
+        "job_result": job_result,
+    }
+
+
+def _quant_fit_strategy_deferred_or_sync(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    apply_best: bool,
+    defer: bool = True,
+    process: bool = True,
+) -> Dict[str, Any]:
+    if defer:
+        job_result = _queue_quant_fit_strategy(
+            as_of=as_of,
+            start_date=start_date,
+            end_date=end_date,
+            apply_best=apply_best,
+            process=process,
+        )
+        return _pending_quant_fit_strategy(
+            as_of=as_of,
+            start_date=start_date,
+            end_date=end_date,
+            apply_best=apply_best,
+            job_result=job_result,
+        )
+    return _compute_quant_fit_strategy(
+        as_of=as_of,
+        start_date=start_date,
+        end_date=end_date,
+        apply_best=apply_best,
+    )
 
 
 @app.post("/api/quant/fit_strategy")
@@ -2393,12 +4246,16 @@ def quant_fit_strategy(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     apply_best: bool = Query(default=True),
+    defer: bool = Query(default=_env_flag("QT_FIT_STRATEGY_DEFER_MISSES", True)),
+    process: bool = Query(default=_env_flag("QT_FIT_STRATEGY_PROCESS_ENABLED", True)),
 ):
-    return quant_engine.fit_strategy(
+    return _quant_fit_strategy_deferred_or_sync(
         as_of=as_of,
         start_date=start_date,
         end_date=end_date,
         apply_best=apply_best,
+        defer=defer,
+        process=process,
     )
 
 
@@ -2439,16 +4296,24 @@ def quant_strategy_model_backtest(
     mode: str = Query(default="intraday"),
     limit: int = Query(default=0, ge=0, le=5000),
     recompute: bool = Query(default=False),
+    force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_MODEL_BACKTEST_DEFER_RECOMPUTE", True)),
+    manual: bool = Query(default=False),
+    process: bool = Query(default=_env_flag("QT_MODEL_BACKTEST_PROCESS_ENABLED", True)),
 ):
     model = _find_strategy_model(model_id)
     if not recompute:
         return _stored_model_backtest_payload(model, limit=limit)
-    return _model_backtest_payload(
+    return _model_backtest_recompute_payload(
         model=model,
         start_date=start_date,
         end_date=end_date,
         mode=mode,
         limit=limit,
+        force=force,
+        defer=defer,
+        manual=manual,
+        process=process,
     )
 
 
@@ -2540,106 +4405,45 @@ def quant_evolve_strategy(
     )
 
 
-@app.get("/api/quant/events")
-def quant_events(as_of: Optional[str] = Query(default=None), limit: int = Query(default=200, ge=1, le=1000)):
-    events = quant_engine.events()
-    if as_of:
-        events = [event for event in events if event.date <= as_of]
-    return {"items": [event.compact() for event in events[:limit]], "count": len(events)}
-
-
-@app.get("/api/quant/news")
-def quant_news(
-    as_of: Optional[str] = Query(default=None),
-    limit: int = Query(default=120, ge=1, le=1000),
-    fallback_latest: bool = Query(default=True),
-    source: Optional[str] = Query(default=None),
-    keyword: Optional[str] = Query(default=None),
-    code: Optional[str] = Query(default=None),
-):
-    return _safe_news_feed(
-        as_of=as_of,
-        limit=limit,
-        fallback_latest=fallback_latest,
-        source=source,
-        keyword=keyword,
-        code=code,
+app.include_router(
+    build_admin_jobs_router(
+        status_payload=_jobs_status_payload,
+        logs_payload=lambda limit, level, job: job_manager.logs(limit=limit, level=level, job=job),
+        scheduler_start_payload=lambda: job_manager.start(),
+        scheduler_stop_payload=lambda: job_manager.stop(),
+        pause_payload=lambda job_name: job_manager.pause_job(job_name),
+        resume_payload=lambda job_name: job_manager.resume_job(job_name),
+        stop_payload=lambda job_name: job_manager.stop_job(job_name),
     )
+)
 
 
-@app.get("/api/jobs/status")
-def jobs_status(light: bool = Query(default=True)):
-    return job_manager.status(light=light)
-
-
-@app.get("/api/jobs/logs")
-def jobs_logs(
-    limit: int = Query(default=200, ge=1, le=1000),
-    level: Optional[str] = Query(default=None),
-    job: Optional[str] = Query(default=None),
-):
-    return job_manager.logs(limit=limit, level=level, job=job)
-
-
-@app.post("/api/jobs/scheduler/start")
-async def jobs_scheduler_start():
-    return job_manager.start()
-
-
-@app.post("/api/jobs/scheduler/stop")
-async def jobs_scheduler_stop():
-    return await job_manager.stop()
-
-
-@app.post("/api/jobs/{job_name}/pause")
-def jobs_pause(job_name: str):
-    return job_manager.pause_job(job_name)
-
-
-@app.post("/api/jobs/{job_name}/resume")
-def jobs_resume(job_name: str):
-    return job_manager.resume_job(job_name)
-
-
-@app.post("/api/jobs/{job_name}/stop")
-def jobs_stop(job_name: str):
-    return job_manager.stop_job(job_name)
-
-
-@app.get("/api/logs/runtime")
-def runtime_logs(
-    limit: int = Query(default=200, ge=1, le=1000),
-    level: Optional[str] = Query(default=None),
-    job: Optional[str] = Query(default=None),
-):
-    return job_manager.logs(limit=limit, level=level, job=job)
-
-
-@app.post("/api/jobs/news/fetch")
-def jobs_news_fetch(
-    hours: int = Query(default=12, ge=1, le=168),
-    pages: int = Query(default=5, ge=1, le=30),
-    page_size: int = Query(default=20, ge=10, le=100),
-    background: bool = Query(default=True),
-):
+def _jobs_news_fetch_payload(
+    hours: int,
+    pages: int,
+    page_size: int,
+    background: bool,
+    process: bool,
+) -> Dict[str, Any]:
     return job_manager.run_news_fetch(
         hours=hours,
         pages=pages,
         page_size=page_size,
         refresh_events=True,
         background=background,
+        process=process,
     )
 
 
-@app.post("/api/jobs/market/sync")
-def jobs_market_sync(
-    date: Optional[str] = Query(default=None),
-    source: str = Query(default="auto"),
-    max_codes: int = Query(default=80, ge=1, le=500),
-    force: bool = Query(default=False),
-    include_latest: bool = Query(default=True),
-    background: bool = Query(default=True),
-):
+def _jobs_market_sync_payload(
+    date: Optional[str],
+    source: str,
+    max_codes: int,
+    force: bool,
+    include_latest: bool,
+    background: bool,
+    process: bool,
+) -> Dict[str, Any]:
     return job_manager.run_market_sync(
         date=date,
         source=source,
@@ -2647,38 +4451,44 @@ def jobs_market_sync(
         force=force,
         include_latest=include_latest,
         background=background,
+        process=process,
     )
 
 
-@app.post("/api/jobs/ai/analyze")
-def jobs_ai_analyze(
-    as_of: Optional[str] = Query(default=None),
-    max_items: int = Query(default=8, ge=1, le=50),
-    batch_size: int = Query(default=4, ge=1, le=10),
-    background: bool = Query(default=True),
-):
-    return job_manager.run_ai_analysis(as_of=as_of, max_items=max_items, batch_size=batch_size, background=background)
+def _jobs_ai_analyze_payload(
+    as_of: Optional[str],
+    max_items: int,
+    batch_size: int,
+    background: bool,
+    process: bool,
+) -> Dict[str, Any]:
+    return job_manager.run_ai_analysis(
+        as_of=as_of,
+        max_items=max_items,
+        batch_size=batch_size,
+        background=background,
+        process=process,
+    )
 
 
-@app.post("/api/jobs/trading/run")
-def jobs_trading_run(
-    date: Optional[str] = Query(default=None),
-    notify: bool = Query(default=True),
-    background: bool = Query(default=True),
-):
-    return job_manager.run_trade_cycle(date=date, notify=notify, background=background)
+def _jobs_trading_run_payload(
+    date: Optional[str],
+    notify: bool,
+    background: bool,
+    process: bool,
+) -> Dict[str, Any]:
+    return job_manager.run_trade_cycle(date=date, notify=notify, background=background, process=process)
 
 
-@app.post("/api/jobs/strategy/replay")
-def jobs_strategy_replay(
-    start_date: Optional[str] = Query(default=None),
-    end_date: Optional[str] = Query(default=None),
-    mode: str = Query(default="intraday"),
-    batch_days: Optional[int] = Query(default=None, ge=1, le=366),
-    use_cursor: bool = Query(default=False),
-    background: bool = Query(default=True),
-    process: bool = Query(default=_env_flag("QT_HEAVY_JOB_PROCESS_ENABLED", True)),
-):
+def _jobs_strategy_replay_payload(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    mode: str,
+    batch_days: Optional[int],
+    use_cursor: bool,
+    background: bool,
+    process: bool,
+) -> Dict[str, Any]:
     return job_manager.run_strategy_replay(
         start_date=start_date,
         end_date=end_date,
@@ -2690,18 +4500,18 @@ def jobs_strategy_replay(
     )
 
 
-@app.post("/api/jobs/frontend/precompute")
-def jobs_frontend_payload_precompute(
-    as_of: Optional[str] = Query(default=None),
-    usernames: Optional[str] = Query(default=None),
-    limit_users: int = Query(default=50, ge=1, le=500),
-    force: bool = Query(default=False),
-    background: bool = Query(default=True),
-    process: bool = Query(default=_env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True)),
-    lookback_days: int = Query(default=2, ge=1, le=20),
-    top_n: int = Query(default=30, ge=1, le=100),
-    limit_days: int = Query(default=120, ge=1, le=500),
-):
+def _jobs_frontend_payload_precompute_payload(
+    as_of: Optional[str],
+    usernames: Optional[str],
+    limit_users: int,
+    force: bool,
+    background: bool,
+    process: bool,
+    lookback_days: int,
+    top_n: int,
+    limit_days: int,
+    max_seconds: Optional[int],
+) -> Dict[str, Any]:
     return job_manager.run_frontend_payload_precompute(
         as_of=as_of,
         usernames=usernames,
@@ -2712,16 +4522,50 @@ def jobs_frontend_payload_precompute(
         lookback_days=lookback_days,
         top_n=top_n,
         limit_days=limit_days,
+        max_seconds=max_seconds,
     )
 
 
-@app.post("/api/jobs/daily/run")
-def jobs_daily_run(
-    date: Optional[str] = Query(default=None),
-    notify: bool = Query(default=True),
-    background: bool = Query(default=True),
-):
-    return job_manager.run_trade_cycle(date=date, notify=notify, background=background)
+def _jobs_frontend_account_precompute_payload(
+    as_of: Optional[str],
+    usernames: Optional[str],
+    limit_users: int,
+    limit: int,
+    force: bool,
+    background: bool,
+    process: bool,
+    drain_queue: Optional[bool],
+) -> Dict[str, Any]:
+    queue_status = _frontend_account_precompute_queue_status()
+    effective_drain_queue = bool(drain_queue) if drain_queue is not None else (
+        not str(usernames or "").strip() and int(safe_float(queue_status.get("queued"), 0)) > 0
+    )
+    payload = {
+        "as_of": as_of,
+        "usernames": usernames,
+        "limit_users": limit_users,
+        "limit": limit,
+        "force": bool(force),
+        "drain_queue": effective_drain_queue,
+    }
+
+    def execute() -> Dict[str, Any]:
+        return _precompute_frontend_accounts(**payload)
+
+    if process:
+        return job_manager.run_job_process(
+            "frontend_account_precompute",
+            payload=payload,
+            message="前台账户快照预热已转入独立进程运行",
+        )
+    if background:
+        return job_manager.run_job_background(
+            "frontend_account_precompute",
+            execute,
+            payload=payload,
+            message="前台账户快照预热已转入后台运行",
+        )
+    return job_manager.run_job("frontend_account_precompute", execute, payload=payload)
 
 
 def _run_system_startup_flow(
@@ -2851,19 +4695,19 @@ def _run_system_startup_flow(
     }
 
 
-@app.post("/api/admin/system/startup")
-def admin_system_startup(
-    date: Optional[str] = Query(default=None),
-    start_date: Optional[str] = Query(default=None),
-    end_date: Optional[str] = Query(default=None),
-    news_hours: int = Query(default=24, ge=1, le=168),
-    news_pages: int = Query(default=8, ge=1, le=30),
-    ai_items: int = Query(default=20, ge=1, le=80),
-    market_codes: int = Query(default=200, ge=1, le=1000),
-    notify: bool = Query(default=True),
-    background: bool = Query(default=True),
-    run_strategy_replay: bool = Query(default=_env_flag("QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY", False)),
-):
+def _admin_system_startup_payload(
+    date: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    news_hours: int,
+    news_pages: int,
+    ai_items: int,
+    market_codes: int,
+    notify: bool,
+    background: bool,
+    process: bool,
+    run_strategy_replay: bool,
+) -> Dict[str, Any]:
     target_date = str(end_date or date or quant_engine.latest_event_date() or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")).strip()
     replay_start_date = str(start_date or quant_engine.first_data_date() or "2026-03-01").strip()
     payload = {
@@ -2888,6 +4732,12 @@ def admin_system_startup(
             notify=notify,
             run_strategy_replay=run_strategy_replay,
         )
+    if process:
+        return job_manager.run_job_process(
+            "system_startup",
+            payload=payload,
+            message="系统启动流程已转入独立进程运行，请查看任务状态和右侧日志",
+        )
     if background:
         return job_manager.run_job_background(
             "system_startup",
@@ -2900,6 +4750,29 @@ def admin_system_startup(
         runner,
         payload=payload,
     )
+
+
+app.include_router(
+    build_admin_job_runs_router(
+        news_fetch_payload=_jobs_news_fetch_payload,
+        market_sync_payload=_jobs_market_sync_payload,
+        ai_analyze_payload=_jobs_ai_analyze_payload,
+        trading_run_payload=_jobs_trading_run_payload,
+        strategy_replay_payload=_jobs_strategy_replay_payload,
+        frontend_payload_precompute_payload=_jobs_frontend_payload_precompute_payload,
+        frontend_account_precompute_payload=_jobs_frontend_account_precompute_payload,
+        system_startup_payload=_admin_system_startup_payload,
+        news_fetch_process_default=_env_flag("QT_NEWS_FETCH_PROCESS_ENABLED", True),
+        market_sync_process_default=_env_flag("QT_MARKET_SYNC_PROCESS_ENABLED", True),
+        ai_analysis_process_default=_env_flag("QT_AI_ANALYSIS_PROCESS_ENABLED", True),
+        trade_cycle_process_default=_env_flag("QT_TRADE_CYCLE_PROCESS_ENABLED", True),
+        heavy_job_process_default=_env_flag("QT_HEAVY_JOB_PROCESS_ENABLED", True),
+        frontend_payload_process_default=_env_flag("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True),
+        frontend_account_process_default=_env_flag("QT_FRONT_ACCOUNT_PRECOMPUTE_PROCESS_ENABLED", True),
+        system_startup_process_default=_env_flag("QT_SYSTEM_STARTUP_PROCESS_ENABLED", True),
+        system_startup_run_strategy_replay_default=_env_flag("QT_SYSTEM_STARTUP_RUN_STRATEGY_REPLAY", False),
+    )
+)
 
 
 @app.post("/api/admin/backup")
@@ -2929,8 +4802,7 @@ def admin_data_import_status(job_id: str):
     return {"status": "ok", "job": job}
 
 
-@app.get("/api/admin/database/tables")
-def admin_database_tables():
+def _admin_database_tables_payload():
     cache_ttl = cache_env_int("QT_DATABASE_OVERVIEW_CACHE_TTL_SECONDS", 30, minimum=0, maximum=3600)
     cache_parts = {"version": APP_VERSION, "data_dir": str(DATA_DIR)}
     cached = _memory_cache_get("admin_database_overview", cache_parts, cache_ttl)
@@ -2939,11 +4811,10 @@ def admin_database_tables():
     return _memory_cache_set("admin_database_overview", cache_parts, database_overview())
 
 
-@app.get("/api/admin/database/table/{table_name}")
-def admin_database_table(
+def _admin_database_table_payload(
     table_name: str,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: int = 50,
+    offset: int = 0,
 ):
     try:
         return database_table_rows(table_name, limit=limit, offset=offset)
@@ -2955,8 +4826,7 @@ def admin_database_table(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/api/admin/cache/status")
-def admin_cache_status():
+def _admin_cache_status_payload():
     payload = runtime_cache_status()
     if isinstance(payload, dict):
         payload["memory_cache"] = {
@@ -2966,8 +4836,7 @@ def admin_cache_status():
     return payload
 
 
-@app.post("/api/admin/cache/clear")
-def admin_cache_clear(scope: str = Query(default="expired")):
+def _admin_cache_clear_payload(scope: str = "expired"):
     scope_text = str(scope or "expired").strip().lower()
     if scope_text in {"all", "memory", "payload", "expired"}:
         _memory_cache_clear()
@@ -2975,6 +4844,16 @@ def admin_cache_clear(scope: str = Query(default="expired")):
     if isinstance(result, dict):
         result["memory_cache_cleared"] = scope_text in {"all", "memory", "payload", "expired"}
     return result
+
+
+app.include_router(
+    build_admin_data_cache_router(
+        database_tables_payload=_admin_database_tables_payload,
+        database_table_payload=_admin_database_table_payload,
+        cache_status_payload=_admin_cache_status_payload,
+        cache_clear_payload=_admin_cache_clear_payload,
+    )
+)
 
 
 @app.post("/api/admin/data/import")
@@ -3038,25 +4917,22 @@ def admin_clear_sample_state():
     return result
 
 
-@app.get("/api/admin/access_logs")
-def admin_access_logs(
-    limit: int = Query(default=220, ge=1, le=1000),
-    offset: int = Query(default=0, ge=0),
-    username: Optional[str] = Query(default=None),
-    ip: Optional[str] = Query(default=None),
-    path: Optional[str] = Query(default=None),
-    status_code: Optional[int] = Query(default=None, ge=100, le=599),
+def _admin_access_logs_payload(
+    limit: int = 220,
+    offset: int = 0,
+    username: Optional[str] = None,
+    ip: Optional[str] = None,
+    path: Optional[str] = None,
+    status_code: Optional[int] = None,
 ):
     return access_logs(limit=limit, offset=offset, username=username, ip=ip, path=path, status_code=status_code)
 
 
-@app.get("/api/admin/access_security")
-def admin_access_security(limit: int = Query(default=120, ge=1, le=500)):
+def _admin_access_security_payload(limit: int = 120):
     return access_security(limit=limit)
 
 
-@app.post("/api/admin/access_security/block")
-def admin_access_security_block(payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_access_security_block_payload(payload: Dict[str, Any]):
     ip = str((payload or {}).get("ip") or "").strip()
     if not ip:
         raise HTTPException(status_code=400, detail="ip is required")
@@ -3066,8 +4942,7 @@ def admin_access_security_block(payload: Dict[str, Any] = Body(default_factory=d
     return result
 
 
-@app.post("/api/admin/access_security/unblock")
-def admin_access_security_unblock(payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_access_security_unblock_payload(payload: Dict[str, Any]):
     ip = str((payload or {}).get("ip") or "").strip()
     if not ip:
         raise HTTPException(status_code=400, detail="ip is required")
@@ -3076,8 +4951,7 @@ def admin_access_security_unblock(payload: Dict[str, Any] = Body(default_factory
     return result
 
 
-@app.post("/api/admin/access_security/block_all")
-def admin_access_security_block_all(payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_access_security_block_all_payload(payload: Dict[str, Any]):
     limit = int(safe_float((payload or {}).get("limit"), 500))
     summary = access_security(limit=max(1, min(limit, 500)))
     blocked = []
@@ -3104,13 +4978,22 @@ def admin_access_security_block_all(payload: Dict[str, Any] = Body(default_facto
     }
 
 
-@app.get("/api/admin/frontend_users")
-def admin_frontend_users():
+app.include_router(
+    build_admin_access_router(
+        access_logs_payload=_admin_access_logs_payload,
+        access_security_payload=_admin_access_security_payload,
+        block_payload=_admin_access_security_block_payload,
+        unblock_payload=_admin_access_security_unblock_payload,
+        block_all_payload=_admin_access_security_block_all_payload,
+    )
+)
+
+
+def _admin_frontend_users_payload():
     return _admin_frontend_user_summary()
 
 
-@app.post("/api/admin/frontend_users")
-def admin_create_frontend_user_api(request: Request, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_create_frontend_user_payload(request: Request, payload: Dict[str, Any]):
     result = admin_create_frontend_user(payload, request)
     _memory_cache_clear()
     user = result.get("user") if isinstance(result.get("user"), dict) else {}
@@ -3120,8 +5003,7 @@ def admin_create_frontend_user_api(request: Request, payload: Dict[str, Any] = B
     return result
 
 
-@app.patch("/api/admin/frontend_users/{username}")
-def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_update_frontend_user_payload(username: str, payload: Dict[str, Any]):
     previous = {}
     try:
         previous_payload = frontend_user_profile(username)
@@ -3145,32 +5027,41 @@ def admin_update_frontend_user_api(username: str, payload: Dict[str, Any] = Body
     return result
 
 
-@app.post("/api/admin/frontend_users/{username}/password")
-def admin_reset_frontend_user_password_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_reset_frontend_user_password_payload(username: str, payload: Dict[str, Any]):
     result = admin_reset_frontend_user_password(username, payload)
     _memory_cache_clear()
     return result
 
 
-@app.post("/api/admin/frontend_users/{username}/ban")
-def admin_ban_frontend_user_api(username: str, payload: Dict[str, Any] = Body(default_factory=dict)):
+def _admin_ban_frontend_user_payload(username: str, payload: Dict[str, Any]):
     result = admin_set_frontend_user_disabled(username, True, str((payload or {}).get("reason") or ""))
     _memory_cache_clear()
     return result
 
 
-@app.post("/api/admin/frontend_users/{username}/unban")
-def admin_unban_frontend_user_api(username: str):
+def _admin_unban_frontend_user_payload(username: str):
     result = admin_set_frontend_user_disabled(username, False)
     _memory_cache_clear()
     return result
 
 
-@app.delete("/api/admin/frontend_users/{username}")
-def admin_delete_frontend_user_api(username: str):
+def _admin_delete_frontend_user_payload(username: str):
     result = admin_delete_frontend_user(username)
     _memory_cache_clear()
     return result
+
+
+app.include_router(
+    build_admin_frontend_users_router(
+        list_users_payload=_admin_frontend_users_payload,
+        create_user_payload=_admin_create_frontend_user_payload,
+        update_user_payload=_admin_update_frontend_user_payload,
+        reset_password_payload=_admin_reset_frontend_user_password_payload,
+        ban_user_payload=_admin_ban_frontend_user_payload,
+        unban_user_payload=_admin_unban_frontend_user_payload,
+        delete_user_payload=_admin_delete_frontend_user_payload,
+    )
+)
 
 
 @app.post("/api/admin/restart")
@@ -3206,11 +5097,6 @@ def notifications_test():
     return trade_notifier.send_test()
 
 
-@app.get("/api/quant/correlation")
-def quant_correlation(as_of: Optional[str] = Query(default=None), hold_days: int = Query(default=3, ge=1, le=20)):
-    return quant_engine.correlation(as_of=as_of, hold_days=hold_days)
-
-
 @app.get("/api/quant/timeline")
 def quant_timeline(
     start_date: Optional[str] = Query(default=None),
@@ -3221,8 +5107,12 @@ def quant_timeline(
     hold_days: Optional[int] = Query(default=None, ge=1, le=20),
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
     auto_fill: bool = Query(default=True),
+    force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_TIMELINE_DEFER_MISSES", True)),
+    process: bool = Query(default=_env_flag("QT_TIMELINE_PROCESS_ENABLED", True)),
+    manual: bool = Query(default=False),
 ):
-    return _quant_timeline_payload(
+    return _quant_timeline_cached_or_deferred(
         model_id=model_id,
         start_date=start_date,
         end_date=end_date,
@@ -3232,6 +5122,10 @@ def quant_timeline(
         top_n=top_n,
         intraday=False,
         auto_fill=auto_fill,
+        force=force,
+        defer=defer,
+        process=process,
+        manual=manual,
     )
 
 
@@ -3246,8 +5140,12 @@ def quant_intraday_timeline(
     top_n: Optional[int] = Query(default=None, ge=1, le=20),
     use_daily_fallback: bool = Query(default=True),
     auto_fill: bool = Query(default=True),
+    force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_TIMELINE_DEFER_MISSES", True)),
+    process: bool = Query(default=_env_flag("QT_TIMELINE_PROCESS_ENABLED", True)),
+    manual: bool = Query(default=False),
 ):
-    return _quant_timeline_payload(
+    return _quant_timeline_cached_or_deferred(
         model_id=model_id,
         start_date=start_date,
         end_date=end_date,
@@ -3258,7 +5156,127 @@ def quant_intraday_timeline(
         intraday=True,
         use_daily_fallback=use_daily_fallback,
         auto_fill=auto_fill,
+        force=force,
+        defer=defer,
+        process=process,
+        manual=manual,
     )
+
+
+def _data_coverage_top_n(top_n: int) -> int:
+    return max(1, min(int(top_n or 80), 300))
+
+
+def _data_coverage_cache_parts(effective_as_of: str, top_n: int) -> Dict[str, Any]:
+    return {"as_of": effective_as_of, "top_n": _data_coverage_top_n(top_n), "version": APP_VERSION}
+
+
+def _data_coverage_cache_ttl() -> int:
+    return cache_env_int("QT_DATA_COVERAGE_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
+
+
+def _compact_data_coverage_result(payload: Dict[str, Any], top_n: int) -> Dict[str, Any]:
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    daily = payload.get("daily_coverage") if isinstance(payload.get("daily_coverage"), dict) else {}
+    minute = payload.get("minute_coverage") if isinstance(payload.get("minute_coverage"), dict) else {}
+    lhb = payload.get("lhb") if isinstance(payload.get("lhb"), dict) else {}
+    return {
+        "status": payload.get("status") or "ok",
+        "job": "data_coverage",
+        "as_of": payload.get("as_of") or "",
+        "top_n": _data_coverage_top_n(top_n),
+        "target_count": int(safe_float(summary.get("target_count"), 0)),
+        "daily_ratio": safe_float(daily.get("ratio"), 0),
+        "minute_ratio": safe_float(minute.get("ratio"), 0),
+        "lhb_rows": int(safe_float(lhb.get("rows"), safe_float(summary.get("lhb_rows"), 0))),
+        "latest_lhb_date": lhb.get("latest_date") or summary.get("latest_lhb_date") or "",
+        "generated_at": payload.get("generated_at") or datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _compute_data_coverage_cached(effective_as_of: str, top_n: int) -> Dict[str, Any]:
+    clean_top_n = _data_coverage_top_n(top_n)
+    cache_parts = _data_coverage_cache_parts(effective_as_of, clean_top_n)
+    payload = data_coverage(as_of=effective_as_of, top_n=clean_top_n)
+    if isinstance(payload, dict):
+        payload["data_coverage_cache"] = "refresh"
+        payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        save_payload_cache("data_coverage", cache_parts, payload, _data_coverage_cache_ttl())
+        return _memory_cache_set("data_coverage", cache_parts, payload)
+    return payload
+
+
+def _queue_data_coverage_precompute(effective_as_of: str, top_n: int, process: bool = True) -> Dict[str, Any]:
+    clean_top_n = _data_coverage_top_n(top_n)
+    payload = {"as_of": effective_as_of, "top_n": clean_top_n}
+    if process:
+        return job_manager.run_job_process(
+            "data_coverage",
+            payload=payload,
+            message="数据覆盖率统计已转入独立进程运行",
+        )
+
+    def execute() -> Dict[str, Any]:
+        result = _compute_data_coverage_cached(effective_as_of, clean_top_n)
+        return _compact_data_coverage_result(result if isinstance(result, dict) else {}, clean_top_n)
+
+    return job_manager.run_job_background(
+        "data_coverage",
+        execute,
+        payload=payload,
+        message="数据覆盖率统计已转入后台运行",
+    )
+
+
+def _pending_data_coverage(effective_as_of: str, top_n: int, job_result: Dict[str, Any]) -> Dict[str, Any]:
+    clean_top_n = _data_coverage_top_n(top_n)
+    status, cache_state, message = _deferred_job_response_state(
+        job_result,
+        "数据覆盖率统计正在后台生成，请稍后刷新。",
+    )
+    return {
+        "status": status,
+        "as_of": effective_as_of,
+        "top_n": clean_top_n,
+        "data_coverage_cache": cache_state,
+        "message": message,
+        "summary": {"target_count": 0},
+        "daily_coverage": {"covered": 0, "missing": 0, "ratio": 0},
+        "minute_coverage": {"covered": 0, "missing": 0, "ratio": 0},
+        "minute_cache_dates": [],
+        "recent_event_dates": {},
+        "news": {},
+        "ai": {},
+        "biying": {},
+        "lhb": {},
+        "targets": [],
+        "job_result": job_result,
+    }
+
+
+def _data_coverage_payload(
+    as_of: Optional[str] = None,
+    top_n: int = 80,
+    force: bool = False,
+    defer: bool = True,
+    process: Optional[bool] = None,
+) -> Dict[str, Any]:
+    effective_as_of = _frontend_account_as_of(as_of)
+    clean_top_n = _data_coverage_top_n(top_n)
+    cache_parts = _data_coverage_cache_parts(effective_as_of, clean_top_n)
+    ttl = _data_coverage_cache_ttl()
+    cached = None if force else (
+        load_payload_cache("data_coverage", cache_parts, ttl)
+        or _memory_cache_get("data_coverage", cache_parts, ttl)
+    )
+    if cached:
+        cached["data_coverage_cache"] = "hit"
+        return cached
+    if defer and not force:
+        use_process = _env_flag("QT_DATA_COVERAGE_PROCESS_ENABLED", True) if process is None else bool(process)
+        job_result = _queue_data_coverage_precompute(effective_as_of, clean_top_n, process=use_process)
+        return _pending_data_coverage(effective_as_of, clean_top_n, job_result)
+    return _compute_data_coverage_cached(effective_as_of, clean_top_n)
 
 
 @app.get("/api/data/biying/status")
@@ -3270,15 +5288,11 @@ def biying_status():
 def quant_data_coverage(
     as_of: Optional[str] = Query(default=None),
     top_n: int = Query(default=80, ge=1, le=300),
+    force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_DATA_COVERAGE_DEFER_MISSES", True)),
+    process: bool = Query(default=_env_flag("QT_DATA_COVERAGE_PROCESS_ENABLED", True)),
 ):
-    effective_as_of = _frontend_account_as_of(as_of)
-    clean_top_n = max(1, min(int(top_n or 80), 300))
-    cache_ttl = cache_env_int("QT_DATA_COVERAGE_CACHE_TTL_SECONDS", 60, minimum=0, maximum=3600)
-    cache_parts = {"as_of": effective_as_of, "top_n": clean_top_n, "version": APP_VERSION}
-    cached = _memory_cache_get("data_coverage", cache_parts, cache_ttl)
-    if cached:
-        return cached
-    return _memory_cache_set("data_coverage", cache_parts, data_coverage(as_of=effective_as_of, top_n=clean_top_n))
+    return _data_coverage_payload(as_of=as_of, top_n=top_n, force=force, defer=defer, process=process)
 
 
 @app.post("/api/data/kline/fill")
@@ -3288,6 +5302,7 @@ def data_kline_fill(
     max_codes: int = Query(default=300, ge=1, le=5000),
     force: bool = Query(default=False),
     background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_KLINE_FILL_PROCESS_ENABLED", True)),
 ):
     return job_manager.run_kline_fill(
         start_date=start_date,
@@ -3295,6 +5310,7 @@ def data_kline_fill(
         max_codes=max_codes,
         force=force,
         background=background,
+        process=process,
     )
 
 
@@ -3310,6 +5326,7 @@ def data_lhb_sync(
     max_stock_days: int = Query(default=300, ge=1, le=2000),
     force: bool = Query(default=False),
     background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_LHB_SYNC_PROCESS_ENABLED", True)),
 ):
     return job_manager.run_lhb_sync(
         start_date=start_date,
@@ -3318,6 +5335,7 @@ def data_lhb_sync(
         force=force,
         refresh_events=True,
         background=background,
+        process=process,
     )
 
 
@@ -3329,14 +5347,18 @@ def biying_sync_intraday(
     codes: Optional[str] = Query(default=None),
     force: bool = Query(default=False),
     include_latest: bool = Query(default=True),
+    background: bool = Query(default=True),
+    process: bool = Query(default=_env_flag("QT_MARKET_SYNC_PROCESS_ENABLED", True)),
 ):
-    return biying_minute_sync.sync_intraday(
+    return job_manager.run_market_sync(
         date=date,
         source=source,
         max_codes=max_codes,
         codes=codes,
         force=force,
         include_latest=include_latest,
+        background=background,
+        process=process,
     )
 
 
@@ -3374,6 +5396,272 @@ def quant_ai_failures(limit: int = Query(default=100, ge=1, le=500)):
     return _memory_cache_set("ai_failures", cache_parts, ai_failures(limit=limit))
 
 
+def _quant_backtest_cache_ttl() -> int:
+    return cache_env_int("QT_BACKTEST_CACHE_TTL_SECONDS", 600, minimum=0, maximum=86400)
+
+
+def _quant_backtest_cache_parts(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: int,
+    top_n: int,
+    auto_fill: bool,
+) -> Dict[str, Any]:
+    params = quant_engine.strategy_params()
+    params_hash = hashlib.sha256(
+        json.dumps(params, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return {
+        "as_of": str(as_of or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": round(safe_float(initial_cash, 0), 2) if initial_cash is not None else "",
+        "max_positions": int(max_positions) if max_positions is not None else "",
+        "hold_days": max(1, min(int(hold_days or 3), 60)),
+        "top_n": max(1, min(int(top_n or 5), 50)),
+        "auto_fill": bool(auto_fill),
+        "strategy_source": quant_engine.strategy_source(),
+        "params_hash": params_hash,
+        "version": APP_VERSION,
+    }
+
+
+def _compact_quant_backtest_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": payload.get("status") or "ok",
+        "job": "quant_backtest",
+        "as_of": payload.get("as_of") or "",
+        "start_date": payload.get("start_date") or "",
+        "end_date": payload.get("end_date") or "",
+        "return_pct": payload.get("return_pct", 0),
+        "trade_count": payload.get("timeline_trade_count", payload.get("trades", 0)),
+        "closed_trades": payload.get("closed_trades", 0),
+        "generated_at": payload.get("generated_at") or datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
+    }
+
+
+def _compute_quant_backtest_cached(
+    *,
+    as_of: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    initial_cash: Optional[float] = None,
+    max_positions: Optional[int] = None,
+    hold_days: int = 3,
+    top_n: int = 5,
+    auto_fill: bool = True,
+) -> Dict[str, Any]:
+    clean_hold_days = max(1, min(int(hold_days or 3), 60))
+    clean_top_n = max(1, min(int(top_n or 5), 50))
+    payload = quant_engine.backtest(
+        as_of=as_of,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=clean_hold_days,
+        top_n=clean_top_n,
+        auto_fill=auto_fill,
+    )
+    if isinstance(payload, dict):
+        payload["source"] = "quant_backtest"
+        payload["backtest_cache"] = "refresh"
+        payload["generated_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
+        save_payload_cache(
+            "quant_backtest",
+            _quant_backtest_cache_parts(
+                as_of=as_of,
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=initial_cash,
+                max_positions=max_positions,
+                hold_days=clean_hold_days,
+                top_n=clean_top_n,
+                auto_fill=auto_fill,
+            ),
+            payload,
+            _quant_backtest_cache_ttl(),
+        )
+    return payload
+
+
+def _queue_quant_backtest_precompute(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: int,
+    top_n: int,
+    auto_fill: bool,
+    process: bool = True,
+) -> Dict[str, Any]:
+    payload = {
+        "as_of": str(as_of or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": initial_cash,
+        "max_positions": max_positions,
+        "hold_days": max(1, min(int(hold_days or 3), 60)),
+        "top_n": max(1, min(int(top_n or 5), 50)),
+        "auto_fill": bool(auto_fill),
+    }
+    if process:
+        return job_manager.run_job_process(
+            "quant_backtest",
+            payload=payload,
+            message="通用回测已转入独立进程运行",
+        )
+
+    def execute() -> Dict[str, Any]:
+        result = _compute_quant_backtest_cached(**payload)
+        return _compact_quant_backtest_result(result if isinstance(result, dict) else {})
+
+    return job_manager.run_job_background(
+        "quant_backtest",
+        execute,
+        payload=payload,
+        message="通用回测已转入后台运行",
+    )
+
+
+def _pending_quant_backtest(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: int,
+    top_n: int,
+    auto_fill: bool,
+    job_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    status, cache_state, message = _deferred_job_response_state(
+        job_result,
+        "通用回测正在后台生成，请稍后刷新。",
+    )
+    return {
+        "status": status,
+        "source": "quant_backtest",
+        "backtest_cache": cache_state,
+        "message": message,
+        "as_of": str(as_of or ""),
+        "start_date": str(start_date or ""),
+        "end_date": str(end_date or ""),
+        "initial_cash": initial_cash,
+        "max_positions": max_positions,
+        "hold_days": max(1, min(int(hold_days or 3), 60)),
+        "top_n": max(1, min(int(top_n or 5), 50)),
+        "auto_fill": bool(auto_fill),
+        "recent_trades": [],
+        "trade_records": [],
+        "account": {},
+        "positions": [],
+        "delivery_records": [],
+        "daily_settlements": [],
+        "days": [],
+        "equity_curve": [],
+        "job_result": job_result,
+    }
+
+
+def _quant_backtest_cached_or_deferred(
+    *,
+    as_of: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    initial_cash: Optional[float],
+    max_positions: Optional[int],
+    hold_days: int,
+    top_n: int,
+    auto_fill: bool,
+    force: bool = False,
+    defer: bool = True,
+    process: bool = True,
+    manual: bool = False,
+) -> Dict[str, Any]:
+    clean_hold_days = max(1, min(int(hold_days or 3), 60))
+    clean_top_n = max(1, min(int(top_n or 5), 50))
+    cache_parts = _quant_backtest_cache_parts(
+        as_of=as_of,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=clean_hold_days,
+        top_n=clean_top_n,
+        auto_fill=auto_fill,
+    )
+    cached = None if force else load_payload_cache("quant_backtest", cache_parts, _quant_backtest_cache_ttl())
+    if cached:
+        cached["backtest_cache"] = "hit"
+        return cached
+    if _env_flag("QT_BACKTEST_REQUIRE_MANUAL_TRIGGER", True) and not manual:
+        return _manual_required_heavy_job(
+            "quant_backtest",
+            "通用回测需要显式手动触发；普通刷新只读取短缓存，不自动启动重计算。",
+            {
+                "source": "quant_backtest",
+                "backtest_cache": "manual_required",
+                "as_of": str(as_of or ""),
+                "start_date": str(start_date or ""),
+                "end_date": str(end_date or ""),
+                "initial_cash": initial_cash,
+                "max_positions": max_positions,
+                "hold_days": clean_hold_days,
+                "top_n": clean_top_n,
+                "auto_fill": bool(auto_fill),
+                "recent_trades": [],
+                "trade_records": [],
+                "account": {},
+                "positions": [],
+                "delivery_records": [],
+                "daily_settlements": [],
+                "days": [],
+                "equity_curve": [],
+            },
+        )
+    if defer:
+        job_result = _queue_quant_backtest_precompute(
+            as_of=as_of,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=clean_hold_days,
+            top_n=clean_top_n,
+            auto_fill=auto_fill,
+            process=process,
+        )
+        return _pending_quant_backtest(
+            as_of=as_of,
+            start_date=start_date,
+            end_date=end_date,
+            initial_cash=initial_cash,
+            max_positions=max_positions,
+            hold_days=clean_hold_days,
+            top_n=clean_top_n,
+            auto_fill=auto_fill,
+            job_result=job_result,
+        )
+    return _compute_quant_backtest_cached(
+        as_of=as_of,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=initial_cash,
+        max_positions=max_positions,
+        hold_days=clean_hold_days,
+        top_n=clean_top_n,
+        auto_fill=auto_fill,
+    )
+
+
 @app.get("/api/quant/backtest")
 @app.post("/api/quant/backtest")
 def quant_backtest(
@@ -3385,8 +5673,12 @@ def quant_backtest(
     hold_days: int = Query(default=3, ge=1, le=20),
     top_n: int = Query(default=5, ge=1, le=20),
     auto_fill: bool = Query(default=True),
+    force: bool = Query(default=False),
+    defer: bool = Query(default=_env_flag("QT_BACKTEST_DEFER_MISSES", True)),
+    process: bool = Query(default=_env_flag("QT_BACKTEST_PROCESS_ENABLED", True)),
+    manual: bool = Query(default=False),
 ):
-    return quant_engine.backtest(
+    return _quant_backtest_cached_or_deferred(
         as_of=as_of,
         start_date=start_date,
         end_date=end_date,
@@ -3395,46 +5687,11 @@ def quant_backtest(
         hold_days=hold_days,
         top_n=top_n,
         auto_fill=auto_fill,
+        force=force,
+        defer=defer,
+        process=process,
+        manual=manual,
     )
-
-
-@app.get("/api/quant/portfolio")
-def quant_portfolio(as_of: Optional[str] = Query(default=None)):
-    return quant_engine.paper_portfolio(as_of=as_of)
-
-
-@app.get("/api/quant/trading_account")
-def quant_trading_account(
-    as_of: Optional[str] = Query(default=None),
-    limit: int = Query(default=500, ge=1, le=2000),
-):
-    return quant_engine.trading_account(as_of=as_of, limit=limit)
-
-
-@app.post("/api/quant/run")
-def quant_run(as_of: Optional[str] = Query(default=None), calibrate: bool = Query(default=True)):
-    calibration = quant_engine.calibrate_model(as_of=as_of) if calibrate else None
-    portfolio = quant_engine.run_paper_trading(as_of=as_of)
-    notification = trade_notifier.notify_trade_events(
-        portfolio.get("trades", []) if isinstance(portfolio.get("trades"), list) else [],
-        as_of=portfolio["as_of"],
-        source="manual_quant_run",
-    )
-    recommendations = quant_engine.recommendations(as_of=portfolio["as_of"], lookback_days=2, top_n=30)
-    return {
-        "status": "ok",
-        "as_of": portfolio["as_of"],
-        "calibration": calibration,
-        "portfolio": portfolio,
-        "notification": notification,
-        "recommendations": recommendations,
-    }
-
-
-@app.get("/api/news_history")
-def news_history(limit: int = Query(default=200, ge=1, le=2000)):
-    items = quant_engine.load_news_history()[:limit]
-    return {"items": items, "count": len(items)}
 
 
 @app.get("/", include_in_schema=False)

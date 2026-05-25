@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import os
 import re
 import secrets
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -27,19 +29,74 @@ DEFAULT_FRONTEND_PROFILE = {
 }
 DEFAULT_ADMIN_ENTRY_PREFIX = "/admin-"
 ADMIN_ENTRY_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9_-]{5,63}$")
+_AUTH_CACHE_LOCK = threading.RLock()
+_AUTH_CACHE_SIGNATURE: Optional[tuple[str, int, int]] = None
+_AUTH_CACHE_PAYLOAD: Optional[Dict[str, Any]] = None
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _auth_cache_enabled() -> bool:
+    return str(os.getenv("QT_AUTH_FILE_CACHE_ENABLED", "true")).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _auth_file_signature() -> tuple[str, int, int]:
+    try:
+        key = str(AUTH_FILE.resolve())
+    except Exception:
+        key = str(AUTH_FILE)
+    try:
+        stat = AUTH_FILE.stat()
+        return key, int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size)
+    except FileNotFoundError:
+        return key, -1, -1
+    except Exception:
+        return key, 0, 0
+
+
+def _copy_auth_payload(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return copy.deepcopy(payload)
+
+
+def _clear_auth_cache() -> None:
+    global _AUTH_CACHE_SIGNATURE, _AUTH_CACHE_PAYLOAD
+    with _AUTH_CACHE_LOCK:
+        _AUTH_CACHE_SIGNATURE = None
+        _AUTH_CACHE_PAYLOAD = None
+
+
 def _load_auth() -> Dict[str, Any]:
+    global _AUTH_CACHE_SIGNATURE, _AUTH_CACHE_PAYLOAD
+    if not _auth_cache_enabled():
+        payload = read_json(AUTH_FILE, {})
+        return payload if isinstance(payload, dict) else {}
+    signature = _auth_file_signature()
+    with _AUTH_CACHE_LOCK:
+        if _AUTH_CACHE_SIGNATURE == signature and isinstance(_AUTH_CACHE_PAYLOAD, dict):
+            return _copy_auth_payload(_AUTH_CACHE_PAYLOAD)
     payload = read_json(AUTH_FILE, {})
-    return payload if isinstance(payload, dict) else {}
+    clean = payload if isinstance(payload, dict) else {}
+    signature = _auth_file_signature()
+    with _AUTH_CACHE_LOCK:
+        _AUTH_CACHE_SIGNATURE = signature
+        _AUTH_CACHE_PAYLOAD = _copy_auth_payload(clean)
+    return _copy_auth_payload(clean)
 
 
 def _save_auth(payload: Dict[str, Any]) -> None:
+    global _AUTH_CACHE_SIGNATURE, _AUTH_CACHE_PAYLOAD
     write_json(AUTH_FILE, payload)
+    if not _auth_cache_enabled():
+        _clear_auth_cache()
+        return
+    signature = _auth_file_signature()
+    with _AUTH_CACHE_LOCK:
+        _AUTH_CACHE_SIGNATURE = signature
+        _AUTH_CACHE_PAYLOAD = _copy_auth_payload(payload)
 
 
 def _hash_password(password: str) -> Dict[str, Any]:
@@ -565,7 +622,13 @@ def update_frontend_user_profile(username: str, payload: Dict[str, Any]) -> Dict
     record["profile_updated_at"] = _now_iso()
     auth["updated_at"] = _now_iso()
     _save_auth(auth)
-    return {"status": "ok", "username": username, "profile": profile}
+    return {
+        "status": "ok",
+        "username": username,
+        "created_at": str(record.get("created_at") or ""),
+        "profile_updated_at": str(record.get("profile_updated_at") or ""),
+        "profile": profile,
+    }
 
 
 def login(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[str, Any]:
@@ -612,8 +675,7 @@ def login(payload: Dict[str, Any], request: Optional[Request] = None) -> Dict[st
 
 
 def require_request_scope(request: Request, required_scope: str) -> Dict[str, Any]:
-    status = auth_status()
-    if required_scope == "admin" and status["setup_required"]:
+    if required_scope == "admin" and auth_status()["setup_required"]:
         raise HTTPException(status_code=401, detail="setup required")
     debug_payload = verify_debug_request(request, required_scope)
     if debug_payload:

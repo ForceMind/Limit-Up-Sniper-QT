@@ -264,7 +264,23 @@ try:
         for item in errors:
             print(f"- {item}")
         sys.exit(1)
-    print("SQLite 表结构验证通过：策略模型、模型成交记录、行情、新闻、日志表都已存在")
+    performance_indexes = {
+        "idx_news_raw_timestamp_date": "CREATE INDEX IF NOT EXISTS idx_news_raw_timestamp_date ON news_raw(timestamp DESC, date DESC)",
+        "idx_news_raw_date_timestamp": "CREATE INDEX IF NOT EXISTS idx_news_raw_date_timestamp ON news_raw(date, timestamp DESC, time_str DESC)",
+        "idx_news_events_date_impact": "CREATE INDEX IF NOT EXISTS idx_news_events_date_impact ON news_events(date, impact_score DESC, timestamp DESC)",
+    }
+    for ddl in performance_indexes.values():
+        conn.execute(ddl)
+    conn.commit()
+    index_rows = conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    indexes = {row[0] for row in index_rows}
+    missing_indexes = [name for name in performance_indexes if name not in indexes]
+    if missing_indexes:
+        print("SQLite 热路径索引验证失败：")
+        for item in missing_indexes:
+            print(f"- 缺少索引 {item}")
+        sys.exit(1)
+    print("SQLite 表结构验证通过：策略模型、模型成交记录、行情、新闻、日志表都已存在，新闻热路径索引已确认")
 finally:
     conn.close()
 PY

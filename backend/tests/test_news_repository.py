@@ -7,7 +7,13 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.quant.news_repository import latest_news_time, lightweight_news_feed
+from app.quant.news_repository import (
+    latest_news_time,
+    latest_news_time_query_plan,
+    lightweight_news_feed,
+    news_events_query_plan,
+    news_feed_query_plan,
+)
 
 
 def _create_news_db(path: Path) -> None:
@@ -47,6 +53,9 @@ def _create_news_db(path: Path) -> None:
             )
             """
         )
+        conn.execute("CREATE INDEX idx_news_raw_timestamp_date ON news_raw(timestamp DESC, date DESC)")
+        conn.execute("CREATE INDEX idx_news_raw_date_timestamp ON news_raw(date, timestamp DESC, time_str DESC)")
+        conn.execute("CREATE INDEX idx_news_events_date_impact ON news_events(date, impact_score DESC, timestamp DESC)")
         conn.executemany(
             "INSERT INTO news_raw (id, date, timestamp, time_str, source, url, text, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -99,3 +108,19 @@ def test_latest_news_time_reads_top_sqlite_row(tmp_path):
     _create_news_db(db_path)
 
     assert latest_news_time(db_path=db_path) == "2026-05-23 10:30:00"
+
+
+def test_news_hot_queries_use_covering_indexes_without_temp_sort(tmp_path):
+    db_path = tmp_path / "quant_data.sqlite3"
+    _create_news_db(db_path)
+
+    plans = [
+        " | ".join(latest_news_time_query_plan(db_path)),
+        " | ".join(news_feed_query_plan(db_path, "2026-05-23")),
+        " | ".join(news_events_query_plan(db_path, "2026-05-23")),
+    ]
+
+    assert "idx_news_raw_timestamp_date" in plans[0]
+    assert "idx_news_raw_date_timestamp" in plans[1]
+    assert "idx_news_events_date_impact" in plans[2]
+    assert all("TEMP B-TREE" not in plan.upper() for plan in plans)

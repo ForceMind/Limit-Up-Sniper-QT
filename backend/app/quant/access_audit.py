@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import ipaddress
+import os
+import queue
 import threading
+import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
@@ -16,6 +19,38 @@ BLOCKED_IP_FILE = DATA_DIR / "blocked_ips.json"
 MAX_ACCESS_LOGS = 5000
 _ACCESS_LOCK = threading.Lock()
 _BLOCK_LOCK = threading.Lock()
+_ACCESS_WORKER_LOCK = threading.Lock()
+_ACCESS_WORKER_STARTED = False
+_ACCESS_DROPPED_LOCK = threading.Lock()
+_ACCESS_DROPPED = 0
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 100000) -> int:
+    try:
+        value = int(float(os.getenv(name, "") or default))
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0, maximum: float = 3600.0) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except Exception:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+_ACCESS_QUEUE: "queue.Queue[Dict[str, Any]]" = queue.Queue(
+    maxsize=_env_int("QT_ACCESS_LOG_QUEUE_MAX", 2000, minimum=10, maximum=100000)
+)
 
 SCAN_PATH_MARKERS = (
     "/.env",
@@ -203,6 +238,103 @@ def _auto_block_after_append(items: list[Dict[str, Any]], item: Dict[str, Any]) 
             return
 
 
+def _access_log_batch_size() -> int:
+    return _env_int("QT_ACCESS_LOG_BATCH_SIZE", 50, minimum=1, maximum=1000)
+
+
+def _access_log_batch_window_seconds() -> float:
+    return _env_float("QT_ACCESS_LOG_BATCH_WINDOW_MS", 200.0, minimum=0.0, maximum=5000.0) / 1000.0
+
+
+def _append_access_items(new_items: list[Dict[str, Any]]) -> None:
+    clean_items = [item for item in new_items if isinstance(item, dict)]
+    if not clean_items:
+        return
+    with _ACCESS_LOCK:
+        data = read_json(ACCESS_LOG_FILE, {"items": []})
+        if not isinstance(data, dict):
+            data = {"items": []}
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        for item in clean_items:
+            items.append(item)
+            if len(items) > MAX_ACCESS_LOGS:
+                items = items[-MAX_ACCESS_LOGS:]
+            _auto_block_after_append(items, item)
+        data["items"] = items[-MAX_ACCESS_LOGS:]
+        data["updated_at"] = str(clean_items[-1].get("ts") or _now())
+        write_json(ACCESS_LOG_FILE, data)
+
+
+def _append_access_item(item: Dict[str, Any]) -> None:
+    _append_access_items([item])
+
+
+def _access_worker() -> None:
+    while True:
+        item = _ACCESS_QUEUE.get()
+        batch = [item]
+        deadline = time.time() + _access_log_batch_window_seconds()
+        batch_size = _access_log_batch_size()
+        while len(batch) < batch_size:
+            timeout = max(0.0, deadline - time.time())
+            if timeout <= 0:
+                break
+            try:
+                batch.append(_ACCESS_QUEUE.get(timeout=timeout))
+            except queue.Empty:
+                break
+        try:
+            _append_access_items(batch)
+        except Exception:
+            pass
+        finally:
+            for _ in batch:
+                _ACCESS_QUEUE.task_done()
+
+
+def _ensure_access_worker() -> None:
+    global _ACCESS_WORKER_STARTED
+    if _ACCESS_WORKER_STARTED:
+        return
+    with _ACCESS_WORKER_LOCK:
+        if _ACCESS_WORKER_STARTED:
+            return
+        threading.Thread(target=_access_worker, name="qt-access-audit", daemon=True).start()
+        _ACCESS_WORKER_STARTED = True
+
+
+def _queue_access_item(item: Dict[str, Any]) -> bool:
+    global _ACCESS_DROPPED
+    _ensure_access_worker()
+    try:
+        _ACCESS_QUEUE.put_nowait(item)
+        return True
+    except queue.Full:
+        with _ACCESS_DROPPED_LOCK:
+            _ACCESS_DROPPED += 1
+        return False
+
+
+def _flush_access_queue(timeout_seconds: float = 0.2) -> None:
+    deadline = time.time() + max(0.0, timeout_seconds)
+    while getattr(_ACCESS_QUEUE, "unfinished_tasks", 0) > 0 and time.time() < deadline:
+        time.sleep(0.01)
+
+
+def _access_async_status() -> Dict[str, Any]:
+    with _ACCESS_DROPPED_LOCK:
+        dropped = _ACCESS_DROPPED
+    return {
+        "enabled": _env_bool("QT_ACCESS_LOG_ASYNC", True),
+        "worker_started": _ACCESS_WORKER_STARTED,
+        "queue_size": _ACCESS_QUEUE.qsize(),
+        "queue_max": _ACCESS_QUEUE.maxsize,
+        "batch_size": _access_log_batch_size(),
+        "batch_window_ms": int(_access_log_batch_window_seconds() * 1000),
+        "dropped": dropped,
+    }
+
+
 def record_access(
     request: Request,
     status_code: int,
@@ -226,16 +358,10 @@ def record_access(
         "user_agent": str(request.headers.get("user-agent") or "")[:500],
         "referer": str(request.headers.get("referer") or "")[:500],
     }
-    with _ACCESS_LOCK:
-        data = read_json(ACCESS_LOG_FILE, {"items": []})
-        if not isinstance(data, dict):
-            data = {"items": []}
-        items = data.get("items") if isinstance(data.get("items"), list) else []
-        items.append(item)
-        data["items"] = items[-MAX_ACCESS_LOGS:]
-        data["updated_at"] = item["ts"]
-        write_json(ACCESS_LOG_FILE, data)
-        _auto_block_after_append(data["items"], item)
+    if _env_bool("QT_ACCESS_LOG_ASYNC", True):
+        _queue_access_item(item)
+        return
+    _append_access_item(item)
 
 
 def access_logs(
@@ -246,6 +372,8 @@ def access_logs(
     path: Optional[str] = None,
     status_code: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if _env_bool("QT_ACCESS_LOG_ASYNC", True):
+        _flush_access_queue()
     data = read_json(ACCESS_LOG_FILE, {"items": []})
     if not isinstance(data, dict):
         data = {"items": []}
@@ -277,10 +405,13 @@ def access_logs(
         "unique_visitors": unique_visitors,
         "unique_users": unique_users,
         "updated_at": data.get("updated_at") or "",
+        "async": _access_async_status(),
     }
 
 
 def access_security(limit: int = 120) -> Dict[str, Any]:
+    if _env_bool("QT_ACCESS_LOG_ASYNC", True):
+        _flush_access_queue()
     data = read_json(ACCESS_LOG_FILE, {"items": []})
     if not isinstance(data, dict):
         data = {"items": []}

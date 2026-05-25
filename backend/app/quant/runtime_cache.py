@@ -258,7 +258,7 @@ def runtime_cache_status() -> Dict[str, Any]:
                 ),
                 "expired_rows": frontend_expired + account_expired + user_follow_expired,
                 "ttl_seconds": {
-                    "recommendations": env_int("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900, minimum=0, maximum=86400),
+                    "recommendations": env_int("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400),
                     "daily_plan": env_int("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400),
                     "account": account_ttl,
                     "user_follow_account": user_follow_ttl,

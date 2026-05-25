@@ -72,10 +72,20 @@ def latest_news_time(db_path: Optional[Path] = None) -> str:
                 """
                 SELECT time_str, date, timestamp
                 FROM news_raw
-                ORDER BY COALESCE(timestamp, 0) DESC, date DESC
+                WHERE timestamp > 0
+                ORDER BY timestamp DESC, date DESC
                 LIMIT 1
                 """
             ).fetchone()
+            if not row:
+                row = conn.execute(
+                    """
+                    SELECT time_str, date, timestamp
+                    FROM news_raw
+                    ORDER BY date DESC, time_str DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
@@ -89,6 +99,72 @@ def latest_news_time(db_path: Optional[Path] = None) -> str:
     if timestamp > 0:
         return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
     return str(row["date"] or "")
+
+
+def latest_news_time_query_plan(db_path: Path) -> list[str]:
+    """Expose the hot latest-news query plan for tests and deployment diagnostics."""
+    conn = _connect(db_path)
+    try:
+        if not _has_table(conn, "news_raw"):
+            return []
+        rows = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT time_str, date, timestamp
+            FROM news_raw
+            WHERE timestamp > 0
+            ORDER BY timestamp DESC, date DESC
+            LIMIT 1
+            """
+        ).fetchall()
+        return [str(row[3]) for row in rows]
+    finally:
+        conn.close()
+
+
+def news_feed_query_plan(db_path: Path, data_date: str) -> list[str]:
+    """Expose the hot date-filtered news feed query plan for tests and diagnostics."""
+    conn = _connect(db_path)
+    try:
+        if not _has_table(conn, "news_raw"):
+            return []
+        rows = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT id, date, timestamp, time_str, source, text
+            FROM news_raw
+            WHERE date = ?
+            ORDER BY timestamp DESC, time_str DESC
+            LIMIT 20
+            """,
+            (data_date,),
+        ).fetchall()
+        return [str(row[3]) for row in rows]
+    finally:
+        conn.close()
+
+
+def news_events_query_plan(db_path: Path, data_date: str) -> list[str]:
+    """Expose the hot date-filtered news event query plan for tests and diagnostics."""
+    conn = _connect(db_path)
+    try:
+        if not _has_table(conn, "news_events"):
+            return []
+        rows = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT event_id, date, timestamp, source, text, code, name, industry, event_type,
+                   sentiment, impact_score, ai_score, reason
+            FROM news_events
+            WHERE date = ?
+            ORDER BY impact_score DESC, timestamp DESC
+            LIMIT 20
+            """,
+            (data_date,),
+        ).fetchall()
+        return [str(row[3]) for row in rows]
+    finally:
+        conn.close()
 
 
 def _filter_sql(
@@ -187,7 +263,7 @@ def lightweight_news_feed(
                     SELECT id, date, timestamp, time_str, source, text
                     FROM news_raw
                     WHERE {' AND '.join(['date = ?', *clauses])}
-                    ORDER BY COALESCE(timestamp, 0) DESC, time_str DESC
+                    ORDER BY timestamp DESC, time_str DESC
                     LIMIT ?
                     """,
                     [data_date, *params, limit],
@@ -213,7 +289,7 @@ def lightweight_news_feed(
                            sentiment, impact_score, ai_score, reason
                     FROM news_events
                     WHERE date = ?
-                    ORDER BY impact_score DESC, COALESCE(timestamp, 0) DESC
+                    ORDER BY impact_score DESC, timestamp DESC
                     LIMIT ?
                     """,
                     (data_date, limit),

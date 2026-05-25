@@ -154,6 +154,10 @@
             <span class="font-semibold truncate max-w-[110px]">{{ status.ai_model || '-' }}</span>
           </div>
           <div class="flex items-center justify-between gap-2">
+            <span class="text-neutral-500">重任务</span>
+            <span class="font-semibold" :class="heavyProcessBusy ? 'text-amber-700' : 'text-emerald-700'">{{ heavyProcessSlotText }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-2">
             <span class="text-neutral-500">版本</span>
             <span class="font-semibold truncate max-w-[110px]">v{{ appVersion }}</span>
           </div>
@@ -216,6 +220,28 @@
             <div class="metric">
               <div class="text-xs text-neutral-500">账户收益</div>
               <div class="mt-2 text-lg font-semibold" :class="numClass(account.return_pct)">{{ pct(account.return_pct) }}</div>
+            </div>
+            <div class="metric">
+              <div class="text-xs text-neutral-500">重任务槽位</div>
+              <div class="mt-2 text-lg font-semibold" :class="heavyProcessBusy ? 'text-amber-700' : 'text-emerald-700'">{{ heavyProcessSlotText }}</div>
+            </div>
+          </div>
+
+          <div v-if="heavyProcessBusy" class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex items-center justify-between gap-3">
+              <div>
+                <div class="font-semibold">重任务并发已满</div>
+                <div class="text-xs text-neutral-500 mt-1">{{ heavyProcessSummary }}</div>
+              </div>
+              <button @click="activeTab = 'ops'" class="h-8 px-3 bg-neutral-900 text-white text-xs">查看运维</button>
+            </div>
+            <div class="p-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3 text-sm">
+              <div v-for="item in heavyProcessRunningJobs" :key="`${item.job}-${item.process_pid}`" class="border border-neutral-200 p-3">
+                <div class="font-semibold">{{ logJobLabel(item.job) }}</div>
+                <div class="text-xs text-neutral-500 mt-1">PID {{ item.process_pid || '-' }} · {{ shortTime(item.started_at) }}</div>
+                <div class="mt-2 h-2 bg-neutral-100 overflow-hidden"><div class="h-full bg-red-600" :style="{ width: Math.max(1, Math.min(100, Number(item.progress_pct || 0))) + '%' }"></div></div>
+                <div class="mt-1 text-xs text-neutral-500">{{ item.progress_message || '-' }}</div>
+              </div>
             </div>
           </div>
 
@@ -288,7 +314,7 @@
                 <div><div class="text-xs text-neutral-500">行情同步</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_market_sync_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">交易循环</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_trade_cycle_at) }}</div></div>
                 <div><div class="text-xs text-neutral-500">策略复盘</div><div class="font-semibold mt-1">{{ scheduler.strategy_replay_enabled ? shortTime(scheduler.next_strategy_replay_at) : '手动' }}</div></div>
-                <div><div class="text-xs text-neutral-500">前台预计算</div><div class="font-semibold mt-1">{{ shortTime(scheduler.next_frontend_payload_precompute_at) }}</div></div>
+                <div><div class="text-xs text-neutral-500">前台预计算</div><div class="font-semibold mt-1">{{ frontendPayloadSchedulerText }}</div></div>
               </div>
             </div>
             <div class="panel">
@@ -566,7 +592,7 @@
                 <div class="font-semibold">当前策略回测与交割单</div>
                 <div class="text-xs text-neutral-500 mt-1">默认读取已落库的策略运行结果；需要重新计算时再点右侧按钮。</div>
               </div>
-              <button @click="loadBacktest(false)" :disabled="backtestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ backtestLoading ? '回测中' : '实时重算选中策略' }}</button>
+              <button @click="loadBacktest(false)" :disabled="backtestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ backtestLoading ? '提交中' : '后台重算选中策略' }}</button>
             </div>
             <div class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
               <div class="metric"><div class="text-xs text-neutral-500">状态</div><div class="mt-2 font-semibold">{{ backtestResult.status || '-' }}</div></div>
@@ -702,7 +728,11 @@
               <button @click="fetchDataAiDetails(false)" :disabled="dataAiLoading" class="h-8 px-3 bg-white border border-neutral-300 text-sm disabled:opacity-50">{{ dataAiLoading ? '刷新中' : '刷新数据与AI' }}</button>
             </div>
             <div class="p-4 grid gap-3 md:grid-cols-2 2xl:grid-cols-[150px_150px_130px_110px_auto] text-sm">
-              <label><span class="block text-xs text-neutral-500 mb-1">开始日期</span><input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
+              <label>
+                <span class="block text-xs text-neutral-500 mb-1">开始日期</span>
+                <input v-model="dataFillForm.start_date" type="date" class="w-full h-9 px-2 border border-neutral-300">
+                <span class="mt-1 block text-[11px] text-neutral-500">服务器最早 {{ dataStartDate || '-' }}</span>
+              </label>
               <label><span class="block text-xs text-neutral-500 mb-1">结束日期</span><input v-model="dataFillForm.end_date" type="date" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label><span class="block text-xs text-neutral-500 mb-1">股票/天数上限</span><input v-model.number="dataFillForm.max_codes" type="number" min="1" max="5000" class="w-full h-9 px-2 border border-neutral-300"></label>
               <label class="flex items-end gap-2 h-[57px]"><input v-model="dataFillForm.force" type="checkbox" class="accent-neutral-900 mb-3"><span class="mb-2 text-sm">强制刷新</span></label>
@@ -851,6 +881,71 @@
                 <span class="block text-xs text-neutral-500 mb-1">{{ field.label }}</span>
                 <input v-model.number="strategyForm[field.key]" type="number" :step="field.step || 0.01" class="w-full h-9 px-2 border border-neutral-300 outline-none focus:border-neutral-900">
               </label>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="px-4 py-3 border-b border-neutral-200 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div>
+                <div class="font-semibold">策略运行矩阵</div>
+                <div class="text-xs text-neutral-500 mt-1">只读汇总已落库的策略每日运行结果，用于判断前台账户是否有可派生数据。</div>
+              </div>
+              <button @click="loadStrategyRuntimeMatrix(false)" :disabled="strategyRuntimeLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyRuntimeLoading ? '读取中' : '刷新矩阵' }}</button>
+            </div>
+            <div class="p-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+              <div class="metric"><div class="text-xs text-neutral-500">统计日期</div><div class="mt-2 font-semibold">{{ strategyRuntimeMatrix.as_of || asOf || '-' }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">策略数量</div><div class="mt-2 text-lg font-semibold">{{ qty(strategyRuntimeMatrix.count || 0) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">已落库</div><div class="mt-2 text-lg font-semibold text-emerald-700">{{ qty(strategyRuntimeMatrix.ready_count || 0) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">缺运行结果</div><div class="mt-2 text-lg font-semibold" :class="Number(strategyRuntimeMatrix.missing_count || 0) ? 'text-red-700' : 'text-emerald-700'">{{ qty(strategyRuntimeMatrix.missing_count || 0) }}</div></div>
+              <div class="metric"><div class="text-xs text-neutral-500">有信号</div><div class="mt-2 text-lg font-semibold">{{ qty(strategyRuntimeMatrix.signal_ready_count || 0) }}</div></div>
+            </div>
+            <div class="table-wrap overflow-auto max-h-[420px]">
+              <table class="w-full text-sm">
+                <thead class="sticky top-0 bg-neutral-50 border-b border-neutral-200 text-xs text-neutral-500">
+                  <tr>
+                    <th class="px-3 py-2 text-left min-w-[220px]">策略</th>
+                    <th class="px-3 py-2 text-left">状态</th>
+                    <th class="px-3 py-2 text-left">运行区间</th>
+                    <th class="px-3 py-2 text-right">信号</th>
+                    <th class="px-3 py-2 text-right">成交 / 持仓</th>
+                    <th class="px-3 py-2 text-right">收益 / 回撤</th>
+                    <th class="px-3 py-2 text-right">资金档</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-neutral-100">
+                  <tr v-for="row in strategyRuntimeRows" :key="row.model_id" class="hover:bg-neutral-50">
+                    <td class="px-3 py-2">
+                      <div class="font-semibold">{{ row.name || row.model_id }}</div>
+                      <div class="text-xs text-neutral-500">{{ row.model_id }} · {{ row.source || '-' }}</div>
+                    </td>
+                    <td class="px-3 py-2">
+                      <span class="px-2 py-1 rounded-md text-xs" :class="strategyRuntimeStatusClass(row.runtime_status)">{{ strategyRuntimeStatusText(row.runtime_status) }}</span>
+                      <div class="mt-1 text-xs text-neutral-500">{{ row.runtime_source || '-' }}</div>
+                    </td>
+                    <td class="px-3 py-2">
+                      <div>{{ row.runtime_start_date || '-' }} 至 {{ row.runtime_end_date || '-' }}</div>
+                      <div class="text-xs text-neutral-500">{{ qty(row.runtime_day_count || 0) }} 天 · {{ shortTime(row.generated_at) }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <div class="font-semibold">{{ qty(row.signal_count || 0) }}</div>
+                      <div class="text-xs text-neutral-500">{{ row.latest_signal_date || '-' }} {{ row.latest_signal_code || '' }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <div>{{ qty(row.trade_count || 0) }} / {{ qty(row.position_count || 0) }}</div>
+                      <div class="text-xs text-neutral-500">平仓 {{ qty(row.closed_trades || 0) }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <div :class="numClass(row.return_pct)">{{ pct(row.return_pct) }}</div>
+                      <div class="text-xs text-neutral-500">{{ pct(row.max_drawdown_pct) }}</div>
+                    </td>
+                    <td class="px-3 py-2 text-right">
+                      <div>{{ strategyCapitalRange(row) }}</div>
+                      <div class="text-xs text-neutral-500">{{ money(row.initial_cash || 0) }}</div>
+                    </td>
+                  </tr>
+                  <tr v-if="!strategyRuntimeRows.length"><td colspan="7" class="px-3 py-10 text-center text-neutral-500">暂无策略运行矩阵</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
 
@@ -1011,7 +1106,7 @@
                 <div class="font-semibold">策略回测详情与交割单</div>
                 <div class="text-xs text-neutral-500 mt-1">{{ selectedStrategyBacktest.model_name || '先在上方策略表点击“查看交割单”' }}</div>
               </div>
-              <button v-if="selectedStrategyBacktest.model_id" @click="loadStrategyBacktest(selectedStrategyBacktest.model, true)" :disabled="strategyBacktestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyBacktestLoading ? '加载中' : '手动重新回测' }}</button>
+              <button v-if="selectedStrategyBacktest.model_id" @click="loadStrategyBacktest(selectedStrategyBacktest.model, true)" :disabled="strategyBacktestLoading" class="h-8 px-3 bg-neutral-900 text-white text-sm disabled:opacity-50">{{ strategyBacktestLoading ? '提交中' : '后台重新回测' }}</button>
             </div>
             <div v-if="selectedStrategyBacktest.status" class="p-4 grid grid-cols-2 md:grid-cols-4 2xl:grid-cols-8 gap-3">
               <div class="metric"><div class="text-xs text-neutral-500">起止</div><div class="mt-2 font-semibold">{{ selectedStrategyBacktest.start_date || '-' }} / {{ selectedStrategyBacktest.end_date || '-' }}</div></div>
@@ -1397,6 +1492,28 @@
             <div class="mx-4 mb-2 text-xs text-neutral-500">
               策略复盘：{{ strategyReplayPlanText }}
             </div>
+            <div class="mx-4 mb-2 border border-neutral-200 p-3 text-sm">
+              <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div class="font-semibold">重任务并发闸门：{{ heavyProcessSlotText }}</div>
+                  <div class="text-xs text-neutral-500 mt-1">{{ heavyProcessSummary }}</div>
+                </div>
+                <div class="text-xs" :class="heavyProcessBusy ? 'text-amber-700' : 'text-emerald-700'">
+                  {{ heavyProcessBusy ? '请等待当前训练/复盘/回测完成后再启动新的重任务' : '可以启动一个训练/复盘/回测类任务' }}
+                </div>
+              </div>
+            </div>
+            <div class="mx-4 mb-2 border border-neutral-200 p-3 text-sm">
+              <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div class="font-semibold">账户预热异步保护：{{ frontendAccountAsyncSummary }}</div>
+                  <div class="text-xs text-neutral-500 mt-1">待处理队列 {{ frontendAccountQueue.queued || 0 }}；{{ frontendAccountQueueLockText }}</div>
+                </div>
+                <div class="text-xs" :class="Number(frontendAccountAsync.pending_count || 0) > 0 ? 'text-amber-700' : 'text-emerald-700'">
+                  {{ Number(frontendAccountAsync.pending_count || 0) > 0 ? '正在保护重复触发的账户预热请求' : '没有重复入队保护中的请求' }}
+                </div>
+              </div>
+            </div>
             <div class="px-4 pb-4">
               <div class="border-t border-neutral-200 py-4 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
                 <button @click="startSystem" :disabled="systemStarting && !isJobRunning('system_startup')" class="h-10 px-3 bg-red-600 text-white text-sm hover:bg-red-700 disabled:opacity-50">{{ jobActionText('system_startup', systemStarting ? '启动中' : '执行系统启动流程') }}</button>
@@ -1445,7 +1562,11 @@
                   </div>
                   <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
                     <button @click="precomputeFrontendPayloads" :disabled="precomputingFrontend && !isJobRunning('frontend_payload_precompute')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('frontend_payload_precompute', precomputingFrontend ? '预计算中' : '预计算前台缓存') }}</button>
-                    <div class="text-sm"><div>预生成前台推荐和日计划缓存。</div><div class="text-xs text-neutral-500 mt-1">适合策略复盘后执行；前台缓存未命中时也会自动排队。</div></div>
+                    <div class="text-sm"><div>预生成前台推荐和日计划缓存。</div><div class="text-xs text-neutral-500 mt-1">默认跳过未过期缓存；是否允许前台未命中自动排队由服务器配置控制。</div></div>
+                  </div>
+                  <div class="py-3 grid gap-3 lg:grid-cols-[190px_1fr] lg:items-center">
+                    <button @click="precomputeFrontendAccounts" :disabled="precomputingAccounts && !isJobRunning('frontend_account_precompute')" class="h-9 px-3 bg-white border border-neutral-300 text-sm hover:bg-neutral-50 disabled:opacity-50">{{ jobActionText('frontend_account_precompute', precomputingAccounts ? '预热中' : '预热用户账户') }}</button>
+                    <div class="text-sm"><div>为前台用户生成账户快照。</div><div class="text-xs text-neutral-500 mt-1">只读取已落库策略运行结果和账户缓存，不触发即时回放。</div></div>
                   </div>
                 </div>
               </div>
@@ -1535,8 +1656,14 @@
             <option value="ai_analysis">AI</option>
             <option value="market_sync">行情</option>
             <option value="trade_cycle">交易</option>
+            <option value="quant_timeline">策略时间线</option>
+            <option value="quant_backtest">通用回测</option>
+            <option value="fit_strategy">参数拟合</option>
             <option value="strategy_replay">策略复盘</option>
+            <option value="model_backtest">模型回测</option>
             <option value="frontend_payload_precompute">前台预计算</option>
+            <option value="frontend_account_precompute">前台账户预热</option>
+            <option value="data_coverage">数据覆盖率</option>
             <option value="system_startup">系统启动</option>
             <option value="admin_config">配置</option>
             <option value="admin_backup">备份</option>
@@ -1754,8 +1881,14 @@
             { key: 'kline_fill', label: '日K补齐', desc: '回测前补齐缺失K线' },
             { key: 'lhb_sync', label: '龙虎榜', desc: '席位数据进入分析' },
             { key: 'trade_cycle', label: '模拟交易', desc: '买入、卖出、邮件通知' },
+            { key: 'quant_timeline', label: '策略时间线', desc: '手动时间线回测缓存' },
+            { key: 'quant_backtest', label: '通用回测', desc: '通用回测短缓存' },
+            { key: 'fit_strategy', label: '参数拟合', desc: '手动参数拟合和应用' },
             { key: 'strategy_replay', label: '策略复盘', desc: '按日期窗口复盘全部资金档策略和策略库模型' },
+            { key: 'model_backtest', label: '模型回测', desc: '手动重算单个策略模型' },
             { key: 'frontend_payload_precompute', label: '前台预计算', desc: '推荐和日计划写入短缓存' },
+            { key: 'frontend_account_precompute', label: '前台账户预热', desc: '按用户跟随周期生成账户快照' },
+            { key: 'data_coverage', label: '数据覆盖率', desc: '日K、分时、龙虎榜覆盖诊断' },
           ],
           tradeViews: [
             { key: 'positions', label: '持仓' },
@@ -1795,6 +1928,7 @@
           runningTrade: false,
           replayingStrategy: false,
           precomputingFrontend: false,
+          precomputingAccounts: false,
           testingEmail: false,
           backuping: false,
           downloadingData: false,
@@ -1841,6 +1975,8 @@
           evolutionTraceLoading: false,
           evolutionTraceForm: { run_id: '', generation: '', limit: 200 },
           strategyModels: {},
+          strategyRuntimeMatrix: {},
+          strategyRuntimeLoading: false,
           accessLogs: {},
           accessSecurity: {},
           accessSecurityBlockingAll: false,
@@ -1926,6 +2062,39 @@
         scheduler() { return this.jobStatus.scheduler || {}; },
         runningJobs() { return this.jobStatus.running || {}; },
         pausedJobs() { return this.jobStatus.paused_jobs || {}; },
+        frontendAccountQueue() { return this.jobStatus.frontend_account_precompute_queue || {}; },
+        frontendAccountAsync() { return this.jobStatus.frontend_account_precompute_async || {}; },
+        frontendPayloadPolicy() { return this.jobStatus.frontend_payload_policy || {}; },
+        frontendAccountQueueLockText() {
+          const lock = (this.frontendAccountQueue || {}).lock || {};
+          if (!lock.exists) return '队列锁空闲';
+          return lock.stale ? `队列锁陈旧 ${lock.age_ms || 0} ms` : `队列锁占用 ${lock.age_ms || 0} ms`;
+        },
+        frontendAccountAsyncSummary() {
+          const pending = Number(this.frontendAccountAsync.pending_count || 0);
+          const debounce = Number(this.frontendAccountAsync.debounce_seconds || 0);
+          if (!pending) return `无重复入队；去重窗口 ${debounce || 0} 秒`;
+          return `${pending} 个请求在去重窗口内；去重窗口 ${debounce || 0} 秒`;
+        },
+        heavyProcessSlots() { return this.jobStatus.heavy_process_slots || {}; },
+        heavyProcessRunningJobs() {
+          const rows = this.heavyProcessSlots.running_jobs || [];
+          return Array.isArray(rows) ? rows : [];
+        },
+        heavyProcessBusy() {
+          return Number(this.heavyProcessSlots.available || 0) <= 0 && Number(this.heavyProcessSlots.max_concurrent || 0) > 0;
+        },
+        heavyProcessSlotText() {
+          const used = Number(this.heavyProcessSlots.running_count || this.heavyProcessRunningJobs.length || 0);
+          const limit = Number(this.heavyProcessSlots.max_concurrent || 1);
+          return `${used}/${limit}`;
+        },
+        heavyProcessSummary() {
+          const limit = Number(this.heavyProcessSlots.max_concurrent || 1);
+          if (!this.heavyProcessRunningJobs.length) return `训练、复盘、回测和拟合类重任务最多同时运行 ${limit} 个。`;
+          const names = this.heavyProcessRunningJobs.map(item => this.logJobLabel(item.job)).join('、');
+          return `正在运行：${names}；最多同时运行 ${limit} 个。`;
+        },
         schedulerStatusText() {
           if (this.scheduler.enabled) return this.scheduler.status === 'starting' ? '启动中' : '自动调度中';
           if (this.scheduler.status === 'stopped') return '已停止';
@@ -1933,10 +2102,20 @@
           return this.scheduler.status || '未启动';
         },
         schedulerSummary() {
-          if (this.scheduler.enabled) return '自动调度会按间隔触发新闻、AI、行情、交易和前台预计算；策略复盘、训练和回测只手动触发。';
+          if (this.scheduler.enabled) {
+            const payloadText = this.frontendPayloadPolicy.precompute_enabled ? '，并按配置触发前台预计算' : '；前台预计算保持手动';
+            return `自动调度会按间隔触发新闻、AI、行情和交易${payloadText}；策略复盘、训练和回测只手动触发。`;
+          }
           return this.scheduler.reason || '当前为手动模式，只会执行你在后台点击的任务。';
         },
-        dataStartDate() { return this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || ''; },
+        frontendPayloadSchedulerText() {
+          if (!this.frontendPayloadPolicy.precompute_enabled) return '手动';
+          return this.shortTime(this.scheduler.next_frontend_payload_precompute_at);
+        },
+        dataStartDate() {
+          const bounds = this.status.data_date_bounds || {};
+          return this.status.first_data_date || bounds.first || this.scheduler.data_backfill_start_date || this.timelineForm.start_date || this.dataFillForm.start_date || '';
+        },
         appVersion() { return this.status.frontend_version || this.status.version || '0.0.0'; },
         isEvolutionRunning() { return this.evolving || this.evolutionStatus.status === 'running'; },
         isEvolutionPaused() { return this.evolutionStatus.status === 'paused' || Boolean(this.evolutionStatus.pause_requested); },
@@ -2004,6 +2183,7 @@
         coverageTargets() { return this.coverage.targets || []; },
         aiFailureItems() { return this.aiFailures.items || []; },
         aiRecordItems() { return this.aiRecords.items || []; },
+        strategyRuntimeRows() { return this.strategyRuntimeMatrix.items || []; },
         databaseTables() { return this.database.tables || []; },
         databaseColumns() { return (this.databaseTable.columns || []).map(item => item.name || item); },
         databaseRows() { return this.databaseTable.rows || []; },
@@ -2110,8 +2290,9 @@
           if (value === 'users') {
             this.fetchFrontendUsers();
           }
-          if (value === 'strategy' && !this.evolutionTraceCandidates.length) {
-            this.loadEvolutionTrace(true);
+          if (value === 'strategy') {
+            if (!this.strategyRuntimeRows.length) this.loadStrategyRuntimeMatrix(true);
+            if (!this.evolutionTraceCandidates.length) this.loadEvolutionTrace(true);
           }
         },
       },
@@ -2183,6 +2364,17 @@
           error.body = text;
           return error;
         },
+        async readJsonResponse(res) {
+          const text = await res.text();
+          if (this.isHtmlErrorBody(text)) {
+            throw this.makeHttpError(res, text);
+          }
+          try {
+            return text ? JSON.parse(text) : {};
+          } catch (err) {
+            throw this.makeHttpError(res, text || String(err.message || err));
+          }
+        },
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
@@ -2197,7 +2389,7 @@
             }
             throw this.makeHttpError(res, text);
           }
-          return await res.json();
+          return await this.readJsonResponse(res);
         },
         userAccountDiagnostic(user) {
           return ((user || {}).account_diagnostic || {});
@@ -2233,7 +2425,7 @@
           try {
             const res = await this.fetchWithTimeout('/api/auth/status', { cache: 'no-store' }, 8000);
             if (!res.ok) throw this.makeHttpError(res, await res.text());
-            const status = await res.json();
+            const status = await this.readJsonResponse(res);
             this.auth.setupRequired = Boolean(status.setup_required);
             shouldLoadAdmin = Boolean(this.auth.token);
           } catch (err) {
@@ -2414,6 +2606,7 @@
           try {
             await this.loadAdminSnapshot(quiet, true);
             if (this.activeTab === 'trading') await this.loadTradingAccount(true);
+            if (this.activeTab === 'strategy') await this.loadStrategyRuntimeMatrix(true);
             return;
           } catch (err) {
             this.clientError = String(err.message || err);
@@ -2423,11 +2616,12 @@
         },
         applyAdminSnapshot(snapshot) {
           this.status = snapshot.status_payload || this.status;
-          const dataDate = this.status.data_date || this.status.latest_event_date || '';
+          const dataDate = this.status.latest_data_date || this.status.data_date || this.status.latest_event_date || '';
           if (dataDate && (!this.asOf || this.asOf > dataDate)) this.asOf = dataDate;
           this.jobStatus = snapshot.jobs || this.jobStatus;
-          if (!this.timelineForm.start_date && this.scheduler.data_backfill_start_date) this.timelineForm.start_date = this.scheduler.data_backfill_start_date;
-          if ((!this.dataFillForm.start_date || this.dataFillForm.start_date === '2026-03-01') && this.scheduler.data_backfill_start_date) this.dataFillForm.start_date = this.scheduler.data_backfill_start_date;
+          const serverStartDate = this.dataStartDate;
+          if (!this.timelineForm.start_date && serverStartDate) this.timelineForm.start_date = serverStartDate;
+          if ((!this.dataFillForm.start_date || this.dataFillForm.start_date === '2026-03-01') && serverStartDate) this.dataFillForm.start_date = serverStartDate;
           this.biyingStatus = snapshot.biying || this.biyingStatus;
           this.lhbStatus = snapshot.lhb || ((snapshot.jobs || {}).lhb) || this.lhbStatus;
           this.aiUsage = snapshot.ai_usage || this.aiUsage;
@@ -2505,10 +2699,23 @@
           await nextTick();
           this.renderEquityChart();
         },
+        async loadStrategyRuntimeMatrix(quiet = true) {
+          this.strategyRuntimeLoading = !quiet;
+          try {
+            const q = new URLSearchParams({ limit_models: '80', include_signals: 'true' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            this.strategyRuntimeMatrix = await this.api(`/api/admin/strategy_runtime/matrix?${q.toString()}`);
+          } catch (err) {
+            if (!quiet) this.clientError = String(err.message || err);
+          } finally {
+            this.strategyRuntimeLoading = false;
+          }
+        },
         async loadDetailData(quiet = true) {
           try {
             await this.loadAdminSnapshot(quiet, true);
             if (this.activeTab === 'trading') await this.loadTradingAccount(true);
+            if (this.activeTab === 'strategy') await this.loadStrategyRuntimeMatrix(true);
           } catch (err) {
             if (!quiet) this.clientError = String(err.message || err);
           }
@@ -2861,6 +3068,7 @@
               market_codes: String(this.dataFillForm.max_codes || 200),
               notify: 'true',
               background: 'true',
+              process: 'true',
             });
             if (this.dataFillForm.start_date || this.dataStartDate) q.set('start_date', this.dataFillForm.start_date || this.dataStartDate);
             if (this.dataFillForm.end_date || this.asOf) q.set('end_date', this.dataFillForm.end_date || this.asOf);
@@ -2877,7 +3085,7 @@
           if (this.isJobRunning('news_fetch') || this.isJobPaused('news_fetch')) return this.pauseOrResumeJob('news_fetch');
           this.newsFetching = true;
           try {
-            await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20&background=true', { method: 'POST' });
+            await this.api('/api/jobs/news/fetch?hours=24&pages=8&page_size=20&background=true&process=true', { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
           } finally {
@@ -2888,7 +3096,7 @@
           if (this.isJobRunning('ai_analysis') || this.isJobPaused('ai_analysis')) return this.pauseOrResumeJob('ai_analysis');
           this.aiAnalyzing = true;
           try {
-            const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4', background: 'true' });
+            const q = new URLSearchParams({ as_of: this.asOf || '', max_items: '12', batch_size: '4', background: 'true', process: 'true' });
             await this.api(`/api/jobs/ai/analyze?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
@@ -2907,6 +3115,7 @@
               force: String(Boolean(this.syncForm.force)),
               include_latest: 'true',
               background: 'true',
+              process: 'true',
             });
             const result = await this.api(`/api/jobs/market/sync?${q.toString()}`, { method: 'POST' });
             this.syncResult = (result.job || {}).last_result || result;
@@ -2926,6 +3135,7 @@
               max_codes: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
               background: 'true',
+              process: 'true',
             });
             const result = await this.api(`/api/data/kline/fill?${q.toString()}`, { method: 'POST' });
             this.dataManageResult = (result.job || {}).last_result || result;
@@ -2947,6 +3157,7 @@
               max_stock_days: String(this.dataFillForm.max_codes || 300),
               force: String(Boolean(this.dataFillForm.force)),
               background: 'true',
+              process: 'true',
             });
             const result = await this.api(`/api/data/lhb/sync?${q.toString()}`, { method: 'POST' });
             this.dataManageResult = (result.job || {}).last_result || result;
@@ -2962,7 +3173,7 @@
           if (this.isJobRunning('trade_cycle') || this.isJobPaused('trade_cycle')) return this.pauseOrResumeJob('trade_cycle');
           this.runningTrade = true;
           try {
-            const q = new URLSearchParams({ notify: 'true', background: 'true' });
+            const q = new URLSearchParams({ notify: 'true', background: 'true', process: 'true' });
             if (this.asOf) q.set('date', this.asOf);
             await this.api(`/api/jobs/trading/run?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
@@ -2993,13 +3204,27 @@
           if (this.isJobRunning('frontend_payload_precompute') || this.isJobPaused('frontend_payload_precompute')) return this.pauseOrResumeJob('frontend_payload_precompute');
           this.precomputingFrontend = true;
           try {
-            const q = new URLSearchParams({ background: 'true', process: 'true', force: 'true', limit_days: '120', top_n: '30' });
+            const q = new URLSearchParams({ background: 'true', process: 'true', force: 'false', limit_users: '8', limit_days: '30', top_n: '30', max_seconds: '20' });
             if (this.asOf) q.set('as_of', this.asOf);
             await this.api(`/api/jobs/frontend/precompute?${q.toString()}`, { method: 'POST' });
             await this.refreshAll();
             if (!this.liveConnected) await this.fetchLogs();
           } finally {
             this.precomputingFrontend = false;
+          }
+        },
+        async precomputeFrontendAccounts() {
+          if (this.isJobRunning('frontend_account_precompute') || this.isJobPaused('frontend_account_precompute')) return this.pauseOrResumeJob('frontend_account_precompute');
+          this.precomputingAccounts = true;
+          try {
+            const q = new URLSearchParams({ background: 'true', process: 'true', force: 'false', limit: '160', limit_users: '50' });
+            if (this.asOf) q.set('as_of', this.asOf);
+            if (Number((this.frontendAccountQueue || {}).queued || 0) > 0) q.set('drain_queue', 'true');
+            await this.api(`/api/jobs/frontend/account_precompute?${q.toString()}`, { method: 'POST' });
+            await this.refreshAll();
+            if (!this.liveConnected) await this.fetchLogs();
+          } finally {
+            this.precomputingAccounts = false;
           }
         },
         async testEmail() {
@@ -3200,7 +3425,10 @@
           }
         },
         async startScheduler() {
-          if (!window.confirm('启动自动调度后，服务器会按间隔自动执行新闻、AI、补数、交易和前台预计算；策略复盘、训练和回测不会自动执行。确认启动吗？')) return;
+          const message = this.frontendPayloadPolicy.precompute_enabled
+            ? '启动自动调度后，服务器会按间隔自动执行新闻、AI、补数、交易和前台预计算；策略复盘、训练和回测不会自动执行。确认启动吗？'
+            : '启动自动调度后，服务器会按间隔自动执行新闻、AI、补数和交易；前台预计算、策略复盘、训练和回测仍然只手动触发。确认启动吗？';
+          if (!window.confirm(message)) return;
           this.schedulerWorking = true;
           try {
             this.adminResult = await this.api('/api/jobs/scheduler/start', { method: 'POST' });
@@ -3282,7 +3510,7 @@
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.asOf) q.set('as_of', this.asOf);
             this.fitResult = await this.api(`/api/quant/fit_strategy?${q.toString()}`, { method: 'POST' });
-            if (applyBest) await this.refreshAll();
+            if (applyBest && this.fitResult.status !== 'pending') await this.refreshAll();
           } finally {
             this.fitting = false;
           }
@@ -3371,6 +3599,10 @@
               limit: '0',
               recompute: String(Boolean(recompute)),
             });
+            if (recompute) {
+              q.set('force', 'true');
+              q.set('manual', 'true');
+            }
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
             this.selectedStrategyBacktest = await this.api(`/api/quant/model/backtest?${q.toString()}`);
@@ -3401,7 +3633,7 @@
           this.backtestLoading = !quiet;
           try {
             this.ensureTimelineFormDefaults();
-            const q = new URLSearchParams({ auto_fill: 'false', limit: '500', mode: this.tradeMode || 'intraday', recompute: 'true' });
+            const q = new URLSearchParams({ auto_fill: 'false', limit: '500', mode: this.tradeMode || 'intraday', recompute: 'true', force: 'true', manual: 'true' });
             if (this.timelineForm.model_id) q.set('model_id', this.timelineForm.model_id);
             if (this.timelineForm.start_date || this.dataStartDate) q.set('start_date', this.timelineForm.start_date || this.dataStartDate);
             if (this.timelineForm.end_date || this.asOf) q.set('end_date', this.timelineForm.end_date || this.asOf);
@@ -3510,11 +3742,23 @@
           if (key === 'kline_fill') return `日K补齐：${start} 到 ${end}，上限 ${payload.max_codes || '-'}，请求 ${result.requested || 0}，新增 ${result.added_rows || 0}`;
           if (key === 'lhb_sync') return `龙虎榜同步：${start} 到 ${end}，股票日 ${result.requested_stock_days || 0}，席位 ${result.seat_rows_fetched || 0}`;
           if (key === 'trade_cycle') return `交易循环：日期 ${payload.date || result.date || this.asOf || '-'}，交易 ${result.trades || 0}，买入 ${result.buys || 0}，卖出 ${result.sells || 0}`;
+          if (key === 'quant_timeline') return `策略时间线：${result.strategy_name || payload.model_id || '默认参数'}，收益 ${this.pct(result.return_pct)}，成交 ${result.trade_count || 0}，范围 ${start} 到 ${end}`;
+          if (key === 'quant_backtest') return `通用回测：收益 ${this.pct(result.return_pct)}，成交 ${result.trade_count || result.trades || 0}，范围 ${start} 到 ${end}`;
+          if (key === 'fit_strategy') return `参数拟合：最佳 ${result.best_name || ((result.best || {}).name) || '-'}，目标 ${this.fixed(result.objective || ((result.best || {}).objective))}，应用 ${result.applied ? '已应用' : '未应用'}，范围 ${start} 到 ${end}`;
           if (key === 'strategy_replay') {
             const modelCount = result.model_count || payload.target_count || 0;
             const requestedStart = result.requested_start_date || payload.requested_start_date || start;
             const requestedEnd = result.requested_end_date || payload.requested_end_date || end;
             return `策略复盘：${payload.target_scope || result.target_scope || '全部策略'}，${modelCount} 个；本批 ${start} 到 ${end}，请求范围 ${requestedStart} 到 ${requestedEnd}，模式 ${result.mode || payload.mode || '-'}`;
+          }
+          if (key === 'model_backtest') return `模型回测：${result.model_name || payload.model_name || payload.model_id || '-'}，收益 ${this.pct(result.return_pct)}，成交 ${result.trade_count || 0}，范围 ${start} 到 ${end}`;
+          if (key === 'frontend_payload_precompute') return `前台预计算：推荐/日计划缓存 ${result.cache_count || result.written || 0}，用户 ${result.user_count || payload.limit_users || 0}，范围 ${start} 到 ${end}`;
+          if (key === 'data_coverage') return `数据覆盖率：目标 ${result.target_count || payload.top_n || 0}，日K ${this.ratioPct(result.daily_ratio)}，分时 ${this.ratioPct(result.minute_ratio)}，日期 ${result.as_of || payload.as_of || this.asOf || '-'}`;
+          if (key === 'frontend_account_precompute') {
+            const queue = this.frontendAccountQueue || {};
+            const lock = queue.lock || {};
+            const lockText = lock.exists ? (lock.stale ? `锁陈旧 ${lock.age_ms || 0} ms` : `锁占用 ${lock.age_ms || 0} ms`) : '无锁';
+            return `前台账户预热：用户 ${result.user_count || 0}，生成 ${result.saved || 0}，命中 ${result.cached || 0}，待生成 ${result.pending || 0}，错误 ${result.error_count || 0}；队列 ${queue.queued || 0}，${lockText}`;
           }
           if (key === 'strategy_evolution') return `模型 ${(result.models || []).length || 0}，最佳收益 ${this.pct(((result.best_model || result.best || {}).return_pct))}`;
           return '-';
@@ -3525,7 +3769,31 @@
           if (text === 'ok') return 'bg-emerald-100 text-emerald-800';
           if (text === 'stopped' || text === 'stop_requested' || text === 'paused') return 'bg-amber-100 text-amber-800';
           if (text === 'failed') return 'bg-red-100 text-red-800';
+          if (text === 'busy') return 'bg-amber-100 text-amber-800';
           return 'bg-neutral-100 text-neutral-700';
+        },
+        strategyRuntimeStatusText(status) {
+          const labels = {
+            ready: '已落库',
+            signals_only: '仅有信号',
+            missing: '缺运行结果',
+          };
+          return labels[String(status || '').toLowerCase()] || '未知';
+        },
+        strategyRuntimeStatusClass(status) {
+          const text = String(status || '').toLowerCase();
+          if (text === 'ready') return 'bg-emerald-100 text-emerald-800';
+          if (text === 'signals_only') return 'bg-amber-100 text-amber-800';
+          if (text === 'missing') return 'bg-red-100 text-red-800';
+          return 'bg-neutral-100 text-neutral-700';
+        },
+        strategyCapitalRange(row) {
+          const min = Number((row || {}).capital_min || 0);
+          const max = Number((row || {}).capital_max || 0);
+          if (min > 0 && max > 0) return `${this.money(min)} - ${this.money(max)}`;
+          if (min > 0) return `${this.money(min)} 以上`;
+          if (max > 0) return `${this.money(max)} 以下`;
+          return '-';
         },
         jobStatusText(status) {
           const labels = {
@@ -3538,6 +3806,7 @@
             idle: '空闲',
             disabled: '已禁用',
             pending: '未开始',
+            busy: '重任务占用',
           };
           return labels[String(status || 'pending').toLowerCase()] || String(status || '未开始');
         },
@@ -3626,8 +3895,14 @@
             kline_fill: '日K补齐',
             lhb_sync: '龙虎榜同步',
             trade_cycle: '交易循环',
+            quant_timeline: '策略时间线',
+            quant_backtest: '通用回测',
+            fit_strategy: '参数拟合',
             strategy_replay: '策略复盘',
+            model_backtest: '模型回测',
             frontend_payload_precompute: '前台预计算',
+            frontend_account_precompute: '前台账户预热',
+            data_coverage: '数据覆盖率',
             system_startup: '系统启动',
             admin_config: '配置保存',
             admin_backup: '数据备份',

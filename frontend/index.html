@@ -316,16 +316,6 @@
               <div class="value text-base">{{ shortTime(scheduler.next_news_fetch_at) }}</div>
             </div>
           </div>
-          <div class="mobile-log-list">
-            <div v-for="item in recentLogs" :key="`m-${item.ts}-${item.job}-${item.message}`" class="mobile-log-row">
-              <div>
-                <div class="msg">{{ item.message || '-' }}</div>
-                <div class="meta">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
-              </div>
-              <div class="meta shrink-0">{{ shortTime(item.ts) }}</div>
-            </div>
-            <div v-if="!recentLogs.length" class="mobile-log-row text-neutral-500 text-sm">暂无运行日志</div>
-          </div>
         </section>
 
         <section v-if="isLoggedIn" v-show="mobileView === 'buy'" class="mobile-panel">
@@ -392,7 +382,7 @@
               </div>
             </div>
           </article>
-          <div v-if="!positions.length" class="p-10 text-center text-neutral-500 text-sm">暂无持仓</div>
+          <div v-if="!positions.length" class="p-10 text-center text-neutral-500 text-sm">{{ accountPending ? pendingAccountText : '暂无持仓' }}</div>
         </section>
 
         <section v-if="isLoggedIn" v-show="mobileView === 'deals'" class="mobile-panel">
@@ -426,7 +416,7 @@
               </div>
               <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
             </article>
-            <div v-if="!historyDeals.length" class="p-10 text-center text-neutral-500 text-sm">暂无历史成交</div>
+            <div v-if="!historyDeals.length" class="p-10 text-center text-neutral-500 text-sm">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</div>
           </div>
           <div v-show="activeTab === 'delivery'">
             <article v-for="record in deliveryRecords" :key="'m-delivery-' + record.deal_id" class="deal-row">
@@ -446,7 +436,7 @@
                 </div>
               </div>
             </article>
-            <div v-if="!deliveryRecords.length" class="p-10 text-center text-neutral-500 text-sm">暂无交割记录</div>
+            <div v-if="!deliveryRecords.length" class="p-10 text-center text-neutral-500 text-sm">{{ accountPending ? pendingAccountText : '暂无交割记录' }}</div>
           </div>
           <div v-show="activeTab === 'history'" class="p-4 space-y-3">
             <article v-for="day in historyDays.slice(0, 8)" :key="'m-history-' + day.date" class="summary-tile">
@@ -663,6 +653,11 @@
         当前交易日为 {{ asOf }}，本地新闻/AI事件最新到 {{ dataDate }}。今日推荐会沿用截至当前交易日可见的最新事件，直到同步到新的新闻和行情数据。
       </section>
 
+      <section v-if="isLoggedIn && accountPending" class="bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div>{{ pendingAccountText }}</div>
+        <button class="h-8 px-3 border border-amber-300 bg-white text-amber-900" @click="loadMarketData(true)">刷新账户</button>
+      </section>
+
       <section v-if="isLoggedIn" class="mobile-page bg-white border border-neutral-300 p-4" :class="{ 'active-mobile': mobileView === 'strategy' }">
         <div class="grid grid-cols-1 lg:grid-cols-[1fr_220px_180px] gap-3 items-end">
           <div>
@@ -724,16 +719,6 @@
               <div class="font-semibold">{{ shortTime(scheduler.next_news_fetch_at) }}</div>
             </div>
           </div>
-        </div>
-        <div class="grid grid-cols-1 lg:grid-cols-3 divide-y lg:divide-y-0 lg:divide-x divide-neutral-100">
-          <div v-for="item in recentLogs" :key="`${item.ts}-${item.job}-${item.message}`" class="p-3 text-sm">
-            <div class="flex items-center justify-between gap-2">
-              <span class="font-semibold">{{ item.message || '-' }}</span>
-              <span class="text-xs text-neutral-500">{{ shortTime(item.ts) }}</span>
-            </div>
-            <div class="text-xs text-neutral-500 mt-1">{{ item.job || 'system' }} · {{ item.stage || '-' }}</div>
-          </div>
-          <div v-if="!recentLogs.length" class="p-3 text-sm text-neutral-500">暂无运行日志</div>
         </div>
       </section>
 
@@ -958,7 +943,7 @@
                 <span v-if="pos.frozen_qty" class="text-orange-700">T+1冻结 {{ qty(pos.frozen_qty) }}</span>
               </div>
             </article>
-            <div v-if="!positions.length" class="px-4 py-10 text-center text-neutral-500">暂无持仓</div>
+            <div v-if="!positions.length" class="px-4 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无持仓' }}</div>
           </div>
           <div class="table-wrap desktop-mobile-table overflow-auto max-h-[510px]">
             <table class="w-full text-sm">
@@ -992,7 +977,7 @@
                   <td class="px-3 py-3 text-right font-semibold" :class="numClass(pos.pnl_pct)">{{ pct(pos.pnl_pct) }}</td>
                 </tr>
                 <tr v-if="!positions.length">
-                  <td colspan="8" class="px-3 py-10 text-center text-neutral-500">暂无持仓</td>
+                  <td colspan="8" class="px-3 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无持仓' }}</td>
                 </tr>
               </tbody>
             </table>
@@ -1040,7 +1025,7 @@
             </div>
             <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
           </article>
-          <div v-if="!historyDeals.length" class="px-4 py-10 text-center text-neutral-500">暂无历史成交</div>
+          <div v-if="!historyDeals.length" class="px-4 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</div>
         </div>
         <div v-show="activeTab === 'deals'" class="table-wrap desktop-mobile-table overflow-auto max-h-[560px]">
           <table class="w-full text-sm">
@@ -1070,7 +1055,7 @@
                 <td class="px-3 py-2 line-clamp-2">{{ deal.reason || '-' }}</td>
               </tr>
               <tr v-if="!historyDeals.length">
-                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无历史成交</td>
+                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</td>
               </tr>
             </tbody>
           </table>
@@ -1103,7 +1088,7 @@
               </div>
             </div>
           </article>
-          <div v-if="!deliveryRecords.length" class="px-4 py-10 text-center text-neutral-500">暂无交割记录</div>
+          <div v-if="!deliveryRecords.length" class="px-4 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无交割记录' }}</div>
         </div>
         <div v-show="activeTab === 'delivery'" class="table-wrap desktop-mobile-table overflow-auto max-h-[560px]">
           <table class="w-full text-sm">
@@ -1137,7 +1122,7 @@
                 <td class="px-3 py-2 text-right" :class="numClass(record.realized_pnl)">{{ money(record.realized_pnl) }}</td>
               </tr>
               <tr v-if="!deliveryRecords.length">
-                <td colspan="11" class="px-3 py-10 text-center text-neutral-500">暂无交割记录</td>
+                <td colspan="11" class="px-3 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无交割记录' }}</td>
               </tr>
             </tbody>
           </table>
@@ -1230,7 +1215,6 @@
           accountView: {},
           status: {},
           jobStatus: {},
-          jobLogs: {},
           recommendations: {},
           strategyModels: {},
           userProfile: { simulated_cash: 10000, strategy_model_id: 'capital_10000', follow_start_date: '' },
@@ -1254,8 +1238,19 @@
         appVersion() { return this.status.frontend_version || this.status.version || '0.0.0'; },
         marketMood() { return this.marketSentiment || {}; },
         account() { return this.accountView.account || {}; },
+        accountPending() {
+          return Boolean(this.accountView.frontend_account_deferred || this.accountView.status === 'pending' || this.account.status === 'pending');
+        },
+        pendingAccountText() {
+          const precompute = this.accountView.account_precompute || {};
+          if (precompute.deduped) return '账户运行结果待生成，系统已存在相同的账户预热请求，正在避免重复排队。';
+          if (precompute.worker_start_pending) return '账户运行结果待生成，系统已自动加入账户预热队列，并正在后台启动预热任务。';
+          if (precompute.worker_started) return '账户运行结果待生成，后台账户预热任务已启动，请稍后刷新。';
+          if (precompute.status === 'queued_async') return '账户运行结果待生成，系统已接受账户预热请求，正在后台写入预热队列。';
+          if (precompute.queued) return '账户运行结果待生成，账户预热已排队，请稍后刷新。';
+          return this.accountView.message || '账户运行结果待生成，请先在后台手动运行策略复盘，或导入本地策略运行结果小包。';
+        },
         scheduler() { return this.jobStatus.scheduler || {}; },
-        recentLogs() { return (this.jobLogs.items || []).slice(0, 3); },
         dataDate() { return this.status.data_date || this.status.latest_event_date || ''; },
         latestNews() { return this.newsFeed.items || []; },
         structuredEvents() { return this.newsFeed.events || []; },
@@ -1428,6 +1423,17 @@
           error.body = text;
           return error;
         },
+        async readJsonResponse(res) {
+          const text = await res.text();
+          if (this.isHtmlErrorBody(text)) {
+            throw this.makeHttpError(res, text);
+          }
+          try {
+            return text ? JSON.parse(text) : {};
+          } catch (err) {
+            throw this.makeHttpError(res, text || String(err.message || err));
+          }
+        },
         async api(url, options = {}) {
           const headers = new Headers(options.headers || {});
           if (this.auth.token) headers.set('Authorization', `Bearer ${this.auth.token}`);
@@ -1441,13 +1447,13 @@
             }
             throw this.makeHttpError(res, text);
           }
-          return await res.json();
+          return await this.readJsonResponse(res);
         },
         async initAuth() {
           try {
             const res = await this.fetchWithTimeout('/api/auth/status', { cache: 'no-store' }, 8000);
             if (!res.ok) throw this.makeHttpError(res, await res.text());
-            const status = await res.json();
+            const status = await this.readJsonResponse(res);
             this.auth.setupRequired = Boolean(status.setup_required);
           } catch (err) {
             this.auth.error = String(err.message || err);
@@ -1556,7 +1562,7 @@
               strategy_model_id: String(modelId || this.profileForm.strategy_model_id || this.userProfile.strategy_model_id || 'capital_10000'),
               auto_recommend: Boolean(options.autoRecommend || !modelId),
             };
-            const result = await this.api('/api/front/profile', {
+            const result = await this.api('/api/front/profile?include_catalog=false', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload),
@@ -1565,33 +1571,62 @@
             this.profileForm = { ...this.profileForm, ...this.userProfile };
             this.followedModel = result.followed_model || this.followedModel;
             if (result.strategy_models) this.strategyModels = result.strategy_models;
-            this.profileMessage = `已保存，正在同步 ${this.followedModelName} 的持仓`;
-            this.accountView = {};
+            const precomputeQueued = Boolean(result.account_precompute_queued);
+            this.profileMessage = `已保存，当前跟随：${this.followedModelName}`;
+            this.accountView = {
+              status: 'pending',
+              frontend_account_deferred: true,
+              strategy_account_cache: 'miss_deferred',
+              strategy_account_source: 'pending_profile_switch',
+              follow_start_date: this.userProfile.follow_start_date || '',
+              account: {
+                status: 'pending',
+                initial_cash: Number(this.userProfile.simulated_cash || payload.simulated_cash || 10000),
+                total_asset: Number(this.userProfile.simulated_cash || payload.simulated_cash || 10000),
+                available_cash: Number(this.userProfile.simulated_cash || payload.simulated_cash || 10000),
+                return_pct: 0,
+              },
+              positions: [],
+              history_deals: [],
+              delivery_records: [],
+              daily_settlements: [],
+              account_precompute: result.account_precompute || {},
+              account_precompute_queued: precomputeQueued,
+              message: '策略已切换，账户结果正在等待后台预热或手动刷新。',
+            };
             this.recommendations = {};
             this.plan = {};
-            await this.loadMarketData(false, true);
-            this.profileMessage = `已同步，当前跟随：${this.followedModelName}`;
-            this.loadAll().catch(() => {});
-            if (['overview', 'buy'].includes(this.mobileView)) this.loadRecommendations(true);
-            if (this.mobileView === 'buy') this.loadPlan(true);
+            const shouldSyncAccount = Boolean(options.syncAccount);
+            if (shouldSyncAccount) {
+              this.loadMarketData(false, false)
+                .then(() => { this.profileMessage = `已同步，当前跟随：${this.followedModelName}`; })
+                .catch((err) => { this.profileMessage = `已保存，账户同步稍后重试：${String(err.message || err)}`; });
+            } else {
+              this.profileMessage = `已保存，当前跟随：${this.followedModelName}；账户会由后台预热或手动刷新`;
+            }
+            if (this.mobileView === 'buy') {
+              this.loadRecommendations(true);
+              this.loadPlan(true);
+            }
+            if (precomputeQueued) this.profileMessage = `${this.profileMessage}；账户预热已排队`;
           } catch (err) {
             this.profileMessage = String(err.message || err);
           } finally {
             this.profileSaving = false;
           }
         },
-        async loadAll() {
+        async loadAll(options = {}) {
           this.loading = true;
           try {
             const q = new URLSearchParams({ mobile: String(window.innerWidth <= 767) });
             q.set('light', 'true');
+            if (options.includeCatalog) q.set('include_catalog', 'true');
             if (this.asOf) q.set('as_of', this.asOf);
             let snapshotPath = '/api/front/public_snapshot';
             if (this.isLoggedIn) snapshotPath = '/api/front/snapshot';
             const snapshot = await this.api(`${snapshotPath}?${q.toString()}`);
             this.status = snapshot.status_payload || {};
             this.jobStatus = snapshot.jobs || {};
-            this.jobLogs = snapshot.logs || {};
             if (snapshot.trading_account) this.accountView = snapshot.trading_account;
             if (snapshot.news) this.newsFeed = snapshot.news;
             if (snapshot.recommendations) this.recommendations = snapshot.recommendations;
@@ -1605,6 +1640,20 @@
             this.loadVisibleDetails();
           } finally {
             this.loading = false;
+          }
+        },
+        async loadStrategyModels(quiet = false) {
+          try {
+            if (!this.isLoggedIn) return;
+            const payload = await this.api('/api/front/strategy_models');
+            if (payload.strategy_models) this.strategyModels = payload.strategy_models;
+            if (payload.frontend_profile) {
+              this.userProfile = { ...this.userProfile, ...payload.frontend_profile };
+              this.profileForm = { ...this.profileForm, ...this.userProfile };
+            }
+            this.followedModel = payload.followed_model || this.followedModel;
+          } catch (err) {
+            if (!quiet) throw err;
           }
         },
         loadVisibleDetails() {
@@ -1701,7 +1750,7 @@
           if (view === 'overview' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'buy' && !this.recommendations.items) this.loadRecommendations(true);
           if (view === 'buy' && !this.plan.as_of) this.loadPlan(true);
-          if (view === 'strategy' && !this.strategyModels.items) this.loadAll();
+          if (view === 'strategy' && !this.strategyModels.catalog_included) this.loadStrategyModels(true);
           if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
           if (view === 'news' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
           if (['positions', 'deals'].includes(view) && this.auth.token && !this.accountView.account) this.loadMarketData(true);

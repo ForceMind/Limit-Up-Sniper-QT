@@ -11,6 +11,58 @@ from app.quant.evolution import StrategyEvolution
 import app.quant.evolution as evolution_module
 
 
+def test_runtime_hot_path_indexes_exist(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    conn = evolution._connect_db()
+    try:
+        required = {
+            "strategy_runtime_snapshots": {
+                "idx_strategy_runtime_scope",
+                "idx_strategy_runtime_source",
+            },
+            "user_follow_periods": {"idx_user_follow_periods_current"},
+            "strategy_daily_signals": {
+                "idx_strategy_daily_signals_runtime",
+                "idx_strategy_daily_signals_feed",
+            },
+            "strategy_runtime_trades": {"idx_strategy_runtime_trades_runtime"},
+            "strategy_runtime_positions": {"idx_strategy_runtime_positions_runtime"},
+            "strategy_runtime_settlements": {"idx_strategy_runtime_settlements_runtime"},
+            "user_follow_snapshots": {"idx_user_follow_snapshots_profile"},
+            "user_follow_positions": {"idx_user_follow_positions_snapshot"},
+            "user_follow_trades": {"idx_user_follow_trades_snapshot"},
+        }
+        for table, expected in required.items():
+            actual = {row[1] for row in conn.execute(f"PRAGMA index_list({table})").fetchall()}
+            assert expected <= actual
+    finally:
+        conn.close()
+
+
+def test_schema_initialization_runs_once_per_database_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    original_ensure_schema = StrategyEvolution._ensure_schema
+    calls = []
+
+    def counted_ensure_schema(self, conn):
+        calls.append("ensure")
+        return original_ensure_schema(self, conn)
+
+    monkeypatch.setattr(StrategyEvolution, "_ensure_schema", counted_ensure_schema)
+    evolution = StrategyEvolution()
+    first = evolution._connect_db()
+    first.close()
+    second = evolution._connect_db()
+    try:
+        row = second.execute("SELECT COUNT(*) FROM strategy_models").fetchone()
+    finally:
+        second.close()
+
+    assert row[0] == 0
+    assert calls == ["ensure"]
+
+
 def test_candidate_records_explain_elite_selection_and_elimination():
     evolution = StrategyEvolution()
     evaluated = [
@@ -214,6 +266,62 @@ def test_user_follow_periods_close_previous_cycle_and_feed_diagnostics(tmp_path,
         assert rows[1][1] == ""
 
 
+def test_user_follow_period_closes_legacy_null_active_period(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    conn = evolution._connect_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_follow_periods
+            (period_id, username, model_id, simulated_cash, started_at, start_date,
+             ended_at, end_date, reason, source, created_at, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-null-active",
+                "alice",
+                "model-a",
+                100000,
+                "2026-05-01T09:00:00",
+                "2026-05-01",
+                "",
+                "legacy",
+                "test",
+                "2026-05-01T09:00:00",
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = evolution.record_user_follow_period(
+        "alice",
+        {
+            "simulated_cash": 100000,
+            "strategy_model_id": "model-b",
+            "follow_started_at": "2026-05-10T09:00:00",
+            "follow_start_date": "2026-05-10",
+        },
+        reason="profile_strategy_changed",
+        source="test",
+    )
+
+    assert result["status"] == "ok"
+    with sqlite3.connect(tmp_path / "quant_data.sqlite3") as conn:
+        old_ended_at = conn.execute(
+            "SELECT ended_at FROM user_follow_periods WHERE period_id = ?",
+            ("legacy-null-active",),
+        ).fetchone()[0]
+        active_count = conn.execute(
+            "SELECT COUNT(*) FROM user_follow_periods WHERE username = ? AND (ended_at IS NULL OR ended_at = '')",
+            ("alice",),
+        ).fetchone()[0]
+    assert old_ended_at
+    assert active_count == 1
+
+
 def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monkeypatch):
     monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
     evolution = StrategyEvolution()
@@ -296,6 +404,99 @@ def test_strategy_daily_runtime_persists_and_loads_follow_account(tmp_path, monk
     assert relaxed["positions"][0]["code"] == "600003"
 
 
+def test_model_signal_feed_before_earliest_date_returns_empty_without_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    model = {"id": "model-signal-a", "name": "信号测试策略", "run_id": "run-signal"}
+    params = {"account_initial_cash": 100000}
+
+    evolution.save_daily_runtime(
+        model=model,
+        params=params,
+        timeline={
+            "mode": "daily",
+            "start_date": "2026-05-10",
+            "end_date": "2026-05-10",
+            "initial_cash": 100000,
+            "trades": [],
+            "days": [
+                {
+                    "date": "2026-05-10",
+                    "signals": [{"code": "600000", "name": "浦发银行", "buy_score": 80}],
+                    "positions": [],
+                }
+            ],
+        },
+        start_date="2026-05-10",
+        end_date="2026-05-10",
+        mode="daily",
+    )
+
+    payload = evolution.model_signal_feed(as_of="2026-05-01", fallback_latest=False)
+
+    assert payload["status"] == "ok"
+    assert payload["as_of"] == "2026-05-01"
+    assert payload["data_date"] == ""
+    assert payload["model_count"] == 0
+
+
+def test_runtime_account_light_snapshot_skips_trade_hydration(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    model = {"id": "model-light-runtime", "name": "Light Runtime", "run_id": "run-light"}
+    params = {"account_initial_cash": 10000}
+    evolution.save_daily_runtime(
+        model=model,
+        params=params,
+        timeline={
+            "mode": "daily",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-01",
+            "initial_cash": 10000,
+            "trades": [
+                {"date": "2026-05-01", "time": "09:30:00", "side": "BUY", "code": "600000", "qty": 100, "price": 10, "amount": 1000}
+            ],
+            "days": [
+                {
+                    "date": "2026-05-01",
+                    "total_value": 10050,
+                    "cash": 9050,
+                    "market_value": 1000,
+                    "signals": [{"code": "600000", "buy_score": 80}],
+                    "positions": [{"code": "600000", "qty": 100, "entry_price": 10, "last_price": 10, "market_value": 1000}],
+                }
+            ],
+            "equity_curve": [{"date": "2026-05-01", "total_value": 10050, "return_pct": 0.5}],
+        },
+        start_date="2026-05-01",
+        end_date="2026-05-01",
+        mode="daily",
+    )
+
+    def fail_account_from_trades(*_args, **_kwargs):
+        raise AssertionError("light runtime account should not rebuild trades")
+
+    monkeypatch.setattr(evolution_module.quant_engine, "account_from_trades", fail_account_from_trades)
+
+    account = evolution.load_runtime_account(
+        "model-light-runtime",
+        10000,
+        "2026-05-01",
+        "2026-05-01",
+        50,
+        model_version=evolution.runtime_model_version(model),
+        params=params,
+        hydrate_trades=False,
+    )
+
+    assert account
+    assert account["runtime_snapshot_fast_path"] is True
+    assert account["strategy_account_source"] == "runtime_snapshot"
+    assert account["positions"][0]["code"] == "600000"
+    assert account["history_deals"] == []
+    assert account["runtime_trade_count"] == 1
+
+
 def test_runtime_model_summary_uses_daily_runtime_tables(tmp_path, monkeypatch):
     monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
     evolution = StrategyEvolution()
@@ -355,3 +556,69 @@ def test_runtime_model_summary_uses_daily_runtime_tables(tmp_path, monkeypatch):
     assert summaries["capital_10000"]["closed_trades"] == 1
     assert summaries["capital_10000"]["win_rate"] == 100
     assert summaries["capital_10000"]["return_pct"] == 1
+
+
+def test_daily_runtime_source_filter_excludes_non_runtime_snapshots(tmp_path, monkeypatch):
+    monkeypatch.setattr(evolution_module, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    evolution = StrategyEvolution()
+    model = {"id": "model-source-filter", "name": "来源过滤策略", "run_id": "run-source"}
+    params = {"account_initial_cash": 10000}
+    timeline = {
+        "mode": "daily",
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-01",
+        "initial_cash": 10000,
+        "trades": [],
+        "days": [
+            {
+                "date": "2026-05-01",
+                "total_value": 10100,
+                "cash": 10100,
+                "market_value": 0,
+                "signals": [{"code": "600000", "name": "浦发银行", "buy_score": 80}],
+                "positions": [],
+            }
+        ],
+    }
+
+    persisted = evolution.save_daily_runtime(
+        model=model,
+        params=params,
+        timeline=timeline,
+        start_date="2026-05-01",
+        end_date="2026-05-01",
+        mode="daily",
+    )
+    evolution.save_account_cache(
+        "model-source-filter",
+        params,
+        10000,
+        "2026-05-01",
+        "2026-05-02",
+        50,
+        {
+            "status": "ok",
+            "account": {"total_asset": 9999, "return_pct": -0.01, "position_count": 0, "deal_count": 0},
+            "positions": [],
+            "history_deals": [],
+        },
+        model_version=evolution.runtime_model_version(model),
+        source="manual_cache",
+    )
+
+    summary = evolution.runtime_model_summaries([{**model, "params": params}])["model-source-filter"]
+    account = evolution.load_runtime_account(
+        "model-source-filter",
+        10000,
+        "2026-05-01",
+        "2026-05-02",
+        50,
+        model_version=evolution.runtime_model_version(model),
+        params=params,
+    )
+
+    assert persisted["status"] == "ok"
+    assert summary["runtime_source"].startswith("daily_runtime")
+    assert summary["final_value"] == 10100
+    assert account
+    assert account["runtime_snapshot_source"].startswith("daily_runtime")

@@ -17,6 +17,11 @@ from app.quant.engine import DATA_DIR, QUANT_DB_FILE, quant_engine, read_json, s
 EVOLUTION_STATE_FILE = DATA_DIR / "strategy_evolution_state.json"
 EVOLUTION_PAUSE_FILE = DATA_DIR / "strategy_evolution_pause.json"
 EVOLUTION_STATE_MAX_INLINE_BYTES = 8 * 1024 * 1024
+STRATEGY_EVOLUTION_SCHEMA_VERSION = 2026052501
+DAILY_RUNTIME_SOURCE_PREFIX = "daily_runtime"
+DAILY_RUNTIME_SOURCE_UPPER_BOUND = "daily_runtimf"
+_SCHEMA_READY_LOCK = threading.Lock()
+_SCHEMA_READY_KEYS: set[tuple[str, int]] = set()
 MODEL_RECORD_KEYS = ("trade_records", "delivery_records", "daily_settlements", "equity_curve", "days")
 MODEL_RECORD_TYPE_KEYS = {
     "trade": "trade_records",
@@ -203,6 +208,8 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_model_date ON strategy_runtime_snapshots(model_id, as_of, start_date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_generated ON strategy_runtime_snapshots(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_scope ON strategy_runtime_snapshots(model_id, params_hash, source, generated_at, as_of);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_source ON strategy_runtime_snapshots(model_id, source, generated_at, as_of);
 
             CREATE TABLE IF NOT EXISTS user_follow_periods (
                 period_id TEXT PRIMARY KEY,
@@ -220,6 +227,7 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_user_follow_periods_user_started ON user_follow_periods(username, started_at);
             CREATE INDEX IF NOT EXISTS idx_user_follow_periods_active ON user_follow_periods(username, ended_at);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_periods_current ON user_follow_periods(username, ended_at, started_at, created_at);
 
             CREATE TABLE IF NOT EXISTS user_follow_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
@@ -241,6 +249,7 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_user_model ON user_follow_snapshots(username, model_id, follow_start_date, as_of);
             CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_generated ON user_follow_snapshots(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_snapshots_profile ON user_follow_snapshots(username, model_id, follow_start_date, initial_cash, as_of, generated_at);
 
             CREATE TABLE IF NOT EXISTS user_follow_positions (
                 position_id TEXT PRIMARY KEY,
@@ -266,6 +275,7 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_user_follow_positions_user_date ON user_follow_positions(username, as_of);
             CREATE INDEX IF NOT EXISTS idx_user_follow_positions_code_date ON user_follow_positions(code, as_of);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_positions_snapshot ON user_follow_positions(snapshot_id, market_value, code);
 
             CREATE TABLE IF NOT EXISTS user_follow_trades (
                 trade_id TEXT PRIMARY KEY,
@@ -290,6 +300,7 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_user_follow_trades_user_date ON user_follow_trades(username, date);
             CREATE INDEX IF NOT EXISTS idx_user_follow_trades_code_date ON user_follow_trades(code, date);
+            CREATE INDEX IF NOT EXISTS idx_user_follow_trades_snapshot ON user_follow_trades(snapshot_id, date, time, trade_id);
 
             CREATE TABLE IF NOT EXISTS strategy_daily_signals (
                 signal_id TEXT PRIMARY KEY,
@@ -314,6 +325,8 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_model_date ON strategy_daily_signals(model_id, date);
             CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_code_date ON strategy_daily_signals(code, date);
             CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_generated ON strategy_daily_signals(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_runtime ON strategy_daily_signals(model_id, params_hash, generated_at, date);
+            CREATE INDEX IF NOT EXISTS idx_strategy_daily_signals_feed ON strategy_daily_signals(date, model_id, generated_at, buy_score, sell_score);
 
             CREATE TABLE IF NOT EXISTS strategy_runtime_trades (
                 trade_id TEXT PRIMARY KEY,
@@ -341,6 +354,7 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_model_date ON strategy_runtime_trades(model_id, date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_code_date ON strategy_runtime_trades(code, date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_generated ON strategy_runtime_trades(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_trades_runtime ON strategy_runtime_trades(model_id, params_hash, generated_at, date, time);
 
             CREATE TABLE IF NOT EXISTS strategy_runtime_positions (
                 position_id TEXT PRIMARY KEY,
@@ -366,6 +380,7 @@ class StrategyEvolution:
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_model_date ON strategy_runtime_positions(model_id, as_of);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_code_date ON strategy_runtime_positions(code, as_of);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_generated ON strategy_runtime_positions(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_positions_runtime ON strategy_runtime_positions(model_id, params_hash, generated_at, as_of);
 
             CREATE TABLE IF NOT EXISTS strategy_runtime_settlements (
                 settlement_id TEXT PRIMARY KEY,
@@ -391,14 +406,25 @@ class StrategyEvolution:
             );
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_model_date ON strategy_runtime_settlements(model_id, date);
             CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_generated ON strategy_runtime_settlements(generated_at);
+            CREATE INDEX IF NOT EXISTS idx_strategy_runtime_settlements_runtime ON strategy_runtime_settlements(model_id, params_hash, generated_at, date);
             """
         )
 
     def _connect_db(self) -> sqlite3.Connection:
         QUANT_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        existed = QUANT_DB_FILE.exists()
         conn = sqlite3.connect(QUANT_DB_FILE)
         conn.row_factory = sqlite3.Row
-        self._ensure_schema(conn)
+        conn.execute("PRAGMA synchronous=NORMAL")
+        try:
+            schema_key = (str(QUANT_DB_FILE.resolve()), STRATEGY_EVOLUTION_SCHEMA_VERSION)
+        except Exception:
+            schema_key = (str(QUANT_DB_FILE), STRATEGY_EVOLUTION_SCHEMA_VERSION)
+        if not existed or schema_key not in _SCHEMA_READY_KEYS:
+            with _SCHEMA_READY_LOCK:
+                if not existed or schema_key not in _SCHEMA_READY_KEYS:
+                    self._ensure_schema(conn)
+                    _SCHEMA_READY_KEYS.add(schema_key)
         return conn
 
     def _run_id(self, result: Dict[str, Any]) -> str:
@@ -768,44 +794,88 @@ class StrategyEvolution:
         items: List[Dict[str, Any]] = []
         counts_by_model = self._load_model_record_counts([str(row["model_id"] or "") for row in rows])
         for row in rows:
-            item: Dict[str, Any] = {}
-            try:
-                params = json.loads(str(row["params_json"] or "{}"))
-            except Exception:
-                params = {}
-            try:
-                backtest = json.loads(str(row["backtest_json"] or "{}"))
-            except Exception:
-                backtest = {}
-            item.update(
-                {
-                    "id": str(row["model_id"] or item.get("id") or ""),
-                    "run_id": str(row["run_id"] or item.get("run_id") or ""),
-                    "generated_at": str(row["generated_at"] or item.get("generated_at") or ""),
-                    "rank": int(row["rank"] or 0),
-                    "name": str(row["name"] or item.get("name") or ""),
-                    "source": str(row["source"] or item.get("source") or "sqlite"),
-                    "reusable": bool(row["reusable"]),
-                    "objective": safe_float(row["objective"], item.get("objective", 0)),
-                    "return_pct": safe_float(row["return_pct"], item.get("return_pct", 0)),
-                    "max_drawdown_pct": safe_float(row["max_drawdown_pct"], item.get("max_drawdown_pct", 0)),
-                    "sharpe_ratio": safe_float(row["sharpe_ratio"], item.get("sharpe_ratio", 0)),
-                    "profit_factor": safe_float(row["profit_factor"], item.get("profit_factor", 0)),
-                    "win_rate": safe_float(row["win_rate"], item.get("win_rate", 0)),
-                    "closed_trades": int(safe_float(row["closed_trades"], item.get("closed_trades", 0))),
-                    "params": params if isinstance(params, dict) else {},
-                    "backtest": backtest if isinstance(backtest, dict) else {},
-                }
+            item = self._persisted_model_from_row(
+                row,
+                include_records=include_records,
+                record_counts=counts_by_model.get(str(row["model_id"] or ""), {}),
             )
-            record_counts = counts_by_model.get(item["id"], {})
-            if record_counts:
-                item["record_counts"] = record_counts
-            if include_records:
-                item.update(self._load_model_records(item["id"]))
-            else:
-                item = self._strip_model_records(item)
+            if not item:
+                continue
             items.append(item)
         return items
+
+    def _persisted_model_from_row(
+        self,
+        row: sqlite3.Row,
+        include_records: bool = False,
+        record_counts: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        item: Dict[str, Any] = {}
+        try:
+            params = json.loads(str(row["params_json"] or "{}"))
+        except Exception:
+            params = {}
+        try:
+            backtest = json.loads(str(row["backtest_json"] or "{}"))
+        except Exception:
+            backtest = {}
+        item.update(
+            {
+                "id": str(row["model_id"] or ""),
+                "run_id": str(row["run_id"] or ""),
+                "generated_at": str(row["generated_at"] or ""),
+                "rank": int(row["rank"] or 0),
+                "name": str(row["name"] or ""),
+                "source": str(row["source"] or "sqlite"),
+                "reusable": bool(row["reusable"]),
+                "objective": safe_float(row["objective"], 0),
+                "return_pct": safe_float(row["return_pct"], 0),
+                "max_drawdown_pct": safe_float(row["max_drawdown_pct"], 0),
+                "sharpe_ratio": safe_float(row["sharpe_ratio"], 0),
+                "profit_factor": safe_float(row["profit_factor"], 0),
+                "win_rate": safe_float(row["win_rate"], 0),
+                "closed_trades": int(safe_float(row["closed_trades"], 0)),
+                "params": params if isinstance(params, dict) else {},
+                "backtest": backtest if isinstance(backtest, dict) else {},
+            }
+        )
+        model_id = str(item.get("id") or "")
+        if not model_id:
+            return {}
+        counts = record_counts if isinstance(record_counts, dict) else self._load_model_record_counts([model_id]).get(model_id, {})
+        if counts:
+            item["record_counts"] = counts
+        if include_records:
+            item.update(self._load_model_records(model_id))
+        else:
+            item = self._strip_model_records(item)
+        return item
+
+    def _load_persisted_model(self, model_id: str, include_records: bool = False) -> Dict[str, Any]:
+        model_id = str(model_id or "").strip()
+        if not model_id or not QUANT_DB_FILE.exists():
+            return {}
+        try:
+            conn = self._connect_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT model_id, run_id, generated_at, rank, name, source, reusable,
+                           objective, return_pct, max_drawdown_pct, sharpe_ratio, profit_factor,
+                           win_rate, closed_trades, params_json, backtest_json
+                    FROM strategy_models
+                    WHERE model_id = ?
+                    LIMIT 1
+                    """,
+                    (model_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return {}
+        if not row:
+            return {}
+        return self._persisted_model_from_row(row, include_records=include_records)
 
     def _runtime_cache_ttl_seconds(self) -> int:
         return _env_int("QT_STRATEGY_ACCOUNT_CACHE_TTL_SECONDS", 1800, minimum=0, maximum=86400)
@@ -905,6 +975,9 @@ class StrategyEvolution:
             params.append(str(as_of))
         return " AND ".join(where), params
 
+    def _daily_runtime_source_filter(self) -> tuple[str, list[str]]:
+        return "source >= ? AND source < ?", [DAILY_RUNTIME_SOURCE_PREFIX, DAILY_RUNTIME_SOURCE_UPPER_BOUND]
+
     def _runtime_rows_exist(
         self,
         conn: sqlite3.Connection,
@@ -946,15 +1019,16 @@ class StrategyEvolution:
             as_of,
             params_hash=params_hash,
         )
+        source_sql, source_params = self._daily_runtime_source_filter()
         row = conn.execute(
             f"""
             SELECT generated_at
             FROM strategy_runtime_snapshots
-            WHERE {where_sql} AND source LIKE ?
+            WHERE {where_sql} AND {source_sql}
             ORDER BY generated_at DESC, as_of DESC
             LIMIT 1
             """,
-            [*params, "daily_runtime%"],
+            [*params, *source_params],
         ).fetchone()
         if not row:
             return None
@@ -1034,6 +1108,61 @@ class StrategyEvolution:
             item["scaled_to_cash"] = round(target_cash, 2)
             scaled.append(item)
         return scaled
+
+    def _runtime_snapshot_payload(
+        self,
+        snapshot_row: sqlite3.Row,
+        model_id: str,
+        selected_version: str,
+        selected_start_date: Optional[str],
+        requested_start_date: Optional[str],
+        as_of: Optional[str],
+        target_cash: float,
+        generated_at: str,
+        scope: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            loaded = json.loads(str(snapshot_row["account_json"] or "{}"))
+        except Exception:
+            return None
+        if not isinstance(loaded, dict) or not loaded:
+            return None
+        account = dict(loaded)
+        account.setdefault("status", "ok")
+        account.setdefault("as_of", str(snapshot_row["as_of"] or as_of or ""))
+        account.setdefault("start_date", str(snapshot_row["start_date"] or selected_start_date or ""))
+        positions = account.get("positions") if isinstance(account.get("positions"), list) else []
+        today_deals = account.get("today_deals") if isinstance(account.get("today_deals"), list) else []
+        history_deals = account.get("history_deals") if isinstance(account.get("history_deals"), list) else []
+        delivery_records = account.get("delivery_records") if isinstance(account.get("delivery_records"), list) else []
+        daily_settlements = account.get("daily_settlements") if isinstance(account.get("daily_settlements"), list) else []
+        account["positions"] = [dict(item) for item in positions if isinstance(item, dict)]
+        account["today_deals"] = [dict(item) for item in today_deals if isinstance(item, dict)]
+        account["history_deals"] = [dict(item) for item in history_deals if isinstance(item, dict)]
+        account["delivery_records"] = [dict(item) for item in delivery_records if isinstance(item, dict)]
+        account["daily_settlements"] = [dict(item) for item in daily_settlements if isinstance(item, dict)]
+        base_cash = safe_float(snapshot_row["initial_cash"], target_cash)
+        account["strategy_account_source"] = "runtime_snapshot"
+        account["strategy_account_cache"] = "runtime"
+        account["follow_start_date"] = str(requested_start_date or "")
+        account["runtime_data_start_date"] = selected_start_date or ""
+        account["runtime_model_id"] = model_id
+        account["runtime_model_version"] = selected_version
+        account["runtime_trade_count"] = int(safe_float(snapshot_row["deal_count"], 0))
+        account["runtime_scaled_trade_count"] = len(account.get("history_deals", []))
+        account["runtime_position_count"] = int(safe_float(snapshot_row["position_count"], 0))
+        account["runtime_scaled_from_cash"] = round(base_cash, 2)
+        account["runtime_scaled_to_cash"] = round(target_cash, 2)
+        account["runtime_generated_at"] = generated_at
+        account["runtime_fallback_latest_snapshot"] = bool(scope.get("fallback_latest_snapshot"))
+        account["runtime_relaxed_params_hash"] = bool(scope.get("relaxed_params_hash"))
+        account["runtime_relaxed_model_version"] = bool(scope.get("relaxed_model_version"))
+        account["runtime_snapshot_as_of"] = str(snapshot_row["as_of"] or "")
+        account["runtime_snapshot_source"] = str(snapshot_row["source"] or "")
+        account["runtime_snapshot_total_asset"] = round(safe_float(snapshot_row["total_asset"], 0), 2)
+        account["runtime_snapshot_return_pct"] = round(safe_float(snapshot_row["return_pct"], 0), 3)
+        account["runtime_snapshot_fast_path"] = True
+        return account
 
     def save_daily_runtime(
         self,
@@ -1366,6 +1495,7 @@ class StrategyEvolution:
         limit: int,
         model_version: str = "",
         params: Optional[Dict[str, Any]] = None,
+        hydrate_trades: bool = True,
     ) -> Optional[Dict[str, Any]]:
         if not QUANT_DB_FILE.exists():
             return None
@@ -1392,6 +1522,45 @@ class StrategyEvolution:
                 selected_start_date = scope.get("start_date") or None
                 params_hash = scope.get("params_hash", "")
                 generated_at = scope.get("generated_at", "")
+                if not hydrate_trades:
+                    snapshot_where, snapshot_params = self._runtime_date_filter(
+                        conn,
+                        "strategy_runtime_snapshots",
+                        "as_of",
+                        model_id,
+                        selected_version,
+                        selected_start_date,
+                        as_of,
+                        params_hash=params_hash,
+                    )
+                    source_sql, source_params = self._daily_runtime_source_filter()
+                    snapshot_where = f"{snapshot_where} AND {source_sql} AND generated_at = ?"
+                    snapshot_params.extend([*source_params, generated_at])
+                    snapshot_row = conn.execute(
+                        f"""
+                        SELECT as_of, start_date, source, generated_at, initial_cash, total_asset,
+                               return_pct, position_count, deal_count, account_json
+                        FROM strategy_runtime_snapshots
+                        WHERE {snapshot_where}
+                        ORDER BY as_of DESC
+                        LIMIT 1
+                        """,
+                        snapshot_params,
+                    ).fetchone()
+                    if snapshot_row:
+                        snapshot_payload = self._runtime_snapshot_payload(
+                            snapshot_row,
+                            model_id,
+                            selected_version,
+                            selected_start_date,
+                            start_date,
+                            as_of,
+                            target_cash,
+                            generated_at,
+                            scope,
+                        )
+                        if snapshot_payload:
+                            return snapshot_payload
                 where_sql, sql_params = self._runtime_date_filter(
                     conn,
                     "strategy_runtime_trades",
@@ -1472,8 +1641,9 @@ class StrategyEvolution:
                     as_of,
                     params_hash=params_hash,
                 )
-                snapshot_where = f"{snapshot_where} AND source LIKE ? AND generated_at = ?"
-                snapshot_params.extend(["daily_runtime%", generated_at])
+                source_sql, source_params = self._daily_runtime_source_filter()
+                snapshot_where = f"{snapshot_where} AND {source_sql} AND generated_at = ?"
+                snapshot_params.extend([*source_params, generated_at])
                 snapshot_row = conn.execute(
                     f"""
                     SELECT as_of, start_date, source, generated_at, initial_cash, total_asset,
@@ -1861,7 +2031,7 @@ class StrategyEvolution:
                         """
                         UPDATE user_follow_periods
                         SET ended_at = ?, end_date = ?
-                        WHERE username = ? AND COALESCE(ended_at, '') = '' AND period_id <> ?
+                        WHERE username = ? AND (ended_at IS NULL OR ended_at = '') AND period_id <> ?
                         """,
                         (now_text, now_text[:10], clean_username, period_id),
                     )
@@ -1941,7 +2111,7 @@ class StrategyEvolution:
                     SELECT period_id, username, model_id, simulated_cash, started_at, start_date,
                            ended_at, end_date, reason, source, created_at
                     FROM user_follow_periods
-                    WHERE username = ? AND COALESCE(ended_at, '') = ''
+                    WHERE username = ? AND (ended_at IS NULL OR ended_at = '')
                     ORDER BY started_at DESC, created_at DESC
                     LIMIT 1
                     """,
@@ -1956,8 +2126,8 @@ class StrategyEvolution:
                     where.append("follow_start_date = ?")
                     values.append(follow_start_date)
                 if simulated_cash > 0:
-                    where.append("ABS(initial_cash - ?) < 0.01")
-                    values.append(simulated_cash)
+                    where.append("initial_cash >= ? AND initial_cash <= ?")
+                    values.extend([simulated_cash - 0.01, simulated_cash + 0.01])
                 where_sql = " AND ".join(where)
                 snapshot = conn.execute(
                     f"""
@@ -2025,8 +2195,9 @@ class StrategyEvolution:
         if not model_id:
             return None
         params_hash = self._digest("strategy_params", params or {})[:24] if isinstance(params, dict) else ""
-        where = ["model_id = ?", "source LIKE ?"]
-        values: list[Any] = [model_id, "daily_runtime%"]
+        source_sql, source_params = self._daily_runtime_source_filter()
+        where = ["model_id = ?", source_sql]
+        values: list[Any] = [model_id, *source_params]
         if params_hash:
             where.append("params_hash = ?")
             values.append(params_hash)
@@ -2043,8 +2214,9 @@ class StrategyEvolution:
         ).fetchone()
         if not latest and params_hash:
             params_hash = ""
-            where = ["model_id = ?", "source LIKE ?"]
-            values = [model_id, "daily_runtime%"]
+            source_sql, source_params = self._daily_runtime_source_filter()
+            where = ["model_id = ?", source_sql]
+            values = [model_id, *source_params]
             where_sql = " AND ".join(where)
             latest = conn.execute(
                 f"""
@@ -2174,12 +2346,17 @@ class StrategyEvolution:
 
         conn = self._connect_db()
         try:
-            total_row = conn.execute(
-                "SELECT COUNT(*) AS count, MAX(date) AS latest_date FROM strategy_daily_signals"
+            latest_row = conn.execute(
+                """
+                SELECT date
+                FROM strategy_daily_signals
+                WHERE date > ''
+                ORDER BY date DESC
+                LIMIT 1
+                """
             ).fetchone()
-            total_available = int((total_row["count"] if isinstance(total_row, sqlite3.Row) else total_row[0]) or 0)
-            latest_date = str((total_row["latest_date"] if isinstance(total_row, sqlite3.Row) else total_row[1]) or "")
-            if total_available <= 0 or not latest_date:
+            latest_date = str((latest_row["date"] if isinstance(latest_row, sqlite3.Row) and latest_row else latest_row[0] if latest_row else "") or "")
+            if not latest_date:
                 return {
                     "status": "ok",
                     "as_of": requested_as_of,
@@ -2193,10 +2370,16 @@ class StrategyEvolution:
             data_date = latest_date
             if requested_as_of:
                 row = conn.execute(
-                    "SELECT MAX(date) AS date FROM strategy_daily_signals WHERE date <= ?",
+                    """
+                    SELECT date
+                    FROM strategy_daily_signals
+                    WHERE date <= ?
+                    ORDER BY date DESC
+                    LIMIT 1
+                    """,
                     (requested_as_of,),
                 ).fetchone()
-                candidate_date = str((row["date"] if isinstance(row, sqlite3.Row) else row[0]) or "")
+                candidate_date = str((row["date"] if isinstance(row, sqlite3.Row) and row else row[0] if row else "") or "")
                 if candidate_date:
                     data_date = candidate_date
                 elif not fallback_latest:
@@ -2554,7 +2737,10 @@ class StrategyEvolution:
                 "reusable": False,
                 "params": quant_engine.strategy_params(),
             }
-        candidates = self.models(limit=500, include_records=False).get("items", [])
+        persisted = self._load_persisted_model(model_id, include_records=include_records)
+        if persisted:
+            return persisted
+        candidates = self.status().get("models", [])
         for item in candidates if isinstance(candidates, list) else []:
             if not isinstance(item, dict) or str(item.get("id") or "") != model_id:
                 continue

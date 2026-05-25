@@ -28,7 +28,7 @@ def test_quant_engine_builds_events_and_recommendations():
 def test_quant_backtest_returns_metrics():
     engine = QuantEngine()
 
-    result = engine.backtest(hold_days=3, top_n=5)
+    result = engine.backtest(start_date="2026-05-01", end_date="2026-05-20", hold_days=3, top_n=5)
     assert result["trades"] >= 0
     assert "score_buckets" in result
     assert "58-65" in result["score_buckets"]
@@ -41,7 +41,7 @@ def test_quant_backtest_returns_metrics():
 def test_quant_walk_forward_is_chronological():
     engine = QuantEngine()
 
-    result = engine.walk_forward(hold_days=3, top_n=3)
+    result = engine.walk_forward(start_date="2026-05-01", end_date="2026-05-20", hold_days=3, top_n=3)
     dates = [day["date"] for day in result["days"]]
     assert dates == sorted(dates)
     assert result["final_value"] >= 0

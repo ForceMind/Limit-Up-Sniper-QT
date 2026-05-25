@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -233,30 +234,50 @@ def _normalize_usernames(usernames: Optional[Any]) -> List[str]:
 def precompute_frontend_payloads(
     as_of: Optional[str] = None,
     usernames: Optional[Any] = None,
-    limit_users: int = 50,
+    limit_users: int = 8,
     force: bool = False,
     lookback_days: int = 2,
     top_n: int = 30,
-    limit_days: int = 120,
+    limit_days: int = 30,
+    max_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
+    started_at = time.monotonic()
     effective_as_of = frontend_account_as_of(as_of)
     clean_usernames = _normalize_usernames(usernames)
-    clean_limit = max(1, min(int(limit_users or 50), 500))
+    clean_limit = max(1, min(int(limit_users or 8), 500))
     clean_lookback = max(1, min(int(lookback_days or 2), 20))
     clean_top_n = max(1, min(int(top_n or 30), 100))
-    clean_limit_days = max(1, min(int(limit_days or 120), 500))
+    clean_limit_days = max(1, min(int(limit_days or 30), 500))
+    clean_max_seconds = (
+        frontend_payload_cache_ttl("QT_FRONT_PAYLOAD_PRECOMPUTE_MAX_SECONDS", 20)
+        if max_seconds is None
+        else max(0, min(int(max_seconds or 0), 86400))
+    )
     effective_start = frontend_replay_start_date(effective_as_of)
-    rec_ttl = frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 900)
+    rec_ttl = frontend_payload_cache_ttl("QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS", 1800)
     plan_ttl = frontend_payload_cache_ttl("QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS", 1800)
     contexts = frontend_user_contexts(clean_usernames, limit_users=clean_limit)
     results: List[Dict[str, Any]] = []
     saved = 0
     skipped = 0
+    deferred = 0
+    processed_users = 0
+    remaining_users = 0
+    budget_exhausted = False
     errors: List[Dict[str, Any]] = []
 
-    for context in contexts:
+    def exhausted() -> bool:
+        return clean_max_seconds > 0 and time.monotonic() - started_at >= clean_max_seconds
+
+    for index, context in enumerate(contexts):
+        if exhausted():
+            budget_exhausted = True
+            remaining_users = len(contexts) - index
+            deferred += remaining_users * 2
+            break
         username = str(context.get("username") or "")
         row: Dict[str, Any] = {"username": username, "strategy_model_id": (context.get("profile") or {}).get("strategy_model_id")}
+        processed_users += 1
         try:
             rec_parts = frontend_payload_cache_parts(
                 context,
@@ -266,6 +287,10 @@ def precompute_frontend_payloads(
             if not force and load_payload_cache("front_recommendations", rec_parts, rec_ttl):
                 row["recommendations"] = "hit"
                 skipped += 1
+            elif exhausted():
+                budget_exhausted = True
+                row["recommendations"] = "deferred"
+                deferred += 1
             else:
                 with quant_engine.temporary_strategy_params(context["strategy_params"]):
                     payload = quant_engine.recommendations(as_of=effective_as_of, lookback_days=clean_lookback, top_n=clean_top_n)
@@ -283,6 +308,10 @@ def precompute_frontend_payloads(
             if not force and load_payload_cache("front_daily_plan", plan_parts, plan_ttl):
                 row["daily_plan"] = "hit"
                 skipped += 1
+            elif exhausted():
+                budget_exhausted = True
+                row["daily_plan"] = "deferred"
+                deferred += 1
             else:
                 with quant_engine.temporary_strategy_params(context["strategy_params"]):
                     payload = quant_engine.daily_plan(
@@ -301,15 +330,19 @@ def precompute_frontend_payloads(
             errors.append({"username": username, "error": str(exc)})
         results.append(row)
 
-    status = "ok" if not errors else ("partial" if saved or skipped else "error")
+    status = "ok" if not errors and not budget_exhausted else ("partial" if saved or skipped or deferred else "error")
     return {
         "status": status,
         "job": "frontend_payload_precompute",
         "as_of": effective_as_of,
         "start_date": effective_start,
         "user_count": len(contexts),
+        "processed_users": processed_users,
+        "remaining_users": remaining_users,
         "saved": saved,
         "skipped": skipped,
+        "deferred": deferred,
+        "budget_exhausted": budget_exhausted,
         "error_count": len(errors),
         "errors": errors[:20],
         "items": results,
@@ -317,6 +350,8 @@ def precompute_frontend_payloads(
         "lookback_days": clean_lookback,
         "top_n": clean_top_n,
         "limit_days": clean_limit_days,
+        "max_seconds": clean_max_seconds,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "ttl_seconds": {"front_recommendations": rec_ttl, "front_daily_plan": plan_ttl},
         "process_enabled": str(os.getenv("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED") or "").strip().lower() not in {"", "0", "false", "no", "off"},

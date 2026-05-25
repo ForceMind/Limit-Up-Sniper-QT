@@ -77,14 +77,219 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             process=False,
             lookback_days=payload.get("lookback_days") or 2,
             top_n=payload.get("top_n") or 30,
-            limit_days=payload.get("limit_days") or 120,
+            limit_days=payload.get("limit_days") or 30,
+            max_seconds=payload.get("max_seconds"),
         )
+    if job == "frontend_account_precompute":
+        from app import main as main_module
+
+        account_payload = {
+            "as_of": payload.get("as_of"),
+            "usernames": payload.get("usernames"),
+            "limit_users": payload.get("limit_users") or 50,
+            "limit": payload.get("limit") or 160,
+            "force": bool(payload.get("force")),
+            "drain_queue": bool(payload.get("drain_queue")),
+        }
+
+        def execute() -> Dict[str, Any]:
+            return main_module._precompute_frontend_accounts(**account_payload)
+
+        return job_manager.run_job("frontend_account_precompute", execute, payload=account_payload)
+    if job == "news_fetch":
+        return job_manager.run_news_fetch(
+            hours=payload.get("hours") or 12,
+            pages=payload.get("pages") or 5,
+            page_size=payload.get("page_size") or 20,
+            refresh_events=bool(payload.get("refresh_events")),
+            background=False,
+            process=False,
+        )
+    if job == "ai_analysis":
+        return job_manager.run_ai_analysis(
+            as_of=payload.get("as_of"),
+            max_items=payload.get("max_items") or 8,
+            batch_size=payload.get("batch_size") or 4,
+            background=False,
+            process=False,
+        )
+    if job == "kline_fill":
+        return job_manager.run_kline_fill(
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            max_codes=payload.get("max_codes") or 300,
+            force=bool(payload.get("force")),
+            background=False,
+            process=False,
+        )
+    if job == "lhb_sync":
+        return job_manager.run_lhb_sync(
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            max_stock_days=payload.get("max_stock_days") or 300,
+            force=bool(payload.get("force")),
+            refresh_events=bool(payload.get("refresh_events")),
+            background=False,
+            process=False,
+        )
+    if job == "market_sync":
+        return job_manager.run_market_sync(
+            date=payload.get("date"),
+            source=str(payload.get("source") or "events"),
+            max_codes=payload.get("max_codes") or 80,
+            codes=payload.get("codes"),
+            force=bool(payload.get("force")),
+            include_latest=bool(payload.get("include_latest", True)),
+            background=False,
+            process=False,
+        )
+    if job == "trade_cycle":
+        return job_manager.run_trade_cycle(
+            date=payload.get("date"),
+            notify=bool(payload.get("notify", True)),
+            background=False,
+            process=False,
+        )
+    if job == "system_startup":
+        from app import main as main_module
+
+        target_date = str(
+            payload.get("end_date")
+            or payload.get("date")
+            or main_module.quant_engine.latest_event_date()
+            or main_module.datetime.now(main_module.ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+        ).strip()
+        replay_start_date = str(payload.get("start_date") or main_module.quant_engine.first_data_date() or "2026-03-01").strip()
+        startup_payload = {
+            "target_date": target_date,
+            "replay_start_date": replay_start_date,
+            "news_hours": payload.get("news_hours") or 24,
+            "news_pages": payload.get("news_pages") or 8,
+            "ai_items": payload.get("ai_items") or 20,
+            "market_codes": payload.get("market_codes") or 200,
+            "notify": bool(payload.get("notify", True)),
+            "run_strategy_replay": bool(payload.get("run_strategy_replay")),
+        }
+
+        def execute() -> Dict[str, Any]:
+            return main_module._run_system_startup_flow(**startup_payload)
+
+        return job_manager.run_job("system_startup", execute, payload=startup_payload)
+    if job == "data_coverage":
+        from app import main as main_module
+
+        coverage_payload = {
+            "effective_as_of": payload.get("as_of"),
+            "top_n": payload.get("top_n") or 80,
+        }
+
+        def execute() -> Dict[str, Any]:
+            result = main_module._compute_data_coverage_cached(**coverage_payload)
+            return main_module._compact_data_coverage_result(
+                result if isinstance(result, dict) else {},
+                int(coverage_payload["top_n"] or 80),
+            )
+
+        return job_manager.run_job("data_coverage", execute, payload=payload)
+    if job == "model_backtest":
+        from app import main as main_module
+
+        model_id = str(payload.get("model_id") or "active").strip() or "active"
+        model = main_module._find_strategy_model(model_id)
+        backtest_payload = {
+            "model": model,
+            "start_date": payload.get("start_date"),
+            "end_date": payload.get("end_date"),
+            "mode": payload.get("mode") or "intraday",
+            "limit": payload.get("limit") or 0,
+        }
+
+        def execute() -> Dict[str, Any]:
+            result = main_module._compute_model_backtest_cached(**backtest_payload)
+            return main_module._compact_model_backtest_result(result if isinstance(result, dict) else {})
+
+        return job_manager.run_job("model_backtest", execute, payload={**payload, "model_id": model_id})
+    if job == "quant_timeline":
+        from app import main as main_module
+
+        timeline_payload = {
+            "model_id": payload.get("model_id"),
+            "start_date": payload.get("start_date"),
+            "end_date": payload.get("end_date"),
+            "initial_cash": payload.get("initial_cash"),
+            "max_positions": payload.get("max_positions"),
+            "hold_days": payload.get("hold_days"),
+            "top_n": payload.get("top_n"),
+            "intraday": bool(payload.get("intraday")),
+            "use_daily_fallback": bool(payload.get("use_daily_fallback", True)),
+            "auto_fill": bool(payload.get("auto_fill", True)),
+        }
+
+        def execute() -> Dict[str, Any]:
+            result = main_module._compute_quant_timeline_cached(**timeline_payload)
+            return main_module._compact_quant_timeline_result(result if isinstance(result, dict) else {})
+
+        return job_manager.run_job("quant_timeline", execute, payload=timeline_payload)
+    if job == "quant_backtest":
+        from app import main as main_module
+
+        backtest_payload = {
+            "as_of": payload.get("as_of"),
+            "start_date": payload.get("start_date"),
+            "end_date": payload.get("end_date"),
+            "initial_cash": payload.get("initial_cash"),
+            "max_positions": payload.get("max_positions"),
+            "hold_days": payload.get("hold_days") or 3,
+            "top_n": payload.get("top_n") or 5,
+            "auto_fill": bool(payload.get("auto_fill")),
+        }
+
+        def execute() -> Dict[str, Any]:
+            return main_module._compute_quant_backtest_cached(**backtest_payload)
+
+        return job_manager.run_job("quant_backtest", execute, payload=backtest_payload)
+    if job == "fit_strategy":
+        from app import main as main_module
+
+        fit_payload = {
+            "as_of": payload.get("as_of"),
+            "start_date": payload.get("start_date"),
+            "end_date": payload.get("end_date"),
+            "apply_best": bool(payload.get("apply_best")),
+        }
+
+        def execute() -> Dict[str, Any]:
+            result = main_module._compute_quant_fit_strategy(**fit_payload)
+            return main_module._compact_quant_fit_strategy_result(result if isinstance(result, dict) else {})
+
+        return job_manager.run_job("fit_strategy", execute, payload=fit_payload)
     raise SystemExit(f"unsupported job: {job}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a quant job in an isolated process.")
-    parser.add_argument("--job", required=True, choices=["strategy_replay", "strategy_evolution", "frontend_payload_precompute"])
+    parser.add_argument(
+        "--job",
+        required=True,
+        choices=[
+            "strategy_replay",
+            "strategy_evolution",
+            "frontend_payload_precompute",
+            "frontend_account_precompute",
+            "news_fetch",
+            "ai_analysis",
+            "kline_fill",
+            "lhb_sync",
+            "market_sync",
+            "trade_cycle",
+            "system_startup",
+            "data_coverage",
+            "model_backtest",
+            "quant_timeline",
+            "quant_backtest",
+            "fit_strategy",
+        ],
+    )
     parser.add_argument("--payload-json", default="")
     args = parser.parse_args()
     _load_env_file()

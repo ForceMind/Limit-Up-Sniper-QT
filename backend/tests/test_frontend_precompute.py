@@ -67,6 +67,7 @@ def test_frontend_precompute_writes_recommendations_and_daily_plan(tmp_path, mon
 
     assert result["status"] == "ok"
     assert result["saved"] == 2
+    assert result["ttl_seconds"]["front_recommendations"] == 1800
     context = frontend_precompute.frontend_user_contexts(limit_users=1)[0]
     recommendations = runtime_cache.load_payload_cache(
         "front_recommendations",
@@ -75,7 +76,7 @@ def test_frontend_precompute_writes_recommendations_and_daily_plan(tmp_path, mon
             "front_recommendations",
             {"as_of": "2026-05-20", "lookback_days": 2, "top_n": 12},
         ),
-        ttl_seconds=900,
+        ttl_seconds=1800,
     )
     daily_plan = runtime_cache.load_payload_cache(
         "front_daily_plan",
@@ -89,3 +90,46 @@ def test_frontend_precompute_writes_recommendations_and_daily_plan(tmp_path, mon
 
     assert recommendations["items"][0]["affordable"] is True
     assert daily_plan["buy_list"][0]["max_buy_qty"] == 900
+
+
+def test_frontend_precompute_respects_time_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime_cache, "QUANT_DB_FILE", tmp_path / "quant_data.sqlite3")
+    monkeypatch.setattr(
+        frontend_precompute,
+        "frontend_user_summary",
+        lambda: {
+            "status": "ok",
+            "items": [
+                {
+                    "username": "alice",
+                    "created_at": "2026-05-01T09:30:00",
+                    "profile": {"simulated_cash": 10000, "strategy_model_id": "capital_10000"},
+                    "disabled": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        frontend_precompute.strategy_evolution,
+        "models",
+        lambda limit=80, include_records=False: {"status": "ok", "active": {"id": "active", "params": {}}, "items": [], "count": 0},
+    )
+    monkeypatch.setattr(frontend_precompute.quant_engine, "strategy_params", lambda updates=None: {"account_initial_cash": 10000})
+    monkeypatch.setattr(frontend_precompute.quant_engine, "strategy_source", lambda: {"type": "test"})
+    monkeypatch.setattr(frontend_precompute.quant_engine, "latest_event_date", lambda: "2026-05-20")
+    monkeypatch.setattr(frontend_precompute.quant_engine, "first_data_date", lambda: "2026-05-01")
+    monkeypatch.setattr(
+        frontend_precompute.quant_engine,
+        "recommendations",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("budget exhausted should skip heavy recommendations")),
+    )
+    ticks = iter([0, 2, 2])
+    monkeypatch.setattr(frontend_precompute.time, "monotonic", lambda: next(ticks, 2))
+
+    result = frontend_precompute.precompute_frontend_payloads(limit_users=1, max_seconds=1)
+
+    assert result["status"] == "partial"
+    assert result["budget_exhausted"] is True
+    assert result["processed_users"] == 0
+    assert result["remaining_users"] == 1
+    assert result["deferred"] == 2
