@@ -103,6 +103,7 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "frontend_account_precompute":
         from app import main as main_module
 
+        account_service = main_module._FRONTEND_ACCOUNT_PRECOMPUTE_SERVICE
         account_payload = {
             "as_of": payload.get("as_of"),
             "usernames": payload.get("usernames"),
@@ -113,7 +114,7 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         def execute() -> Dict[str, Any]:
-            return main_module._precompute_frontend_accounts(**account_payload)
+            return account_service.precompute_runtime(**account_payload)
 
         return _run_tracked_job(
             job_manager,
@@ -188,39 +189,34 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "system_startup":
         from app import main as main_module
 
-        target_date = str(
-            payload.get("end_date")
-            or payload.get("date")
-            or main_module.quant_engine.latest_event_date()
-            or main_module.datetime.now(main_module.ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-        ).strip()
-        replay_start_date = str(payload.get("start_date") or main_module.quant_engine.first_data_date() or "2026-03-01").strip()
-        startup_payload = {
-            "target_date": target_date,
-            "replay_start_date": replay_start_date,
-            "news_hours": payload.get("news_hours") or 24,
-            "news_pages": payload.get("news_pages") or 8,
-            "ai_items": payload.get("ai_items") or 20,
-            "market_codes": payload.get("market_codes") or 200,
-            "notify": bool(payload.get("notify", True)),
-            "run_strategy_replay": bool(payload.get("run_strategy_replay")),
-        }
-
-        def execute() -> Dict[str, Any]:
-            return main_module._run_system_startup_flow(**startup_payload)
-
-        return job_manager.run_job("system_startup", execute, payload=startup_payload)
+        return main_module._SYSTEM_STARTUP_SERVICE.payload(
+            date=payload.get("date"),
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            news_hours=payload.get("news_hours") or 24,
+            news_pages=payload.get("news_pages") or 8,
+            ai_items=payload.get("ai_items") or 20,
+            market_codes=payload.get("market_codes") or 200,
+            notify=bool(payload.get("notify", True)),
+            background=False,
+            process=False,
+            run_strategy_replay=bool(payload.get("run_strategy_replay")),
+        )
     if job == "data_coverage":
         from app import main as main_module
 
+        coverage_service = main_module._DATA_COVERAGE_SERVICE
         coverage_payload = {
             "effective_as_of": payload.get("as_of"),
             "top_n": payload.get("top_n") or 80,
         }
 
         def execute() -> Dict[str, Any]:
-            result = main_module._compute_data_coverage_cached(**coverage_payload)
-            return main_module._compact_data_coverage_result(
+            result = coverage_service.compute_cached(
+                coverage_payload["effective_as_of"],
+                int(coverage_payload["top_n"] or 80),
+            )
+            return coverage_service.compact_result(
                 result if isinstance(result, dict) else {},
                 int(coverage_payload["top_n"] or 80),
             )
@@ -237,8 +233,10 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "model_backtest":
         from app import main as main_module
 
+        lookup_service = main_module._STRATEGY_MODEL_LOOKUP_SERVICE
+        backtest_service = main_module._STRATEGY_MODEL_BACKTEST_SERVICE
         model_id = str(payload.get("model_id") or "active").strip() or "active"
-        model = main_module._find_strategy_model(model_id)
+        model = lookup_service.find_model(model_id)
         backtest_payload = {
             "model": model,
             "start_date": payload.get("start_date"),
@@ -248,8 +246,8 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         def execute() -> Dict[str, Any]:
-            result = main_module._compute_model_backtest_cached(**backtest_payload)
-            return main_module._compact_model_backtest_result(result if isinstance(result, dict) else {})
+            result = backtest_service.compute_cached(**backtest_payload)
+            return backtest_service.compact_result(result if isinstance(result, dict) else {})
 
         return _run_tracked_job(
             job_manager,
@@ -263,6 +261,7 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "quant_timeline":
         from app import main as main_module
 
+        timeline_service = main_module._QUANT_TIMELINE_SERVICE
         timeline_payload = {
             "model_id": payload.get("model_id"),
             "start_date": payload.get("start_date"),
@@ -277,8 +276,8 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         def execute() -> Dict[str, Any]:
-            result = main_module._compute_quant_timeline_cached(**timeline_payload)
-            return main_module._compact_quant_timeline_result(result if isinstance(result, dict) else {})
+            result = timeline_service.compute_cached(**timeline_payload)
+            return timeline_service.compact_result(result if isinstance(result, dict) else {})
 
         return _run_tracked_job(
             job_manager,
@@ -292,6 +291,7 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "quant_backtest":
         from app import main as main_module
 
+        backtest_service = main_module._QUANT_BACKTEST_SERVICE
         backtest_payload = {
             "as_of": payload.get("as_of"),
             "start_date": payload.get("start_date"),
@@ -304,7 +304,8 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         def execute() -> Dict[str, Any]:
-            return main_module._compute_quant_backtest_cached(**backtest_payload)
+            result = backtest_service.compute_cached(**backtest_payload)
+            return backtest_service.compact_result(result if isinstance(result, dict) else {})
 
         return _run_tracked_job(
             job_manager,
@@ -318,6 +319,7 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if job == "fit_strategy":
         from app import main as main_module
 
+        fit_service = main_module._FIT_STRATEGY_SERVICE
         fit_payload = {
             "as_of": payload.get("as_of"),
             "start_date": payload.get("start_date"),
@@ -326,8 +328,8 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         def execute() -> Dict[str, Any]:
-            result = main_module._compute_quant_fit_strategy(**fit_payload)
-            return main_module._compact_quant_fit_strategy_result(result if isinstance(result, dict) else {})
+            result = fit_service.compute(**fit_payload)
+            return fit_service.compact_result(result if isinstance(result, dict) else {})
 
         return _run_tracked_job(
             job_manager,
