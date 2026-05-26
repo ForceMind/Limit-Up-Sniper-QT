@@ -7,7 +7,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from app.quant.engine import LHB_HISTORY_FILE, digits6, quant_engine, safe_float
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import digits6, safe_float
+from app.quant.quant_paths import LHB_HISTORY_FILE
 
 
 EASTMONEY_DATA_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"

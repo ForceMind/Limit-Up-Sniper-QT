@@ -14,7 +14,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from app.quant.engine import DATA_DIR, KLINE_MIN_DIR, digits6, quant_engine, read_json, safe_float
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import digits6, read_json, safe_float
+from app.quant.quant_paths import DATA_DIR, KLINE_MIN_DIR
 
 
 CONFIG_FILE = DATA_DIR / "config.json"

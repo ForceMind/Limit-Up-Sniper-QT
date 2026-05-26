@@ -8,7 +8,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from app.quant.biying_sync import BiyingSyncError, _normalize_symbol, biying_minute_sync
-from app.quant.engine import KLINE_DAY_DIR, QUANT_DB_FILE, digits6, read_json, safe_float, write_json
+from app.quant.engine_utils import digits6, read_json, safe_float, write_json
+from app.quant.quant_paths import KLINE_DAY_DIR, QUANT_DB_FILE
 
 
 KLINE_FIELDS = ["date", "open", "close", "high", "low", "volume", "amount", "pct_chg", "turnover"]

@@ -7,6 +7,7 @@ FrontendPublicSnapshotPayload = Callable[[Optional[str], bool, bool], Dict[str, 
 FrontendSnapshotPayload = Callable[[Request, Optional[str], bool, bool, bool], Dict[str, Any]]
 FrontendStrategyModelsPayload = Callable[[Request], Dict[str, Any]]
 FrontendTradingAccountPayload = Callable[[Request, Optional[str], int, bool, bool], Dict[str, Any]]
+FrontendStrategyDailyPayload = Callable[[Request, Optional[str], int], Dict[str, Any]]
 
 
 def build_frontend_runtime_router(
@@ -14,6 +15,7 @@ def build_frontend_runtime_router(
     snapshot_payload: FrontendSnapshotPayload,
     strategy_models_payload: FrontendStrategyModelsPayload,
     trading_account_payload: FrontendTradingAccountPayload,
+    strategy_daily_payload: Optional[FrontendStrategyDailyPayload] = None,
     account_defer_default: bool = True,
 ) -> APIRouter:
     router = APIRouter()
@@ -49,6 +51,20 @@ def build_frontend_runtime_router(
     @router.get("/api/front/strategy_models")
     def frontend_strategy_models(request: Request):
         return strategy_models_payload(request)
+
+    @router.get("/api/front/strategy_daily")
+    def frontend_strategy_daily(
+        request: Request,
+        as_of: Optional[str] = Query(default=None),
+        news_limit: int = Query(default=30, ge=1, le=100),
+    ):
+        if strategy_daily_payload is None:
+            return {"status": "unavailable", "mode": "frontend_followed_strategy_daily"}
+        return strategy_daily_payload(
+            request,
+            as_of,
+            news_limit,
+        )
 
     @router.get("/api/front/trading_account")
     def frontend_trading_account(

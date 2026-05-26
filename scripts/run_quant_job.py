@@ -44,6 +44,26 @@ def _payload(args: argparse.Namespace) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else loaded
 
 
+def _run_tracked_job(
+    job_manager: Any,
+    job: str,
+    execute,
+    *,
+    payload: Dict[str, Any],
+    prepare_message: str,
+    running_message: str,
+    finalizing_message: str,
+) -> Dict[str, Any]:
+    def tracked_execute() -> Dict[str, Any]:
+        job_manager.update_progress(job, 8, prepare_message, {**payload, "stage": "prepare"})
+        job_manager.update_progress(job, 35, running_message, {**payload, "stage": "running"})
+        result = execute()
+        job_manager.update_progress(job, 88, finalizing_message, {**payload, "stage": "finalizing"})
+        return result
+
+    return job_manager.run_job(job, tracked_execute, payload=payload)
+
+
 def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     from app.quant.jobs import job_manager
 
@@ -95,7 +115,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         def execute() -> Dict[str, Any]:
             return main_module._precompute_frontend_accounts(**account_payload)
 
-        return job_manager.run_job("frontend_account_precompute", execute, payload=account_payload)
+        return _run_tracked_job(
+            job_manager,
+            "frontend_account_precompute",
+            execute,
+            payload=account_payload,
+            prepare_message="frontend account precompute parameters ready",
+            running_message="frontend account precompute running",
+            finalizing_message="frontend account precompute finalizing",
+        )
     if job == "news_fetch":
         return job_manager.run_news_fetch(
             hours=payload.get("hours") or 12,
@@ -150,6 +178,13 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             background=False,
             process=False,
         )
+    if job == "strategy_daily_refresh":
+        return job_manager.run_strategy_daily_refresh(
+            date=payload.get("date") or payload.get("end_date"),
+            mode=str(payload.get("mode") or "daily"),
+            background=False,
+            process=False,
+        )
     if job == "system_startup":
         from app import main as main_module
 
@@ -190,7 +225,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 int(coverage_payload["top_n"] or 80),
             )
 
-        return job_manager.run_job("data_coverage", execute, payload=payload)
+        return _run_tracked_job(
+            job_manager,
+            "data_coverage",
+            execute,
+            payload=payload,
+            prepare_message="data coverage parameters ready",
+            running_message="data coverage computation running",
+            finalizing_message="data coverage result finalizing",
+        )
     if job == "model_backtest":
         from app import main as main_module
 
@@ -208,7 +251,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             result = main_module._compute_model_backtest_cached(**backtest_payload)
             return main_module._compact_model_backtest_result(result if isinstance(result, dict) else {})
 
-        return job_manager.run_job("model_backtest", execute, payload={**payload, "model_id": model_id})
+        return _run_tracked_job(
+            job_manager,
+            "model_backtest",
+            execute,
+            payload={**payload, "model_id": model_id},
+            prepare_message="model backtest parameters ready",
+            running_message="model backtest computation running",
+            finalizing_message="model backtest result finalizing",
+        )
     if job == "quant_timeline":
         from app import main as main_module
 
@@ -229,7 +280,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             result = main_module._compute_quant_timeline_cached(**timeline_payload)
             return main_module._compact_quant_timeline_result(result if isinstance(result, dict) else {})
 
-        return job_manager.run_job("quant_timeline", execute, payload=timeline_payload)
+        return _run_tracked_job(
+            job_manager,
+            "quant_timeline",
+            execute,
+            payload=timeline_payload,
+            prepare_message="quant timeline parameters ready",
+            running_message="quant timeline computation running",
+            finalizing_message="quant timeline result finalizing",
+        )
     if job == "quant_backtest":
         from app import main as main_module
 
@@ -247,7 +306,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         def execute() -> Dict[str, Any]:
             return main_module._compute_quant_backtest_cached(**backtest_payload)
 
-        return job_manager.run_job("quant_backtest", execute, payload=backtest_payload)
+        return _run_tracked_job(
+            job_manager,
+            "quant_backtest",
+            execute,
+            payload=backtest_payload,
+            prepare_message="quant backtest parameters ready",
+            running_message="quant backtest computation running",
+            finalizing_message="quant backtest result finalizing",
+        )
     if job == "fit_strategy":
         from app import main as main_module
 
@@ -262,7 +329,15 @@ def _run(job: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             result = main_module._compute_quant_fit_strategy(**fit_payload)
             return main_module._compact_quant_fit_strategy_result(result if isinstance(result, dict) else {})
 
-        return job_manager.run_job("fit_strategy", execute, payload=fit_payload)
+        return _run_tracked_job(
+            job_manager,
+            "fit_strategy",
+            execute,
+            payload=fit_payload,
+            prepare_message="fit strategy parameters ready",
+            running_message="fit strategy optimization running",
+            finalizing_message="fit strategy result finalizing",
+        )
     raise SystemExit(f"unsupported job: {job}")
 
 
@@ -281,6 +356,7 @@ def main() -> int:
             "kline_fill",
             "lhb_sync",
             "market_sync",
+            "strategy_daily_refresh",
             "trade_cycle",
             "system_startup",
             "data_coverage",

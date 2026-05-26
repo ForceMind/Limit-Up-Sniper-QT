@@ -1,7 +1,8 @@
 from typing import Any, Dict, Iterable, Mapping
 
-from app.quant.engine import safe_float
+from app.quant.engine_utils import safe_float
 from app.quant.front_profile import strategy_catalog_items
+from app.quant.runtime_policy import target_strategy_count
 
 
 def clean_strategy_runtime_matrix_limit(limit_models: Any, default: int = 80) -> int:
@@ -55,6 +56,8 @@ def build_strategy_runtime_matrix_payload(
         signal_group = signal_by_model.get(model_id) or {}
         signals = signal_group.get("signals") if isinstance(signal_group.get("signals"), list) else []
         latest_signal = next((signal for signal in signals if isinstance(signal, Mapping)), {})
+        runtime_generated_at = str(summary.get("runtime_generated_at") or summary.get("generated_at") or "")
+        signal_generated_at = str(signal_group.get("generated_at") or "")
         has_runtime = bool(summary.get("has_runtime_data") or model.get("has_runtime_data"))
         signal_count = int(safe_float(signal_group.get("signal_count"), len(signals)))
         params = model.get("params") if isinstance(model.get("params"), Mapping) else {}
@@ -104,7 +107,9 @@ def build_strategy_runtime_matrix_payload(
                 ),
                 "latest_signal_code": str(latest_signal.get("code") or ""),
                 "latest_signal_name": str(latest_signal.get("name") or ""),
-                "generated_at": str(summary.get("generated_at") or signal_group.get("generated_at") or ""),
+                "generated_at": runtime_generated_at or signal_generated_at,
+                "runtime_generated_at": runtime_generated_at,
+                "signal_generated_at": signal_generated_at,
             }
         )
 
@@ -115,9 +120,74 @@ def build_strategy_runtime_matrix_payload(
         "as_of": effective_as_of,
         "data_date": feed.get("data_date") or "",
         "count": len(rows),
+        "target_strategy_count": target_strategy_count(),
         "ready_count": ready_count,
         "missing_count": len(rows) - ready_count,
         "signal_ready_count": signal_ready_count,
         "include_signals": bool(include_signals),
         "items": rows,
+    }
+
+
+def build_strategy_runtime_overview_payload(matrix_payload: Mapping[str, Any], target_count: Any = None) -> Dict[str, Any]:
+    target = max(1, min(int(safe_float(target_count, target_strategy_count())), 200))
+    rows = matrix_payload.get("items") if isinstance(matrix_payload.get("items"), list) else []
+    target_rows = [row for row in rows[:target] if isinstance(row, Mapping)]
+    ready_rows = [row for row in target_rows if bool(row.get("has_runtime_data"))]
+    signal_rows = [row for row in target_rows if int(safe_float(row.get("signal_count"), 0)) > 0]
+    as_of = str(matrix_payload.get("as_of") or "").strip()[:10]
+    stale_rows = []
+    if as_of:
+        stale_rows = [
+            row
+            for row in ready_rows
+            if str(row.get("runtime_end_date") or "").strip()[:10] and str(row.get("runtime_end_date") or "").strip()[:10] < as_of
+        ]
+    catalog_missing_count = max(0, target - len(target_rows))
+    runtime_missing_count = max(0, target - len(ready_rows))
+    ready_for_frontend = runtime_missing_count == 0 and not stale_rows
+    if ready_for_frontend:
+        status = "ready"
+        message = f"目标 {target} 个策略均已有可读运行结果"
+    elif ready_rows:
+        status = "partial"
+        message = f"目标 {target} 个策略中 {len(ready_rows)} 个已有运行结果，仍缺 {runtime_missing_count} 个"
+    else:
+        status = "missing"
+        message = f"目标 {target} 个策略还没有可读运行结果"
+    latest_runtime_end_date = max((str(row.get("runtime_end_date") or "") for row in ready_rows), default="")
+    earliest_runtime_start_date = min((str(row.get("runtime_start_date") or "") for row in ready_rows if row.get("runtime_start_date")), default="")
+    return {
+        "status": status,
+        "message": message,
+        "as_of": as_of,
+        "data_date": matrix_payload.get("data_date") or "",
+        "target_strategy_count": target,
+        "catalog_count": len(rows),
+        "covered_catalog_count": len(target_rows),
+        "catalog_missing_count": catalog_missing_count,
+        "ready_count": len(ready_rows),
+        "runtime_missing_count": runtime_missing_count,
+        "signal_ready_count": len(signal_rows),
+        "stale_count": len(stale_rows),
+        "ready_for_frontend": ready_for_frontend,
+        "latest_runtime_end_date": latest_runtime_end_date,
+        "earliest_runtime_start_date": earliest_runtime_start_date,
+        "missing_models": [
+            {
+                "model_id": str(row.get("model_id") or ""),
+                "name": str(row.get("name") or row.get("model_id") or ""),
+                "runtime_status": str(row.get("runtime_status") or "missing"),
+            }
+            for row in target_rows
+            if not row.get("has_runtime_data")
+        ][:20],
+        "stale_models": [
+            {
+                "model_id": str(row.get("model_id") or ""),
+                "name": str(row.get("name") or row.get("model_id") or ""),
+                "runtime_end_date": str(row.get("runtime_end_date") or ""),
+            }
+            for row in stale_rows
+        ][:20],
     }

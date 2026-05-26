@@ -6,7 +6,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from app.quant.engine import DATA_DIR, item_datetime, read_json, short_hash, write_json
+from app.quant.engine_utils import item_datetime, read_json, short_hash, write_json
+from app.quant.quant_paths import DATA_DIR
 
 
 NEWS_HISTORY_FILE = DATA_DIR / "news_history.json"

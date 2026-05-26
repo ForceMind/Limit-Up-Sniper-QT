@@ -14,7 +14,9 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
 
-from app.quant.engine import DATA_DIR, DEFAULT_AI_MODEL, read_json, safe_float, write_json
+from app.quant.engine_utils import read_json, safe_float, write_json
+from app.quant.quant_paths import DATA_DIR
+from app.quant.strategy_defaults import DEFAULT_AI_MODEL
 
 
 AUTH_FILE = DATA_DIR / "auth.json"

@@ -1,6 +1,8 @@
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, HTTPException, Query
+
+from app.quant.admin_access_service import AdminAccessPayloadError
 
 
 AdminAccessLogsPayload = Callable[[int, int, Optional[str], Optional[str], Optional[str], Optional[int]], Dict[str, Any]]
@@ -16,6 +18,12 @@ def build_admin_access_router(
     block_all_payload: AdminAccessSecurityMutationPayload,
 ) -> APIRouter:
     router = APIRouter()
+
+    def mutation_payload(payload_fn: AdminAccessSecurityMutationPayload, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            return payload_fn(payload)
+        except AdminAccessPayloadError as exc:
+            raise HTTPException(status_code=400, detail=exc.detail) from exc
 
     @router.get("/api/admin/access_logs")
     def admin_access_logs(
@@ -41,14 +49,14 @@ def build_admin_access_router(
 
     @router.post("/api/admin/access_security/block")
     def admin_access_security_block(payload: Dict[str, Any] = Body(default_factory=dict)):
-        return block_payload(payload)
+        return mutation_payload(block_payload, payload)
 
     @router.post("/api/admin/access_security/unblock")
     def admin_access_security_unblock(payload: Dict[str, Any] = Body(default_factory=dict)):
-        return unblock_payload(payload)
+        return mutation_payload(unblock_payload, payload)
 
     @router.post("/api/admin/access_security/block_all")
     def admin_access_security_block_all(payload: Dict[str, Any] = Body(default_factory=dict)):
-        return block_all_payload(payload)
+        return mutation_payload(block_all_payload, payload)
 
     return router

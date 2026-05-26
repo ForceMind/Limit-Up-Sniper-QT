@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from app.quant.engine import DATA_DIR, QUANT_DB_FILE
+from app.quant.quant_paths import DATA_DIR, QUANT_DB_FILE
 
 
 def file_meta(path: Path) -> Dict[str, Any]:

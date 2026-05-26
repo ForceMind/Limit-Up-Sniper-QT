@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional
 
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
-from app.quant.engine import KLINE_DAY_DIR, KLINE_MIN_DIR, contains_sample_marker, digits6, quant_engine
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import contains_sample_marker, digits6
+from app.quant.quant_paths import KLINE_DAY_DIR, KLINE_MIN_DIR
 from app.quant.news_fetcher import news_fetcher
 
 

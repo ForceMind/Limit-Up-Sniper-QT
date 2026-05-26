@@ -9,16 +9,11 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from app.quant.engine import (
-    DATA_DIR,
-    DEFAULT_AI_MODEL,
-    item_datetime,
-    quant_engine,
-    read_json,
-    safe_float,
-    short_hash,
-    write_json,
-)
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import item_datetime, read_json, safe_float, short_hash, write_json
+from app.quant.event_classifier import EventClassifier
+from app.quant.quant_paths import DATA_DIR
+from app.quant.strategy_defaults import DEFAULT_AI_MODEL
 
 
 ANALYSIS_RECORDS_FILE = DATA_DIR / "news_analysis_records.json"
@@ -68,6 +63,7 @@ class AINewsAnalyzer:
     def __init__(self) -> None:
         self.records_file = ANALYSIS_RECORDS_FILE
         self.state_file = AI_ANALYSIS_STATE_FILE
+        self.classifier = EventClassifier()
         self._lock = threading.RLock()
 
     def config(self) -> Dict[str, Any]:
@@ -283,10 +279,10 @@ class AINewsAnalyzer:
             text = str(item.get("text") or "")
             mentions = quant_engine.universe.extract_mentions(text, limit=5)
             for code, name in mentions:
-                event_type = quant_engine.classifier.classify_event_type(text)
-                industry = quant_engine.classifier.classify_industry(text)
-                sentiment = quant_engine.classifier.sentiment(text)
-                impact = quant_engine.classifier.impact(text, event_type, sentiment)
+                event_type = self.classifier.classify_event_type(text)
+                industry = self.classifier.classify_industry(text)
+                sentiment = self.classifier.sentiment(text)
+                impact = self.classifier.impact(text, event_type, sentiment)
                 stocks.append(
                     {
                         "code": code,

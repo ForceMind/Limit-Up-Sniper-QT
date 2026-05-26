@@ -283,6 +283,7 @@ qt migrate
 
 - [产品需求文档](docs/PRODUCT_REQUIREMENTS.md)
 - [开发计划](docs/DEVELOPMENT_PLAN.md)
+- [运行架构边界](docs/RUNTIME_ARCHITECTURE.md)
 - [架构优化与持续进化计划](docs/ARCHITECTURE_OPTIMIZATION_PLAN.md)
 - [买卖与回放逻辑](docs/QUANT_LOGIC.md)
 - [服务器部署说明](docs/SERVER_DEPLOY.md)

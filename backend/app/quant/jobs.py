@@ -1,62 +1,64 @@
 from __future__ import annotations
 
 import asyncio
-import ctypes
 import gc
 import json
 import os
-import signal
 import subprocess
-import sys
 import threading
 import time
-import uuid
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 from app.quant.ai_analyzer import ai_analyzer
 from app.quant.biying_sync import biying_minute_sync
 from app.quant.capital_strategy import capital_presets
-from app.quant.engine import DATA_DIR, quant_engine, read_json, write_json
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import digits6, read_json, safe_float, write_json
+from app.quant.quant_paths import DATA_DIR
 from app.quant.evolution import strategy_evolution
 from app.quant.frontend_precompute import precompute_frontend_payloads
+from app.quant.job_process_lifecycle import JobProcessLifecycle
+from app.quant.job_process_launcher import JobProcessLauncher
+from app.quant.job_runtime_control import (
+    heavy_process_admission_payload,
+    heavy_process_slots_payload,
+    job_initial_estimate_seconds,
+    job_timing_snapshot,
+    memory_guard_snapshot,
+    parse_iso_ts,
+    process_memory_snapshot,
+)
+from app.quant.job_scheduler_policy import JobSchedulerPolicy
+from app.quant.job_scheduler_status import build_scheduler_status
 from app.quant.lhb_sync import lhb_status, sync_lhb
 from app.quant.news_fetcher import news_fetcher
 from app.quant.notifier import trade_notifier
+from app.quant.runtime_policy import (
+    DAILY_STRATEGY_JOBS,
+    FRONTEND_RUNTIME_PROCESS_JOBS,
+    HEAVY_CACHE_TRIM_JOBS,
+    HEAVY_PROCESS_JOBS,
+    RESEARCH_PROCESS_JOBS,
+    daily_strategy_resource_controls,
+    frontend_runtime_resource_controls,
+    heavy_resource_controls,
+    job_stop_policy,
+    job_zone,
+    research_tasks_manual_only,
+    runtime_architecture_policy,
+    target_strategy_count,
+)
+from app.quant.strategy_daily_runtime import strategy_daily_runtime
+from app.quant.strategy_daily_dependencies import strategy_daily_data_dependencies
 
 
 JOB_STATE_FILE = DATA_DIR / "quant_job_state.json"
 JOB_LOG_FILE = DATA_DIR / "quant_runtime_logs.jsonl"
 SENSITIVE_KEY_PARTS = ("key", "token", "password", "secret", "license", "authorization", "cookie")
-HEAVY_CACHE_TRIM_JOBS = {
-    "kline_fill",
-    "lhb_sync",
-    "market_sync",
-    "trade_cycle",
-    "strategy_replay",
-    "strategy_evolution",
-    "frontend_payload_precompute",
-    "frontend_account_precompute",
-    "data_coverage",
-    "model_backtest",
-    "quant_timeline",
-    "quant_backtest",
-    "fit_strategy",
-    "system_startup",
-}
-HEAVY_PROCESS_JOBS = {
-    "strategy_replay",
-    "strategy_evolution",
-    "frontend_payload_precompute",
-    "frontend_account_precompute",
-    "model_backtest",
-    "quant_timeline",
-    "quant_backtest",
-    "fit_strategy",
-}
 JOB_LABELS = {
     "scheduler": "调度器",
     "news_fetch": "新闻抓取",
@@ -64,6 +66,7 @@ JOB_LABELS = {
     "market_sync": "行情同步",
     "kline_fill": "日K补齐",
     "lhb_sync": "龙虎榜同步",
+    "strategy_daily_refresh": "策略日运行刷新",
     "trade_cycle": "交易循环",
     "strategy_replay": "策略复盘",
     "strategy_evolution": "策略进化",
@@ -158,12 +161,25 @@ class QuantJobManager:
         self._running: Dict[str, bool] = {}
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
+        self._process_launcher = JobProcessLauncher(popen=lambda command, **kwargs: subprocess.Popen(command, **kwargs))
+        self._process_lifecycle = JobProcessLifecycle()
+        self._scheduler_policy = JobSchedulerPolicy(
+            env_bool=_env_bool,
+            env_int=_env_int,
+            env_nonnegative_int=_env_nonnegative_int,
+            is_market_open=self._is_market_open,
+            target_strategy_count=target_strategy_count,
+            research_tasks_manual_only=research_tasks_manual_only,
+        )
 
     def _process_start_grace_seconds(self) -> float:
         return max(1.0, min(_env_float("QT_JOB_PROCESS_START_GRACE_SECONDS", 8.0), 120.0))
 
     def _heavy_process_max_concurrent(self) -> int:
         return max(1, min(_env_int("QT_HEAVY_JOB_MAX_CONCURRENT", 1), 8))
+
+    def _frontend_runtime_process_max_concurrent(self) -> int:
+        return max(1, min(_env_int("QT_FRONT_RUNTIME_JOB_MAX_CONCURRENT", 1), 4))
 
     def _load_state(self) -> Dict[str, Any]:
         with self._state_lock:
@@ -202,10 +218,16 @@ class QuantJobManager:
             "stop_requested",
             "stop_requested_at",
             "stop_message",
+            "success_count",
+            "failure_count",
+            "stopped_count",
+            "skipped_count",
         )
         compact = {key: item.get(key) for key in keep_keys if key in item}
         summary_keys = {
             "status",
+            "reason",
+            "next_action",
             "message",
             "date",
             "as_of",
@@ -240,6 +262,9 @@ class QuantJobManager:
             "trades",
             "buys",
             "sells",
+            "skipped_trade_count",
+            "ready_for_frontend",
+            "data_dependency_blocked",
             "model_count",
             "return_pct",
             "trade_count",
@@ -264,6 +289,11 @@ class QuantJobManager:
         last_result = item.get("last_result") if isinstance(item.get("last_result"), dict) else {}
         if last_result:
             compact["last_result"] = {key: value for key, value in last_result.items() if key in summary_keys}
+        for key in ("resource_controls", "memory_guard"):
+            value = item.get(key)
+            if isinstance(value, dict):
+                compact[key] = value
+        compact.update(self._job_timing_snapshot(item))
         return compact
 
     def _compact_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -278,6 +308,314 @@ class QuantJobManager:
         compact["jobs"] = {name: self._compact_job_item(item) for name, item in jobs.items()}
         return compact
 
+    def _heavy_job_observability_item(
+        self,
+        name: str,
+        item: Any,
+        *,
+        heavy_slots: Dict[str, Any],
+        paused: bool = False,
+        slot_full_reason: str = "heavy_process_slots_full",
+    ) -> Dict[str, Any]:
+        current = item if isinstance(item, dict) else {}
+        status = str(current.get("status") or ("paused" if paused else "pending")).strip().lower() or "pending"
+        try:
+            progress = float(current.get("progress_pct") or 0)
+        except Exception:
+            progress = 0.0
+        progress = max(0.0, min(progress, 100.0))
+        if status == "ok" and progress <= 0:
+            progress = 100.0
+        timing = self._job_timing_snapshot(current)
+        for key in (
+            "elapsed_seconds",
+            "estimated_total_seconds",
+            "eta_seconds",
+            "eta_at",
+            "estimate_source",
+            "estimate_overdue_seconds",
+        ):
+            if key not in timing and key in current:
+                timing[key] = current[key]
+        controls = current.get("resource_controls") if isinstance(current.get("resource_controls"), dict) else self._process_resource_controls(name)
+        stop_policy = job_stop_policy(name)
+        is_running = status == "running" or bool(current.get("process") and current.get("process_pid"))
+        memory_guard = current.get("memory_guard") if isinstance(current.get("memory_guard"), dict) else heavy_slots.get("memory_guard", {})
+        process_memory = current.get("process_memory") if isinstance(current.get("process_memory"), dict) else {}
+        if not process_memory:
+            for running_job in heavy_slots.get("running_jobs") or []:
+                if isinstance(running_job, dict) and running_job.get("job") == name:
+                    candidate = running_job.get("process_memory")
+                    if isinstance(candidate, dict):
+                        process_memory = candidate
+                    break
+        if is_running and not process_memory and current.get("process_pid"):
+            process_memory = self._process_memory_snapshot(current.get("process_pid"))
+        slots_available = int(heavy_slots.get("available", 0) or 0)
+        memory_pressure = bool(isinstance(memory_guard, dict) and memory_guard.get("pressure"))
+        blocked_reason = ""
+        if is_running:
+            blocked_reason = "already_running"
+        elif paused or status == "paused":
+            blocked_reason = "paused"
+        elif memory_pressure:
+            blocked_reason = "memory_pressure"
+        elif slots_available <= 0:
+            blocked_reason = slot_full_reason
+        can_start = not blocked_reason
+        return {
+            "job": name,
+            "label": _job_label(name),
+            "zone": job_zone(name),
+            "status": status,
+            "running": is_running,
+            "can_start": can_start,
+            "blocked_reason": blocked_reason,
+            "stop_supported": bool(stop_policy.get("stop_allowed")),
+            "can_stop": is_running and bool(stop_policy.get("stop_allowed")),
+            "stop_policy": stop_policy,
+            "process": bool(current.get("process")),
+            "process_pid": current.get("process_pid") or "",
+            "progress_pct": round(progress, 2),
+            "progress_message": str(current.get("progress_message") or current.get("message") or ""),
+            "last_started_at": current.get("last_started_at") or current.get("started_at") or current.get("process_started_at") or "",
+            "last_finished_at": current.get("last_finished_at") or current.get("finished_at") or "",
+            "duration_ms": current.get("duration_ms"),
+            "resource_controls": controls,
+            "memory_guard": memory_guard,
+            "process_memory": process_memory,
+            **timing,
+        }
+
+    def _heavy_job_observability(self, state: Dict[str, Any], heavy_slots: Dict[str, Any]) -> Dict[str, Any]:
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        paused_jobs = state.get("paused_jobs") if isinstance(state.get("paused_jobs"), dict) else {}
+        items = [
+            self._heavy_job_observability_item(
+                name,
+                jobs.get(name),
+                heavy_slots=heavy_slots,
+                paused=bool(paused_jobs.get(name)),
+            )
+            for name in HEAVY_PROCESS_JOBS
+        ]
+        running = [item for item in items if item.get("running")]
+        blocked = [item for item in items if item.get("blocked_reason") and not item.get("running")]
+        return {
+            "status": "ok",
+            "items": items,
+            "running": running,
+            "blocked": blocked,
+            "count": len(items),
+            "running_count": len(running),
+            "blocked_count": len(blocked),
+            "available": heavy_slots.get("available"),
+            "max_concurrent": heavy_slots.get("max_concurrent"),
+            "resource_controls": heavy_slots.get("resource_controls", {}),
+            "memory_guard": heavy_slots.get("memory_guard", {}),
+        }
+
+    def _frontend_runtime_observability(self, state: Dict[str, Any], frontend_slots: Dict[str, Any]) -> Dict[str, Any]:
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        paused_jobs = state.get("paused_jobs") if isinstance(state.get("paused_jobs"), dict) else {}
+        items = [
+            self._heavy_job_observability_item(
+                name,
+                jobs.get(name),
+                heavy_slots=frontend_slots,
+                paused=bool(paused_jobs.get(name)),
+                slot_full_reason="frontend_runtime_process_slots_full",
+            )
+            for name in FRONTEND_RUNTIME_PROCESS_JOBS
+        ]
+        running = [item for item in items if item.get("running")]
+        blocked = [item for item in items if item.get("blocked_reason") and not item.get("running")]
+        return {
+            "status": "ok",
+            "items": items,
+            "running": running,
+            "blocked": blocked,
+            "count": len(items),
+            "running_count": len(running),
+            "blocked_count": len(blocked),
+            "available": frontend_slots.get("available"),
+            "max_concurrent": frontend_slots.get("max_concurrent"),
+            "resource_controls": frontend_slots.get("resource_controls", {}),
+            "memory_guard": frontend_slots.get("memory_guard", {}),
+        }
+
+    def _daily_runtime_observability_item(
+        self,
+        name: str,
+        item: Any,
+        *,
+        memory_guard: Dict[str, Any],
+        paused: bool = False,
+    ) -> Dict[str, Any]:
+        current = item if isinstance(item, dict) else {}
+        status = str(current.get("status") or ("paused" if paused else "pending")).strip().lower() or "pending"
+        try:
+            progress = float(current.get("progress_pct") or 0)
+        except Exception:
+            progress = 0.0
+        progress = max(0.0, min(progress, 100.0))
+        if status == "ok" and progress <= 0:
+            progress = 100.0
+        timing = self._job_timing_snapshot(current)
+        for key in (
+            "elapsed_seconds",
+            "estimated_total_seconds",
+            "eta_seconds",
+            "eta_at",
+            "estimate_source",
+            "estimate_overdue_seconds",
+        ):
+            if key not in timing and key in current:
+                timing[key] = current[key]
+        controls = current.get("resource_controls") if isinstance(current.get("resource_controls"), dict) else self._process_resource_controls(name)
+        stop_policy = job_stop_policy(name)
+        is_running = status in {"running", "stop_requested"} or bool(current.get("process") and current.get("process_pid"))
+        item_memory_guard = current.get("memory_guard") if isinstance(current.get("memory_guard"), dict) else memory_guard
+        process_memory = current.get("process_memory") if isinstance(current.get("process_memory"), dict) else {}
+        if is_running and not process_memory and current.get("process_pid"):
+            process_memory = self._process_memory_snapshot(current.get("process_pid"))
+        memory_pressure = bool(isinstance(item_memory_guard, dict) and item_memory_guard.get("pressure"))
+        blocked_reason = ""
+        if is_running:
+            blocked_reason = "already_running"
+        elif paused or status == "paused":
+            blocked_reason = "paused"
+        elif name == "strategy_daily_refresh" and memory_pressure:
+            blocked_reason = "memory_pressure"
+        return {
+            "job": name,
+            "label": _job_label(name),
+            "zone": job_zone(name),
+            "status": status,
+            "running": is_running,
+            "can_start": not blocked_reason,
+            "blocked_reason": blocked_reason,
+            "stop_supported": bool(stop_policy.get("stop_allowed")),
+            "can_stop": is_running and bool(stop_policy.get("stop_allowed")),
+            "stop_policy": stop_policy,
+            "process": bool(current.get("process")),
+            "process_pid": current.get("process_pid") or "",
+            "progress_pct": round(progress, 2),
+            "progress_message": str(current.get("progress_message") or current.get("message") or ""),
+            "last_started_at": current.get("last_started_at") or current.get("started_at") or current.get("process_started_at") or "",
+            "last_finished_at": current.get("last_finished_at") or current.get("finished_at") or "",
+            "duration_ms": current.get("duration_ms"),
+            "resource_controls": controls,
+            "memory_guard": item_memory_guard,
+            "process_memory": process_memory,
+            **timing,
+        }
+
+    def _daily_runtime_observability(self, state: Dict[str, Any], memory_guard: Dict[str, Any]) -> Dict[str, Any]:
+        jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        paused_jobs = state.get("paused_jobs") if isinstance(state.get("paused_jobs"), dict) else {}
+        items = [
+            self._daily_runtime_observability_item(
+                name,
+                jobs.get(name),
+                memory_guard=memory_guard,
+                paused=bool(paused_jobs.get(name)),
+            )
+            for name in DAILY_STRATEGY_JOBS
+        ]
+        running = [item for item in items if item.get("running")]
+        blocked = [item for item in items if item.get("blocked_reason") and not item.get("running")]
+        return {
+            "status": "ok",
+            "items": items,
+            "running": running,
+            "blocked": blocked,
+            "count": len(items),
+            "running_count": len(running),
+            "blocked_count": len(blocked),
+            "resource_controls": daily_strategy_resource_controls(),
+            "memory_guard": memory_guard,
+            "process_enabled": self._strategy_daily_refresh_process_enabled(),
+            "waits_for_heavy_jobs": self._strategy_daily_refresh_waits_for_heavy_jobs(),
+        }
+
+    def _strategy_runtime_status_snapshot(self) -> Dict[str, Any]:
+        try:
+            return strategy_daily_runtime.status_summary()
+        except Exception as exc:
+            return {
+                "status": "unknown",
+                "mode": "persisted_strategy_runtime",
+                "target_strategy_count": target_strategy_count(),
+                "ready_for_frontend": False,
+                "message": str(exc)[:200],
+                "next_action": "Check strategy runtime persistence and replay/import results manually.",
+            }
+
+    def _trade_cycle_legacy_paper_enabled(self) -> bool:
+        return _env_bool("QT_TRADE_CYCLE_LEGACY_PAPER_ENABLED", False)
+
+    def _trade_cycle_requires_strategy_runtime_ready(self) -> bool:
+        return _env_bool("QT_TRADE_CYCLE_REQUIRE_STRATEGY_RUNTIME_READY", True)
+
+    def _strategy_runtime_daily_trades(self, daily_result: Any, date: str) -> list[Dict[str, Any]]:
+        if not isinstance(daily_result, Mapping):
+            return []
+        clean_date = str(date or "").strip()[:10]
+        items = daily_result.get("items") if isinstance(daily_result.get("items"), list) else []
+        rows: list[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            model_id = str(item.get("model_id") or "").strip()
+            model_name = str(item.get("name") or model_id)
+            trades = item.get("trades") if isinstance(item.get("trades"), list) else []
+            for trade in trades:
+                if not isinstance(trade, Mapping):
+                    continue
+                trade_date = str(trade.get("date") or clean_date).strip()[:10]
+                if clean_date and trade_date != clean_date:
+                    continue
+                row = dict(trade)
+                row.setdefault("date", clean_date)
+                row.setdefault("model_id", model_id)
+                row.setdefault("model_name", model_name)
+                rows.append(row)
+        return rows
+
+    def _trade_cycle_strategy_runtime_not_ready_result(
+        self,
+        *,
+        date: str,
+        notify: bool,
+        strategy_runtime: Mapping[str, Any],
+        day_trades: list[Dict[str, Any]],
+        legacy_paper_account: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "status": "skipped",
+            "date": date,
+            "reason": "strategy_runtime_not_ready",
+            "message": "交易循环已跳过：目标策略日运行结果尚未全部就绪",
+            "next_action": "先运行策略日刷新并确认 ready_for_frontend=true，再执行交易循环通知。",
+            "trades": 0,
+            "buys": 0,
+            "sells": 0,
+            "skipped_trade_count": len(day_trades),
+            "notification": {
+                "status": "skipped" if notify else "disabled",
+                "sent": 0,
+                "reason": "strategy_runtime_not_ready",
+            },
+            "cash": 0,
+            "positions": 0,
+            "total_value": 0,
+            "replay_start_date": "",
+            "replay": {},
+            "strategy_runtime": dict(strategy_runtime),
+            "legacy_paper_account": legacy_paper_account,
+        }
+
     def status(self, light: bool = False) -> Dict[str, Any]:
         self.reconcile_process_jobs()
         state = self._load_state()
@@ -291,8 +629,28 @@ class QuantJobManager:
         state["biying"] = biying_minute_sync.status()
         state["lhb"] = lhb_status()
         state["runtime"] = {"memory": self._process_memory_snapshot(), "cache": quant_engine.cache_stats()}
-        state["heavy_process_slots"] = self._heavy_process_slots()
+        state["strategy_runtime"] = self._strategy_runtime_status_snapshot()
+        heavy_slots = self._heavy_process_slots()
+        frontend_slots = self._frontend_runtime_process_slots()
+        state["heavy_process_slots"] = heavy_slots
+        state["frontend_runtime_process_slots"] = frontend_slots
+        state["heavy_job_observability"] = self._heavy_job_observability(state, heavy_slots)
+        state["frontend_runtime_observability"] = self._frontend_runtime_observability(state, frontend_slots)
+        state["daily_runtime_observability"] = self._daily_runtime_observability(
+            state,
+            heavy_slots.get("memory_guard", {}) if isinstance(heavy_slots.get("memory_guard"), dict) else {},
+        )
         state["frontend_payload_policy"] = self._frontend_payload_policy()
+        state["runtime_policy"] = runtime_architecture_policy(
+            heavy_process_limit=int(heavy_slots.get("max_concurrent", self._heavy_process_max_concurrent()) or 1),
+            running_heavy_jobs=heavy_slots.get("running_jobs") if isinstance(heavy_slots.get("running_jobs"), list) else [],
+            frontend_runtime_process_limit=int(
+                frontend_slots.get("max_concurrent", self._frontend_runtime_process_max_concurrent()) or 1
+            ),
+            running_frontend_runtime_jobs=(
+                frontend_slots.get("running_jobs") if isinstance(frontend_slots.get("running_jobs"), list) else []
+            ),
+        )
         return {"status": "ok", **state}
 
     def frontend_status(self) -> Dict[str, Any]:
@@ -303,16 +661,23 @@ class QuantJobManager:
             "scheduler": state.get("scheduler", {}),
             "running": running,
             "paused_jobs": state.get("paused_jobs", {}),
+            "strategy_runtime": self._strategy_runtime_status_snapshot(),
         }
 
-    def _running_heavy_process_jobs(self, state: Optional[Dict[str, Any]] = None, exclude: str = "") -> list[Dict[str, Any]]:
+    def _running_process_jobs(
+        self,
+        job_names: tuple[str, ...],
+        state: Optional[Dict[str, Any]] = None,
+        exclude: str = "",
+    ) -> list[Dict[str, Any]]:
         state = state if isinstance(state, dict) else self._load_state()
         jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
+        limited = {str(name) for name in job_names}
         rows: list[Dict[str, Any]] = []
         for job_name, current in jobs.items():
             if str(job_name) == str(exclude or ""):
                 continue
-            if str(job_name) not in HEAVY_PROCESS_JOBS or not isinstance(current, dict):
+            if str(job_name) not in limited or not isinstance(current, dict):
                 continue
             if str(current.get("status") or "") not in {"running", "stop_requested"}:
                 continue
@@ -326,21 +691,50 @@ class QuantJobManager:
                     "started_at": current.get("last_started_at") or current.get("started_at") or "",
                     "progress_pct": current.get("progress_pct", 0),
                     "progress_message": current.get("progress_message") or "",
+                    "process_memory": self._process_memory_snapshot(current.get("process_pid")),
+                    **self._job_timing_snapshot(current),
                 }
             )
         return rows
 
+    def _running_heavy_process_jobs(self, state: Optional[Dict[str, Any]] = None, exclude: str = "") -> list[Dict[str, Any]]:
+        return self._running_process_jobs(RESEARCH_PROCESS_JOBS, state=state, exclude=exclude)
+
+    def _running_frontend_runtime_process_jobs(self, state: Optional[Dict[str, Any]] = None, exclude: str = "") -> list[Dict[str, Any]]:
+        return self._running_process_jobs(FRONTEND_RUNTIME_PROCESS_JOBS, state=state, exclude=exclude)
+
     def _heavy_process_slots(self) -> Dict[str, Any]:
         running = self._running_heavy_process_jobs()
         limit = self._heavy_process_max_concurrent()
-        return {
-            "enabled": True,
-            "max_concurrent": limit,
-            "running_count": len(running),
-            "available": max(0, limit - len(running)),
-            "running_jobs": running,
-            "limited_jobs": sorted(HEAVY_PROCESS_JOBS),
-        }
+        payload = heavy_process_slots_payload(
+            running_jobs=running,
+            max_concurrent=limit,
+            limited_jobs=HEAVY_PROCESS_JOBS,
+            resource_controls=heavy_resource_controls(limit),
+        )
+        payload["memory_guard"] = self._memory_guard()
+        return payload
+
+    def _frontend_runtime_process_slots(self) -> Dict[str, Any]:
+        running = self._running_frontend_runtime_process_jobs()
+        limit = self._frontend_runtime_process_max_concurrent()
+        payload = heavy_process_slots_payload(
+            running_jobs=running,
+            max_concurrent=limit,
+            limited_jobs=FRONTEND_RUNTIME_PROCESS_JOBS,
+            resource_controls=frontend_runtime_resource_controls(limit),
+        )
+        payload["memory_guard"] = self._memory_guard()
+        return payload
+
+    def _process_resource_controls(self, name: str) -> Dict[str, Any]:
+        if str(name or "") in HEAVY_PROCESS_JOBS:
+            return heavy_resource_controls(self._heavy_process_max_concurrent())
+        if str(name or "") in FRONTEND_RUNTIME_PROCESS_JOBS:
+            return frontend_runtime_resource_controls(self._frontend_runtime_process_max_concurrent())
+        if str(name or "") == "strategy_daily_refresh":
+            return daily_strategy_resource_controls()
+        return {}
 
     def _heavy_process_admission(self, name: str) -> Optional[Dict[str, Any]]:
         if str(name or "") not in HEAVY_PROCESS_JOBS:
@@ -348,16 +742,100 @@ class QuantJobManager:
         state = self._load_state()
         running = self._running_heavy_process_jobs(state=state, exclude=name)
         limit = self._heavy_process_max_concurrent()
-        if len(running) < limit:
+        resource_controls = heavy_resource_controls(limit)
+        admission = heavy_process_admission_payload(
+            name=name,
+            running_jobs=running,
+            max_concurrent=limit,
+            resource_controls=resource_controls,
+            message=f"重任务并发已满：当前已有 {len(running)} 个训练/复盘/回测类任务运行，请等待完成后再启动{_job_label(name)}",
+        )
+        if admission:
+            return admission
+        memory_guard = self._memory_guard()
+        if bool(memory_guard.get("enabled")) and bool(memory_guard.get("pressure")):
+            return {
+                "status": "busy",
+                "job": name,
+                "process": True,
+                "background": True,
+                "message": f"内存压力过高，已阻止启动{_job_label(name)}；请等待当前任务结束或释放内存后重试",
+                "resource_controls": resource_controls,
+                "memory_guard": memory_guard,
+                "running_heavy_jobs": running,
+                "heavy_process_limit": limit,
+            }
+        return None
+
+    def _frontend_runtime_process_admission(self, name: str) -> Optional[Dict[str, Any]]:
+        if str(name or "") not in FRONTEND_RUNTIME_PROCESS_JOBS:
             return None
+        state = self._load_state()
+        running = self._running_frontend_runtime_process_jobs(state=state, exclude=name)
+        limit = self._frontend_runtime_process_max_concurrent()
+        resource_controls = frontend_runtime_resource_controls(limit)
+        if len(running) >= limit:
+            memory_guard = self._memory_guard()
+            return {
+                "status": "busy",
+                "job": name,
+                "process": True,
+                "background": True,
+                "message": (
+                    f"Frontend runtime process slots are full: {len(running)} "
+                    f"frontend cache/account precompute job(s) running."
+                ),
+                "blocked_reason": "frontend_runtime_process_slots_full",
+                "frontend_runtime_process_limit": limit,
+                "running_frontend_runtime_jobs": running,
+                "resource_controls": resource_controls,
+                "memory_guard": memory_guard,
+            }
+        memory_guard = self._memory_guard()
+        if bool(memory_guard.get("enabled")) and bool(memory_guard.get("pressure")):
+            return {
+                "status": "busy",
+                "job": name,
+                "process": True,
+                "background": True,
+                "message": f"Memory pressure is high; blocked starting {_job_label(name)}.",
+                "blocked_reason": "memory_pressure",
+                "resource_controls": resource_controls,
+                "memory_guard": memory_guard,
+                "running_frontend_runtime_jobs": running,
+                "frontend_runtime_process_limit": limit,
+            }
+        return None
+
+    def _daily_strategy_process_admission(self, name: str) -> Optional[Dict[str, Any]]:
+        if str(name or "") != "strategy_daily_refresh":
+            return None
+        resource_controls = daily_strategy_resource_controls()
+        memory_guard = self._memory_guard()
+        if bool(memory_guard.get("enabled")) and bool(memory_guard.get("pressure")):
+            return {
+                "status": "busy",
+                "job": name,
+                "process": True,
+                "background": True,
+                "message": "内存压力过高，已阻止启动策略日运行刷新；请等待当前任务结束或释放内存后重试",
+                "resource_controls": resource_controls,
+                "memory_guard": memory_guard,
+            }
+        return None
+
+    def _strategy_daily_refresh_wait_payload(self) -> Dict[str, Any]:
+        if not self._strategy_daily_refresh_waits_for_heavy_jobs():
+            return {}
+        running = self._running_heavy_process_jobs()
+        if not running:
+            return {}
         return {
-            "status": "busy",
-            "job": name,
-            "process": True,
-            "background": True,
-            "message": f"重任务并发已满：当前已有 {len(running)} 个训练/复盘/回测类任务运行，请等待完成后再启动{_job_label(name)}",
-            "heavy_process_limit": limit,
+            "status": "waiting",
+            "job": "strategy_daily_refresh",
+            "message": "手动训练/复盘/回测任务正在运行，自动策略日运行刷新延后",
             "running_heavy_jobs": running,
+            "retry_seconds": 120,
         }
 
     def _record_process_launching(self, name: str, request_id: str, progress_message: str) -> None:
@@ -399,87 +877,25 @@ class QuantJobManager:
                 handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
     def _parse_iso_ts(self, value: Any) -> Optional[datetime]:
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-            return parsed
-        except Exception:
-            return None
+        return parse_iso_ts(value)
+
+    def _job_timing_snapshot(self, item: Any) -> Dict[str, Any]:
+        return job_timing_snapshot(item, now=_now_cn())
 
     def _pid_alive(self, pid: Any) -> bool:
-        try:
-            value = int(pid)
-        except Exception:
-            return False
-        if value <= 0:
-            return False
-        if os.name == "nt":
-            try:
-                process_query_limited_information = 0x1000
-                still_active = 259
-                handle = ctypes.windll.kernel32.OpenProcess(process_query_limited_information, False, value)
-                if not handle:
-                    return False
-                exit_code = ctypes.c_ulong()
-                try:
-                    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                        return False
-                    return int(exit_code.value) == still_active
-                finally:
-                    ctypes.windll.kernel32.CloseHandle(handle)
-            except Exception:
-                return True
-        try:
-            os.kill(value, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        except Exception:
-            return False
+        return self._process_lifecycle.pid_alive(pid)
 
     def reconcile_process_jobs(self) -> Dict[str, Any]:
-        now = _now_cn()
-        grace_seconds = self._process_start_grace_seconds()
-        stale_jobs = []
         with self._state_lock:
             state = self._load_state()
-            jobs = state.get("jobs") if isinstance(state.get("jobs"), dict) else {}
-            for name, current in jobs.items():
-                if not isinstance(current, dict):
-                    continue
-                status_text = str(current.get("status") or "")
-                if status_text not in {"running", "stop_requested"} or not current.get("process"):
-                    continue
-                pid = current.get("process_pid")
-                started_at = self._parse_iso_ts(current.get("last_started_at") or current.get("started_at"))
-                if started_at and (now - started_at).total_seconds() < grace_seconds:
-                    continue
-                if self._pid_alive(pid):
-                    continue
-                stopped = bool(current.get("stop_requested")) or status_text == "stop_requested"
-                message = "停止请求后的独立进程已退出" if stopped else "独立进程已退出但没有写入完成状态，任务已标记失败"
-                current.update(
-                    {
-                        "status": "stopped" if stopped else "failed",
-                        "progress_message": message,
-                        "progress_pct": 100 if stopped else current.get("progress_pct") or 1,
-                        "last_error": "" if stopped else message,
-                        "last_finished_at": _iso_now(),
-                        "updated_at": _iso_now(),
-                        "process": False,
-                        "process_pid": "",
-                        "stop_requested": False,
-                        "stop_requested_at": "",
-                        "stop_message": "",
-                    }
-                )
-                stale_jobs.append({"job": name, "pid": pid, "message": message, "stopped": stopped})
+            stale_jobs = self._process_lifecycle.reconcile_state(
+                state,
+                now=_now_cn(),
+                grace_seconds=self._process_start_grace_seconds(),
+                parse_iso_ts=self._parse_iso_ts,
+                pid_alive=self._pid_alive,
+                iso_now=_iso_now,
+            )
             if stale_jobs:
                 self._save_state(state)
         for item in stale_jobs:
@@ -492,28 +908,8 @@ class QuantJobManager:
             )
         return {"status": "ok", "stale_jobs": stale_jobs, "count": len(stale_jobs)}
 
-    def _process_memory_snapshot(self) -> Dict[str, Any]:
-        status_path = "/proc/self/status"
-        if not os.path.exists(status_path):
-            return {"status": "unsupported"}
-        keys = {"VmRSS": "rss_kb", "VmHWM": "peak_rss_kb", "VmSize": "vms_kb", "Threads": "threads"}
-        out: Dict[str, Any] = {"status": "ok"}
-        try:
-            with open(status_path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    name, _, rest = line.partition(":")
-                    if name not in keys:
-                        continue
-                    parts = rest.strip().split()
-                    if not parts:
-                        continue
-                    value = float(parts[0])
-                    out[keys[name]] = int(value)
-                    if name != "Threads":
-                        out[keys[name].replace("_kb", "_mb")] = round(value / 1024, 2)
-        except Exception as exc:
-            return {"status": "error", "error": str(exc)}
-        return out
+    def _process_memory_snapshot(self, pid: Any = None) -> Dict[str, Any]:
+        return process_memory_snapshot(pid=pid)
 
     def _post_job_maintenance(self, name: str) -> Dict[str, Any]:
         guard = self._memory_guard()
@@ -562,16 +958,24 @@ class QuantJobManager:
             state = self._load_state()
             jobs = state.setdefault("jobs", {})
             current = jobs.setdefault(name, {})
+            started_at = _iso_now()
+            estimated_total_seconds = job_initial_estimate_seconds(name, payload)
             current.update(
                 {
                     "name": name,
                     "status": "running",
                     "progress_pct": 1,
                     "progress_message": "任务已开始",
-                    "last_started_at": _iso_now(),
+                    "last_started_at": started_at,
                     "last_payload": payload,
                 }
             )
+            if estimated_total_seconds > 0:
+                current["estimated_total_seconds"] = estimated_total_seconds
+                current["estimate_source"] = "initial_job_profile"
+            else:
+                current.pop("estimated_total_seconds", None)
+                current.pop("estimate_source", None)
             current.pop("stop_requested", None)
             current.pop("stop_requested_at", None)
             current.pop("stop_message", None)
@@ -582,6 +986,7 @@ class QuantJobManager:
         maintenance = self._post_job_maintenance(name)
         if isinstance(result, dict):
             result.setdefault("maintenance", maintenance)
+        duration_ms = round((time.time() - started) * 1000, 2)
         with self._state_lock:
             state = self._load_state()
             jobs = state.setdefault("jobs", {})
@@ -589,6 +994,7 @@ class QuantJobManager:
             success_count = int(current.get("success_count", 0) or 0)
             failure_count = int(current.get("failure_count", 0) or 0)
             stopped_count = int(current.get("stopped_count", 0) or 0)
+            skipped_count = int(current.get("skipped_count", 0) or 0)
             result_status = str(result.get("status") if isinstance(result, dict) else "").strip().lower()
             stop_requested = bool(current.get("stop_requested"))
             if error:
@@ -599,6 +1005,10 @@ class QuantJobManager:
                 stopped_count += 1
                 status = "stopped"
                 progress_message = str(result.get("message") if isinstance(result, dict) else "") or "任务已停止"
+            elif result_status in {"skipped", "skip"}:
+                skipped_count += 1
+                status = "skipped"
+                progress_message = str(result.get("message") if isinstance(result, dict) else "") or "任务已跳过"
             else:
                 success_count += 1
                 status = "ok"
@@ -610,10 +1020,13 @@ class QuantJobManager:
                     "progress_pct": 100,
                     "progress_message": progress_message,
                     "last_finished_at": _iso_now(),
-                    "duration_ms": round((time.time() - started) * 1000, 2),
+                    "duration_ms": duration_ms,
+                    "estimated_total_seconds": round(duration_ms / 1000.0, 1),
+                    "estimate_source": "actual_duration",
                     "success_count": success_count,
                     "failure_count": failure_count,
                     "stopped_count": stopped_count,
+                    "skipped_count": skipped_count,
                     "last_error": error,
                     "last_result": result,
                     "process": False,
@@ -628,17 +1041,40 @@ class QuantJobManager:
                 "duration_ms": current.get("duration_ms"),
                 "success_count": success_count,
                 "failure_count": failure_count,
+                "stopped_count": stopped_count,
+                "skipped_count": skipped_count,
                 "result": result,
                 "error": error,
             }
+            if error:
+                log_level = "error"
+                log_stage = "error"
+                log_message = f"{_job_label(name)}失败"
+            elif status == "skipped":
+                log_level = "warning"
+                log_stage = "skip"
+                log_message = f"{_job_label(name)}已跳过"
+            elif status == "stopped":
+                log_level = "warning"
+                log_stage = "stop"
+                log_message = f"{_job_label(name)}已停止"
+            else:
+                log_level = "info"
+                log_stage = "finish"
+                log_message = f"{_job_label(name)}完成"
             self._append_log(
-                "error" if error else "info",
-                f"{_job_label(name)}{'失败' if error else '完成'}",
+                log_level,
+                log_message,
                 job=name,
-                stage="finish" if not error else "error",
+                stage=log_stage,
                 payload=result_payload,
             )
-            return {"status": status, "job": current}
+            response = {"status": status, "job": current}
+            if status == "skipped" and isinstance(result, dict):
+                for key in ("reason", "message", "next_action"):
+                    if key in result:
+                        response[key] = result.get(key)
+            return response
 
     def update_progress(self, name: str, progress_pct: float, message: str = "", payload: Optional[Dict[str, Any]] = None) -> None:
         with self._state_lock:
@@ -698,64 +1134,13 @@ class QuantJobManager:
         return bool(current.get("stop_requested"))
 
     def _terminate_process_tree(self, pid: Any) -> Dict[str, Any]:
-        try:
-            value = int(pid)
-        except Exception:
-            return {"status": "error", "message": "进程号无效", "pid": pid}
-        if value <= 0:
-            return {"status": "error", "message": "进程号无效", "pid": value}
-        if not self._pid_alive(value):
-            return {"status": "ok", "message": "进程已经退出", "pid": value, "alive": False}
-        if os.name == "nt":
-            try:
-                completed = subprocess.run(
-                    ["taskkill", "/PID", str(value), "/T", "/F"],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    check=False,
-                )
-                return {
-                    "status": "ok" if completed.returncode == 0 else "error",
-                    "pid": value,
-                    "return_code": completed.returncode,
-                    "stdout": (completed.stdout or "").strip()[:500],
-                    "stderr": (completed.stderr or "").strip()[:500],
-                    "alive": self._pid_alive(value),
-                }
-            except Exception as exc:
-                return {"status": "error", "message": str(exc), "pid": value, "alive": self._pid_alive(value)}
-
-        errors = []
-        try:
-            os.killpg(value, signal.SIGTERM)
-        except Exception as exc:
-            errors.append(f"killpg SIGTERM: {exc}")
-            try:
-                os.kill(value, signal.SIGTERM)
-            except Exception as inner_exc:
-                errors.append(f"kill SIGTERM: {inner_exc}")
-        time.sleep(0.5)
-        if self._pid_alive(value):
-            try:
-                os.killpg(value, signal.SIGKILL)
-            except Exception as exc:
-                errors.append(f"killpg SIGKILL: {exc}")
-                try:
-                    os.kill(value, signal.SIGKILL)
-                except Exception as inner_exc:
-                    errors.append(f"kill SIGKILL: {inner_exc}")
-        return {
-            "status": "ok" if not self._pid_alive(value) else "error",
-            "pid": value,
-            "alive": self._pid_alive(value),
-            "errors": errors,
-        }
+        return self._process_lifecycle.terminate_process_tree(pid, pid_alive=self._pid_alive)
 
     def stop_job(self, name: str) -> Dict[str, Any]:
         name = str(name or "").strip()
         if not name:
             return {"status": "error", "message": "任务名称不能为空"}
+        stop_policy = job_stop_policy(name)
         self.reconcile_process_jobs()
         with self._state_lock:
             state = self._load_state()
@@ -769,6 +1154,8 @@ class QuantJobManager:
             if not state_running and not memory_running:
                 current["progress_message"] = "当前没有正在运行的任务"
                 current["updated_at"] = _iso_now()
+                current["zone"] = stop_policy.get("zone")
+                current["stop_policy"] = stop_policy
                 self._save_state(state)
                 return {"status": "idle", "job": name, "message": "当前没有正在运行的任务"}
 
@@ -780,6 +1167,8 @@ class QuantJobManager:
                         "progress_message": "任务状态已清理：当前进程没有运行该任务",
                         "last_finished_at": _iso_now(),
                         "updated_at": _iso_now(),
+                        "zone": stop_policy.get("zone"),
+                        "stop_policy": stop_policy,
                     }
                 )
                 self._save_state(state)
@@ -793,6 +1182,8 @@ class QuantJobManager:
                     "stop_message": "已请求停止当前任务",
                     "progress_message": "已请求停止当前任务",
                     "updated_at": _iso_now(),
+                    "zone": stop_policy.get("zone"),
+                    "stop_policy": stop_policy,
                 }
             )
             self._save_state(state)
@@ -814,10 +1205,14 @@ class QuantJobManager:
                         "last_finished_at": _iso_now() if kill_ok else current.get("last_finished_at", ""),
                         "updated_at": _iso_now(),
                         "stopped_count": stopped_count,
+                        "zone": stop_policy.get("zone"),
+                        "stop_policy": stop_policy,
                         "last_result": {
                             "status": "stopped" if kill_ok else "stop_requested",
                             "message": "当前任务已停止" if kill_ok else "停止信号已发送，但进程仍需稍后确认",
                             "terminate": kill_result,
+                            "zone": stop_policy.get("zone"),
+                            "stop_policy": stop_policy,
                         },
                         "process": False if kill_ok else True,
                         "process_pid": "" if kill_ok else process_pid,
@@ -836,13 +1231,22 @@ class QuantJobManager:
                 stage="stop",
                 payload=kill_result,
             )
-            return {"status": "stopped" if kill_ok else "stop_requested", "job": name, "process": True, "terminate": kill_result}
+            return {
+                "status": "stopped" if kill_ok else "stop_requested",
+                "job": name,
+                "process": True,
+                "terminate": kill_result,
+                "zone": stop_policy.get("zone"),
+                "stop_policy": stop_policy,
+            }
 
         self._append_log("warning", f"{_job_label(name)}已请求停止，将在下一个检查点结束", job=name, stage="stop")
         return {
             "status": "stop_requested",
             "job": name,
             "process": False,
+            "zone": stop_policy.get("zone"),
+            "stop_policy": stop_policy,
             "message": "已请求停止当前任务；非独立进程任务会在下一个检查点结束",
         }
 
@@ -931,6 +1335,9 @@ class QuantJobManager:
         current = jobs.get(name) if isinstance(jobs.get(name), dict) else {}
         return current.get("status") == "running"
 
+    def _job_active(self, name: str) -> bool:
+        return self.is_running(name) or self._state_job_running(name)
+
     def run_job_process(
         self,
         name: str,
@@ -954,12 +1361,16 @@ class QuantJobManager:
             message_text = f"找不到独立任务进程入口：{worker_script}"
             self._append_log("error", message_text, job=name, stage="process_start", payload=payload)
             return {"status": "error", "job": name, "process": True, "message": message_text}
-        process_payload = {
-            "job": name,
-            "payload": payload,
-            "request_id": uuid.uuid4().hex[:16],
-            "queued_at": _iso_now(),
-        }
+        resource_controls = self._process_resource_controls(name)
+        process_payload = self._process_launcher.build_payload(
+            name=name,
+            payload=payload,
+            queued_at=_iso_now(),
+            resource_controls=resource_controls,
+        )
+        initial_estimate = job_initial_estimate_seconds(name, payload)
+        if initial_estimate > 0:
+            process_payload["estimated_total_seconds"] = initial_estimate
         progress_message = str(message or f"{_job_label(name)}已转入独立进程运行").strip()
         with self._lock:
             if self._running.get(name) or self._state_job_running(name):
@@ -967,40 +1378,29 @@ class QuantJobManager:
                 self._append_log("warning", running_message, job=name, stage="skip", payload=payload)
                 return {"status": "running", "job": name, "process": True, "message": running_message}
             admission = self._heavy_process_admission(name)
+            if not admission:
+                admission = self._frontend_runtime_process_admission(name)
+            if not admission:
+                admission = self._daily_strategy_process_admission(name)
             if admission:
                 self._append_log("warning", admission["message"], job=name, stage="process_busy", payload=admission)
                 return admission
             self._record_job_start(name, payload)
             self.update_progress(name, 1, progress_message, {"process": True})
             self._record_process_launching(name, process_payload["request_id"], progress_message)
-        command = [
-            sys.executable,
-            str(worker_script),
-            "--job",
-            name,
-            "--payload-json",
-            json.dumps(process_payload, ensure_ascii=False, default=str),
-        ]
-        env = os.environ.copy()
-        backend_dir = str(self._project_root() / "backend")
-        env["PYTHONPATH"] = backend_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-        popen_kwargs: Dict[str, Any] = {
-            "cwd": str(self._project_root()),
-            "env": env,
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "close_fds": True,
-        }
-        if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-            popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        else:
-            popen_kwargs["start_new_session"] = True
+        project_root = self._project_root()
         try:
-            process = subprocess.Popen(command, **popen_kwargs)
+            process = self._process_launcher.launch(
+                project_root=project_root,
+                worker_script=worker_script,
+                name=name,
+                process_payload=process_payload,
+                resource_controls=resource_controls,
+            )
         except Exception as exc:
             self._record_job_finish(name, time.time(), {}, error=str(exc))
             return {"status": "error", "job": name, "process": True, "message": str(exc)}
+        launch_memory_guard = self._memory_guard() if resource_controls else {}
         with self._state_lock:
             state = self._load_state()
             jobs = state.setdefault("jobs", {})
@@ -1012,9 +1412,12 @@ class QuantJobManager:
                     "process_request_id": process_payload["request_id"],
                     "process_started_at": _iso_now(),
                     "progress_message": progress_message,
+                    "resource_controls": resource_controls,
+                    "memory_guard": launch_memory_guard,
                     "updated_at": _iso_now(),
                 }
             )
+            timing = self._job_timing_snapshot(current)
             self._save_state(state)
         self._append_log(
             "info",
@@ -1031,6 +1434,9 @@ class QuantJobManager:
             "background": True,
             "progress_pct": 1,
             "message": progress_message,
+            "resource_controls": resource_controls,
+            "memory_guard": launch_memory_guard,
+            **timing,
         }
 
     def run_news_fetch(
@@ -1208,34 +1614,344 @@ class QuantJobManager:
         process: bool = False,
     ) -> Dict[str, Any]:
         date = str(date or _now_cn().strftime("%Y-%m-%d")).strip()
-        payload = {"date": date, "notify": bool(notify)}
+        legacy_enabled = self._trade_cycle_legacy_paper_enabled()
+        payload = {"date": date, "notify": bool(notify), "legacy_paper_enabled": legacy_enabled}
         if process:
+            if self._trade_cycle_requires_strategy_runtime_ready() and not legacy_enabled:
+                strategy_runtime = strategy_daily_runtime.run_daily(as_of=date)
+                daily_result = strategy_runtime.get("daily_result") if isinstance(strategy_runtime, Mapping) else {}
+                if not bool(isinstance(strategy_runtime, Mapping) and strategy_runtime.get("ready_for_frontend")):
+                    result = self._trade_cycle_strategy_runtime_not_ready_result(
+                        date=date,
+                        notify=notify,
+                        strategy_runtime=strategy_runtime if isinstance(strategy_runtime, Mapping) else {},
+                        day_trades=self._strategy_runtime_daily_trades(daily_result, date),
+                        legacy_paper_account={
+                            "source": "global_paper_compat",
+                            "enabled": False,
+                            "message": "Legacy global paper replay is disabled by default; frontend follow accounts should read strategy_runtime/user_follow results.",
+                        },
+                    )
+                    self._append_log(
+                        "warning",
+                        result["message"],
+                        job="trade_cycle",
+                        stage="strategy_runtime_not_ready",
+                        payload=result,
+                    )
+                    self._record_job_start("trade_cycle", payload)
+                    self._record_job_finish("trade_cycle", time.time(), result)
+                    return result
             return self.run_job_process("trade_cycle", payload=payload, message="交易循环已转入独立进程运行")
 
         def execute() -> Dict[str, Any]:
-            replay_start = self._default_backfill_start_date()
-            replay = quant_engine.rebuild_paper_from_replay(start_date=replay_start, end_date=date, mode="daily")
-            portfolio = replay.get("portfolio") if isinstance(replay.get("portfolio"), dict) else quant_engine.run_paper_trading(as_of=date)
-            trades = portfolio.get("trades", []) if isinstance(portfolio.get("trades"), list) else []
-            day_trades = [trade for trade in trades if isinstance(trade, dict) and str(trade.get("date") or "") == date]
-            notification = trade_notifier.notify_trade_events(day_trades, as_of=date, source="paper_trading") if notify else {"status": "disabled", "sent": 0}
+            strategy_runtime = strategy_daily_runtime.run_daily(as_of=date)
+            daily_result = strategy_runtime.get("daily_result") if isinstance(strategy_runtime, Mapping) else {}
+            day_trades = self._strategy_runtime_daily_trades(daily_result, date)
+            notification_source = "strategy_runtime"
+            replay_start = ""
+            replay: Dict[str, Any] = {"timeline": {}}
+            portfolio: Dict[str, Any] = {"cash": 0, "positions": [], "trades": day_trades, "total_value": 0}
+            legacy_paper_account = {
+                "source": "global_paper_compat",
+                "enabled": False,
+                "message": "Legacy global paper replay is disabled by default; frontend follow accounts should read strategy_runtime/user_follow results.",
+            }
+            if self._trade_cycle_requires_strategy_runtime_ready() and not legacy_enabled and not bool(
+                isinstance(strategy_runtime, Mapping) and strategy_runtime.get("ready_for_frontend")
+            ):
+                return self._trade_cycle_strategy_runtime_not_ready_result(
+                    date=date,
+                    notify=notify,
+                    strategy_runtime=strategy_runtime if isinstance(strategy_runtime, Mapping) else {},
+                    day_trades=day_trades,
+                    legacy_paper_account=legacy_paper_account,
+                )
+            if legacy_enabled:
+                replay_start = self._default_backfill_start_date()
+                replay = quant_engine.rebuild_paper_from_replay(start_date=replay_start, end_date=date, mode="daily")
+                portfolio = replay.get("portfolio") if isinstance(replay.get("portfolio"), dict) else quant_engine.run_paper_trading(as_of=date)
+                trades = portfolio.get("trades", []) if isinstance(portfolio.get("trades"), list) else []
+                day_trades = [trade for trade in trades if isinstance(trade, dict) and str(trade.get("date") or "") == date]
+                notification_source = "paper_trading"
+                legacy_paper_account = {
+                    "source": "global_paper_compat",
+                    "enabled": True,
+                    "message": "Legacy global paper replay was explicitly enabled for compatibility.",
+                }
+            notification = (
+                trade_notifier.notify_trade_events(day_trades, as_of=date, source=notification_source)
+                if notify
+                else {"status": "disabled", "sent": 0}
+            )
+            inferred_buys = sum(1 for trade in day_trades if str(trade.get("side") or "").upper() == "BUY")
+            inferred_sells = sum(1 for trade in day_trades if str(trade.get("side") or "").upper() == "SELL")
+            if isinstance(daily_result, Mapping) and not legacy_enabled:
+                trade_count = int(safe_float(daily_result.get("trade_count"), len(day_trades)))
+                buy_count = int(safe_float(daily_result.get("buy_count"), inferred_buys))
+                sell_count = int(safe_float(daily_result.get("sell_count"), inferred_sells))
+            else:
+                trade_count = len(day_trades)
+                buy_count = inferred_buys
+                sell_count = inferred_sells
             return {
                 "status": "ok",
                 "date": date,
-                "trades": len(day_trades),
-                "buys": sum(1 for trade in day_trades if str(trade.get("side") or "").upper() == "BUY"),
-                "sells": sum(1 for trade in day_trades if str(trade.get("side") or "").upper() == "SELL"),
+                "trades": trade_count,
+                "buys": buy_count,
+                "sells": sell_count,
                 "notification": notification,
                 "cash": portfolio.get("cash", 0),
                 "positions": len(portfolio.get("positions", []) or []),
                 "total_value": portfolio.get("total_value", 0),
                 "replay_start_date": replay_start,
                 "replay": replay.get("timeline", {}),
+                "strategy_runtime": strategy_runtime,
+                "legacy_paper_account": legacy_paper_account,
             }
 
         if background:
             return self.run_job_background("trade_cycle", execute, payload=payload, message="交易循环已转入后台运行")
         return self.run_job("trade_cycle", execute, payload=payload)
+
+    def run_strategy_daily_refresh(
+        self,
+        date: Optional[str] = None,
+        mode: str = "daily",
+        background: bool = False,
+        process: bool = False,
+    ) -> Dict[str, Any]:
+        target_date = str(date or quant_engine.latest_event_date() or _now_cn().strftime("%Y-%m-%d")).strip()
+        mode = str(mode or "daily").strip().lower()
+        if mode not in {"daily", "intraday"}:
+            mode = "daily"
+        target_preview = self._strategy_daily_refresh_targets()
+        preview_hold_days = [
+            int(safe_float((model.get("params") if isinstance(model.get("params"), dict) else {}).get("max_hold_days"), 3))
+            for model in target_preview
+            if isinstance(model, dict)
+        ]
+        preview_max_hold_days = max(preview_hold_days or [3])
+        preview_lookback_days = self._strategy_daily_refresh_lookback_days(preview_max_hold_days)
+        preview_start_date = self._strategy_daily_refresh_start_date(target_date, preview_max_hold_days)
+        target_names = [
+            {
+                "model_id": str(model.get("id") or ""),
+                "model_name": str(model.get("name") or model.get("id") or ""),
+                "source": str(model.get("source") or ""),
+            }
+            for model in target_preview[:12]
+            if isinstance(model, dict)
+        ]
+        data_dependencies = strategy_daily_data_dependencies(target_date, mode)
+        payload = {
+            "date": target_date,
+            "target_date": target_date,
+            "start_date": preview_start_date,
+            "end_date": target_date,
+            "mode": mode,
+            "lookback_days": preview_lookback_days,
+            "window_policy": "rolling_light_replay",
+            "target_strategy_count": target_strategy_count(),
+            "max_runtime_models": self._strategy_replay_max_models(),
+            "target_count": len(target_preview),
+            "target_preview": target_names,
+            "source": "daily_strategy_runtime",
+            "data_dependencies": data_dependencies,
+            "require_ready_data": self._strategy_daily_refresh_requires_ready_data(),
+        }
+        if self._strategy_daily_refresh_requires_ready_data() and not bool(data_dependencies.get("ready_for_strategy_run")):
+            result = {
+                "status": "skipped",
+                "job": "strategy_daily_refresh",
+                "message": "策略日运行刷新已跳过：目标日期新闻或行情数据未准备好",
+                "reason": "data_dependencies_not_ready",
+                "data_dependency_blocked": True,
+                "next_action": "先运行新闻抓取、AI 分析、行情同步或日K补齐，再重新刷新目标策略日运行。",
+                **payload,
+                "model_count": 0,
+                "runtime_tables": {
+                    "signal_count": 0,
+                    "trade_count": 0,
+                    "position_count": 0,
+                    "settlement_count": 0,
+                    "snapshot_count": 0,
+                    "day_count": 0,
+                    "closed_trades": 0,
+                    "target_day_signal_count": 0,
+                    "target_day_trade_count": 0,
+                    "target_day_buy_count": 0,
+                    "target_day_sell_count": 0,
+                },
+                "generated_at": _iso_now(),
+            }
+            self._append_log(
+                "warning",
+                result["message"],
+                job="strategy_daily_refresh",
+                stage="data_dependencies",
+                payload=result,
+            )
+            self._record_job_start("strategy_daily_refresh", payload)
+            self._record_job_finish("strategy_daily_refresh", time.time(), result)
+            return result
+        if process:
+            return self.run_job_process(
+                "strategy_daily_refresh",
+                payload=payload,
+                message=f"策略日运行刷新已转入独立进程运行：{target_date}",
+            )
+
+        def execute() -> Dict[str, Any]:
+            targets = target_preview
+            total_targets = max(1, len(targets))
+            model_results = []
+            aggregate = {
+                "signal_count": 0,
+                "trade_count": 0,
+                "position_count": 0,
+                "settlement_count": 0,
+                "snapshot_count": 0,
+                "day_count": 0,
+                "closed_trades": 0,
+                "target_day_signal_count": 0,
+                "target_day_trade_count": 0,
+                "target_day_buy_count": 0,
+                "target_day_sell_count": 0,
+            }
+            stopped = self.is_stop_requested("strategy_daily_refresh")
+            for index, model in enumerate(targets, start=1):
+                if stopped or self.is_stop_requested("strategy_daily_refresh"):
+                    stopped = True
+                    self.update_progress(
+                        "strategy_daily_refresh",
+                        5 + (index - 1) / total_targets * 90,
+                        "已请求停止策略日运行刷新，正在结束当前批次",
+                        {"processed_models": len(model_results), "target_count": len(targets), "date": target_date},
+                    )
+                    break
+                params = model.get("params") if isinstance(model.get("params"), dict) else {}
+                hold_days = int(safe_float(params.get("max_hold_days"), 3))
+                replay_start_date = self._strategy_daily_refresh_start_date(target_date, hold_days)
+                lookback_days = self._strategy_daily_refresh_lookback_days(hold_days)
+                self.update_progress(
+                    "strategy_daily_refresh",
+                    5 + (index - 1) / total_targets * 90,
+                    f"刷新 {index}/{len(targets)}：{model.get('name') or model.get('id')}，窗口 {replay_start_date} 至 {target_date}",
+                    {
+                        "model_id": model.get("id"),
+                        "model_name": model.get("name"),
+                        "date": target_date,
+                        "start_date": replay_start_date,
+                        "end_date": target_date,
+                        "lookback_days": lookback_days,
+                        "mode": mode,
+                    },
+                )
+                with quant_engine.temporary_strategy_params(params):
+                    if mode == "intraday":
+                        result = quant_engine.walk_forward_intraday(
+                            start_date=replay_start_date,
+                            end_date=target_date,
+                            initial_cash=params.get("account_initial_cash"),
+                            max_positions=int(params.get("max_positions", 5)),
+                            hold_days=int(params.get("max_hold_days", 3)),
+                            top_n=int(params.get("top_n", 5)),
+                            auto_fill=False,
+                            use_daily_fallback=True,
+                        )
+                    else:
+                        result = quant_engine.walk_forward(
+                            start_date=replay_start_date,
+                            end_date=target_date,
+                            initial_cash=params.get("account_initial_cash"),
+                            max_positions=int(params.get("max_positions", 5)),
+                            hold_days=int(params.get("max_hold_days", 3)),
+                            top_n=int(params.get("top_n", 5)),
+                            auto_fill=False,
+                        )
+                persisted = strategy_evolution.save_daily_runtime(
+                    model=model,
+                    params=params,
+                    timeline=result,
+                    start_date=replay_start_date,
+                    end_date=target_date,
+                    mode=mode,
+                    source="daily_strategy_runtime",
+                )
+                days = result.get("days") if isinstance(result.get("days"), list) else []
+                trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+                target_day_signals = [
+                    signal
+                    for day in days
+                    if isinstance(day, dict) and str(day.get("date") or "").strip()[:10] == target_date
+                    for signal in (day.get("signals") if isinstance(day.get("signals"), list) else [])
+                    if isinstance(signal, dict)
+                ]
+                target_day_trades = [
+                    trade
+                    for trade in trades
+                    if isinstance(trade, dict) and str(trade.get("date") or "").strip()[:10] == target_date
+                ]
+                model_results.append(
+                    {
+                        "model_id": model.get("id"),
+                        "model_name": model.get("name"),
+                        "source": model.get("source"),
+                        "mode": result.get("mode") or mode,
+                        "date": target_date,
+                        "start_date": replay_start_date,
+                        "end_date": target_date,
+                        "lookback_days": lookback_days,
+                        "day_count": len(days),
+                        "trade_count": len(trades),
+                        "target_day_signal_count": len(target_day_signals),
+                        "target_day_trade_count": len(target_day_trades),
+                        "target_day_buy_count": sum(1 for trade in target_day_trades if str(trade.get("side") or "").upper() == "BUY"),
+                        "target_day_sell_count": sum(1 for trade in target_day_trades if str(trade.get("side") or "").upper() == "SELL"),
+                        "runtime_persist": persisted,
+                    }
+                )
+                aggregate["signal_count"] += int(persisted.get("signal_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["trade_count"] += int(persisted.get("trade_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["position_count"] += int(persisted.get("position_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["settlement_count"] += int(persisted.get("settlement_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["snapshot_count"] += int(persisted.get("snapshot_count", 0)) if isinstance(persisted, dict) else 0
+                aggregate["day_count"] += len(days)
+                aggregate["closed_trades"] += int(result.get("closed_trades", 0) or 0)
+                aggregate["target_day_signal_count"] += len(target_day_signals)
+                aggregate["target_day_trade_count"] += len(target_day_trades)
+                aggregate["target_day_buy_count"] += sum(1 for trade in target_day_trades if str(trade.get("side") or "").upper() == "BUY")
+                aggregate["target_day_sell_count"] += sum(1 for trade in target_day_trades if str(trade.get("side") or "").upper() == "SELL")
+            return {
+                "status": "stopped" if stopped else "ok",
+                "message": "策略日运行刷新已按请求停止" if stopped else "策略日运行刷新完成",
+                "mode": mode,
+                "date": target_date,
+                "target_date": target_date,
+                "start_date": preview_start_date,
+                "end_date": target_date,
+                "lookback_days": preview_lookback_days,
+                "window_policy": "rolling_light_replay",
+                "generated_at": _iso_now(),
+                "model_count": len(model_results),
+                "target_count": len(targets),
+                "target_strategy_count": target_strategy_count(),
+                "models": model_results,
+                "runtime_tables": aggregate,
+                "target_preview": target_names,
+                "source": "daily_strategy_runtime",
+                "data_dependencies": data_dependencies,
+            }
+
+        if background:
+            return self.run_job_background(
+                "strategy_daily_refresh",
+                execute,
+                payload=payload,
+                message=f"策略日运行刷新已转入后台运行：{target_date}",
+            )
+        return self.run_job("strategy_daily_refresh", execute, payload=payload)
 
     def run_strategy_replay(
         self,
@@ -1277,6 +1993,8 @@ class QuantJobManager:
             "mode": mode,
             "batch_days": replay_cursor.get("batch_days"),
             "cursor_enabled": replay_cursor.get("enabled"),
+            "target_strategy_count": target_strategy_count(),
+            "max_runtime_models": self._strategy_replay_max_models(),
             "target_scope": "全部资金档策略和策略库模型",
             "target_count": len(target_preview),
             "target_preview": target_names,
@@ -1470,7 +2188,7 @@ class QuantJobManager:
         }
         memory_guard = self._memory_guard()
         payload["memory_guard"] = memory_guard
-        if memory_guard.get("pressure"):
+        if memory_guard.get("pressure") and not process:
             message = "服务器内存压力过高，已跳过策略进化"
             self._append_log("warning", message, job="strategy_evolution", stage="memory_guard", payload=payload)
             return {"status": "skipped", "message": message, "memory_guard": memory_guard}
@@ -1535,8 +2253,6 @@ class QuantJobManager:
         return self.run_job("frontend_payload_precompute", execute, payload=payload)
 
     def _auto_market_codes(self, date: str, max_codes: int = 80) -> str:
-        from app.quant.engine import digits6, quant_engine
-
         max_codes = max(1, min(int(max_codes or 80), 500))
         seen = set()
         codes = []
@@ -1568,67 +2284,64 @@ class QuantJobManager:
         return ",".join(codes[:max_codes])
 
     def _news_interval_seconds(self) -> int:
-        return _env_int("NEWS_FETCH_INTERVAL_SECONDS", 3600)
+        return self._scheduler_policy.news_interval_seconds()
 
     def _market_interval_seconds(self) -> int:
-        return _env_int("MARKET_SYNC_INTERVAL_SECONDS", 300)
+        return self._scheduler_policy.market_interval_seconds()
 
     def _ai_interval_seconds(self) -> int:
-        return _env_int("AI_ANALYSIS_INTERVAL_SECONDS", 3600)
+        return self._scheduler_policy.ai_interval_seconds()
 
     def _trade_interval_seconds(self) -> int:
-        return _env_int("TRADE_CYCLE_INTERVAL_SECONDS", 300 if self._is_market_open() else 3600)
+        return self._scheduler_policy.trade_interval_seconds()
+
+    def _strategy_daily_refresh_enabled(self) -> bool:
+        return self._scheduler_policy.strategy_daily_refresh_enabled()
+
+    def _strategy_daily_refresh_process_enabled(self) -> bool:
+        return self._scheduler_policy.strategy_daily_refresh_process_enabled()
+
+    def _strategy_daily_refresh_waits_for_heavy_jobs(self) -> bool:
+        return self._scheduler_policy.strategy_daily_refresh_waits_for_heavy_jobs()
+
+    def _strategy_daily_refresh_requires_ready_data(self) -> bool:
+        return _env_bool("QT_STRATEGY_DAILY_REFRESH_REQUIRE_READY_DATA", True)
+
+    def _strategy_daily_refresh_interval_seconds(self) -> int:
+        return self._scheduler_policy.strategy_daily_refresh_interval_seconds()
+
+    def _strategy_daily_refresh_initial_delay_seconds(self) -> int:
+        return self._scheduler_policy.strategy_daily_refresh_initial_delay_seconds()
 
     def _strategy_replay_interval_seconds(self) -> int:
-        return _env_int("STRATEGY_REPLAY_INTERVAL_SECONDS", 3600)
+        return self._scheduler_policy.strategy_replay_interval_seconds()
 
     def _strategy_replay_batch_days(self) -> int:
-        return max(1, min(_env_int("QT_STRATEGY_REPLAY_BATCH_DAYS", 15), 366))
+        return self._scheduler_policy.strategy_replay_batch_days()
 
     def _strategy_replay_max_models(self) -> int:
-        return max(1, min(_env_int("QT_STRATEGY_REPLAY_MAX_MODELS", 24), 200))
+        return self._scheduler_policy.strategy_replay_max_models()
 
     def _frontend_payload_precompute_interval_seconds(self) -> int:
-        return _env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_INTERVAL_SECONDS", 1800)
+        return self._scheduler_policy.frontend_payload_precompute_interval_seconds()
 
     def _frontend_payload_precompute_initial_delay_seconds(self) -> int:
-        return _env_nonnegative_int(
-            "QT_FRONT_PAYLOAD_PRECOMPUTE_INITIAL_DELAY_SECONDS",
-            self._frontend_payload_precompute_interval_seconds(),
-            86400,
-        )
+        return self._scheduler_policy.frontend_payload_precompute_initial_delay_seconds()
 
     def _frontend_payload_precompute_limit_users(self) -> int:
-        return max(1, min(_env_int("QT_FRONT_PAYLOAD_PRECOMPUTE_LIMIT_USERS", 8), 500))
+        return self._scheduler_policy.frontend_payload_precompute_limit_users()
 
     def _research_tasks_manual_only(self) -> bool:
-        return _env_bool("QT_RESEARCH_TASKS_MANUAL_ONLY", True)
+        return self._scheduler_policy.research_tasks_manual_only()
+
+    def _strategy_replay_auto_enabled(self) -> bool:
+        return self._scheduler_policy.strategy_replay_auto_enabled()
+
+    def _strategy_evolution_auto_enabled(self) -> bool:
+        return self._scheduler_policy.strategy_evolution_auto_enabled()
 
     def _frontend_payload_policy(self) -> Dict[str, Any]:
-        precompute_enabled = _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", False)
-        auto_on_miss_requested = _env_bool("QT_FRONT_PAYLOAD_AUTO_PRECOMPUTE_ON_MISS", False)
-        return {
-            "mode": "scheduled" if precompute_enabled else "manual",
-            "precompute_enabled": precompute_enabled,
-            "scheduled_precompute_enabled": precompute_enabled,
-            "auto_precompute_on_miss": precompute_enabled and auto_on_miss_requested,
-            "auto_precompute_on_miss_requested": auto_on_miss_requested,
-            "process_enabled": _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_PROCESS_ENABLED", True),
-            "interval_seconds": self._frontend_payload_precompute_interval_seconds(),
-            "initial_delay_seconds": self._frontend_payload_precompute_initial_delay_seconds(),
-            "limit_users": self._frontend_payload_precompute_limit_users(),
-            "max_seconds": _env_nonnegative_int("QT_FRONT_PAYLOAD_PRECOMPUTE_MAX_SECONDS", 20, 86400),
-            "recommendations_cache_ttl_seconds": _env_nonnegative_int(
-                "QT_FRONT_RECOMMENDATIONS_CACHE_TTL_SECONDS",
-                1800,
-                86400,
-            ),
-            "daily_plan_cache_ttl_seconds": _env_nonnegative_int(
-                "QT_FRONT_DAILY_PLAN_CACHE_TTL_SECONDS",
-                1800,
-                86400,
-            ),
-        }
+        return self._scheduler_policy.frontend_payload_policy()
 
     def _parse_date(self, value: str) -> Optional[datetime]:
         try:
@@ -1739,67 +2452,43 @@ class QuantJobManager:
             )
         return targets
 
+    def _strategy_daily_refresh_targets(self) -> list[Dict[str, Any]]:
+        return strategy_daily_runtime.target_models()
+
+    def _strategy_daily_refresh_lookback_days(self, hold_days: Any = 3) -> int:
+        default_days = max(10, int(safe_float(hold_days, 3)) + 7)
+        return max(1, min(_env_int("QT_STRATEGY_DAILY_REFRESH_LOOKBACK_DAYS", default_days), 120))
+
+    def _strategy_daily_refresh_start_date(self, target_date: str, hold_days: Any = 3) -> str:
+        target_dt = self._parse_date(target_date)
+        if not target_dt:
+            return str(target_date or "").strip()
+        return self._format_date(target_dt - timedelta(days=self._strategy_daily_refresh_lookback_days(hold_days)))
+
     def _strategy_evolution_interval_seconds(self) -> int:
-        return _env_int("STRATEGY_EVOLUTION_INTERVAL_SECONDS", 6 * 3600)
+        return self._scheduler_policy.strategy_evolution_interval_seconds()
 
     def _strategy_evolution_generations(self) -> int:
-        max_generations = max(1, min(_env_int("QT_STRATEGY_EVOLUTION_MAX_GENERATIONS", 8), 30))
-        return max(1, min(_env_int("STRATEGY_EVOLUTION_GENERATIONS", 1), max_generations))
+        return self._scheduler_policy.strategy_evolution_generations()
 
     def _strategy_evolution_population_size(self) -> int:
-        max_population = max(6, min(_env_int("QT_STRATEGY_EVOLUTION_MAX_POPULATION", 32), 80))
-        return max(6, min(_env_int("STRATEGY_EVOLUTION_POPULATION_SIZE", 16), max_population))
+        return self._scheduler_policy.strategy_evolution_population_size()
 
     def _kline_fill_interval_seconds(self) -> int:
-        return _env_int("KLINE_FILL_INTERVAL_SECONDS", 6 * 3600)
+        return self._scheduler_policy.kline_fill_interval_seconds()
 
     def _lhb_sync_interval_seconds(self) -> int:
-        return _env_int("LHB_SYNC_INTERVAL_SECONDS", 12 * 3600)
+        return self._scheduler_policy.lhb_sync_interval_seconds()
 
     def _auto_backfill_max_codes(self) -> int:
-        return max(1, min(_env_int("DATA_BACKFILL_MAX_CODES", 160), 2000))
+        return self._scheduler_policy.auto_backfill_max_codes()
 
     def _memory_guard(self) -> Dict[str, Any]:
-        threshold_pct = max(50.0, min(_env_float("QT_MEMORY_GUARD_PERCENT", 88.0), 99.0))
-        min_available_mb = max(0.0, _env_float("QT_MEMORY_GUARD_AVAILABLE_MB", 1024.0))
-        payload: Dict[str, Any] = {
-            "enabled": _env_bool("QT_MEMORY_GUARD_ENABLED", True),
-            "threshold_pct": threshold_pct,
-            "min_available_mb": min_available_mb,
-            "pressure": False,
-        }
-        if not payload["enabled"]:
-            return payload
-        meminfo_path = "/proc/meminfo"
-        if not os.path.exists(meminfo_path):
-            payload["status"] = "unsupported"
-            return payload
-        try:
-            values: Dict[str, float] = {}
-            with open(meminfo_path, "r", encoding="utf-8") as handle:
-                for line in handle:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        values[parts[0].rstrip(":")] = float(parts[1])
-            total_kb = values.get("MemTotal", 0.0)
-            available_kb = values.get("MemAvailable", values.get("MemFree", 0.0))
-            if total_kb <= 0:
-                payload["status"] = "unknown"
-                return payload
-            used_pct = max(0.0, min(100.0, (1 - available_kb / total_kb) * 100))
-            available_mb = available_kb / 1024
-            payload.update(
-                {
-                    "status": "ok",
-                    "used_pct": round(used_pct, 2),
-                    "available_mb": round(available_mb, 2),
-                    "pressure": used_pct >= threshold_pct or available_mb < min_available_mb,
-                }
-            )
-        except Exception as exc:
-            payload["status"] = "error"
-            payload["error"] = str(exc)
-        return payload
+        return memory_guard_snapshot(
+            enabled=_env_bool("QT_MEMORY_GUARD_ENABLED", True),
+            threshold_pct=max(50.0, min(_env_float("QT_MEMORY_GUARD_PERCENT", 88.0), 99.0)),
+            min_available_mb=max(0.0, _env_float("QT_MEMORY_GUARD_AVAILABLE_MB", 1024.0)),
+        )
 
     def _is_trading_day(self, now: Optional[datetime] = None) -> bool:
         now = now or _now_cn()
@@ -1826,6 +2515,7 @@ class QuantJobManager:
         next_kline_fill = time.time() + 5
         next_lhb_sync = time.time() + 20
         next_market_sync = time.time() + 40
+        next_strategy_daily_refresh = time.time() + self._strategy_daily_refresh_initial_delay_seconds()
         next_trade_cycle = time.time() + 50
         next_strategy_replay = time.time() + 70
         next_strategy_evolution = time.time() + 90
@@ -1835,6 +2525,8 @@ class QuantJobManager:
             now_cn = _now_cn()
             ran_task = False
             research_tasks_manual_only = self._research_tasks_manual_only()
+            strategy_replay_auto_enabled = self._strategy_replay_auto_enabled()
+            strategy_evolution_auto_enabled = self._strategy_evolution_auto_enabled()
             if now_ts >= next_news_fetch:
                 await asyncio.to_thread(
                     self.run_news_fetch,
@@ -1889,15 +2581,62 @@ class QuantJobManager:
                     )
                     next_market_sync = time.time() + 60
                 ran_task = True
+            if self._strategy_daily_refresh_enabled() and now_ts >= next_strategy_daily_refresh:
+                if self._is_trading_day(now_cn):
+                    self.reconcile_process_jobs()
+                    wait_payload = self._strategy_daily_refresh_wait_payload()
+                    if wait_payload:
+                        self._append_log(
+                            "info",
+                            wait_payload["message"],
+                            job="strategy_daily_refresh",
+                            stage="wait_heavy_job",
+                            payload=wait_payload,
+                        )
+                        next_strategy_daily_refresh = time.time() + int(wait_payload.get("retry_seconds") or 120)
+                    else:
+                        await asyncio.to_thread(
+                            self.run_strategy_daily_refresh,
+                            date=None,
+                            mode=os.getenv("QT_STRATEGY_DAILY_REFRESH_MODE", "daily"),
+                            background=False,
+                            process=self._strategy_daily_refresh_process_enabled(),
+                        )
+                        if self._strategy_daily_refresh_process_enabled():
+                            next_trade_cycle = max(next_trade_cycle, time.time() + 60)
+                        next_strategy_daily_refresh = time.time() + self._strategy_daily_refresh_interval_seconds()
+                else:
+                    self._append_log(
+                        "info",
+                        "非 A 股交易日，跳过策略日运行刷新",
+                        job="strategy_daily_refresh",
+                        stage="skip",
+                        payload={"now": now_cn.isoformat(timespec="seconds"), "trading_day": False},
+                    )
+                    next_strategy_daily_refresh = time.time() + self._strategy_daily_refresh_interval_seconds()
+                ran_task = True
+            elif not self._strategy_daily_refresh_enabled():
+                next_strategy_daily_refresh = time.time() + self._strategy_daily_refresh_interval_seconds()
             if now_ts >= next_trade_cycle:
                 if self._is_market_open(now_cn):
-                    await asyncio.to_thread(
-                        self.run_trade_cycle,
-                        date=None,
-                        notify=True,
-                        process=_env_bool("QT_TRADE_CYCLE_PROCESS_ENABLED", True),
-                    )
-                    next_trade_cycle = time.time() + self._trade_interval_seconds()
+                    self.reconcile_process_jobs()
+                    if self._job_active("strategy_daily_refresh"):
+                        self._append_log(
+                            "info",
+                            "策略日运行刷新仍在执行，延后交易循环",
+                            job="trade_cycle",
+                            stage="wait_strategy_daily_refresh",
+                            payload={"now": now_cn.isoformat(timespec="seconds"), "retry_seconds": 60},
+                        )
+                        next_trade_cycle = time.time() + 60
+                    else:
+                        await asyncio.to_thread(
+                            self.run_trade_cycle,
+                            date=None,
+                            notify=True,
+                            process=_env_bool("QT_TRADE_CYCLE_PROCESS_ENABLED", True),
+                        )
+                        next_trade_cycle = time.time() + self._trade_interval_seconds()
                 else:
                     self._append_log(
                         "info",
@@ -1908,11 +2647,7 @@ class QuantJobManager:
                     )
                     next_trade_cycle = time.time() + 60
                 ran_task = True
-            if (
-                not research_tasks_manual_only
-                and _env_bool("STRATEGY_REPLAY_ENABLED", False)
-                and now_ts >= next_strategy_replay
-            ):
+            if strategy_replay_auto_enabled and now_ts >= next_strategy_replay:
                 await asyncio.to_thread(
                     self.run_strategy_replay,
                     start_date=None,
@@ -1925,13 +2660,9 @@ class QuantJobManager:
                 )
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
                 ran_task = True
-            elif research_tasks_manual_only or not _env_bool("STRATEGY_REPLAY_ENABLED", False):
+            elif not strategy_replay_auto_enabled:
                 next_strategy_replay = time.time() + self._strategy_replay_interval_seconds()
-            if (
-                not research_tasks_manual_only
-                and _env_bool("STRATEGY_EVOLUTION_ENABLED", False)
-                and now_ts >= next_strategy_evolution
-            ):
+            if strategy_evolution_auto_enabled and now_ts >= next_strategy_evolution:
                 evolution_state = strategy_evolution.status()
                 if evolution_state.get("status") not in {"running", "paused"}:
                     await asyncio.to_thread(
@@ -1948,7 +2679,7 @@ class QuantJobManager:
                     ran_task = True
                 else:
                     next_strategy_evolution = time.time() + 300
-            elif research_tasks_manual_only or not _env_bool("STRATEGY_EVOLUTION_ENABLED", False):
+            elif not strategy_evolution_auto_enabled:
                 next_strategy_evolution = time.time() + self._strategy_evolution_interval_seconds()
             if _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", False) and now_ts >= next_frontend_payload_precompute:
                 await asyncio.to_thread(
@@ -1966,47 +2697,67 @@ class QuantJobManager:
                 next_frontend_payload_precompute = time.time() + self._frontend_payload_precompute_interval_seconds()
             if ran_task:
                 state = self._load_state()
-                state["scheduler"] = {
-                    "enabled": True,
-                    "status": "running",
-                    "last_tick_at": _iso_now(),
-                    "market_open": self._is_market_open(),
-                    "trading_day": self._is_trading_day(),
-                    "next_news_fetch_at": datetime.fromtimestamp(next_news_fetch, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "news_interval_seconds": self._news_interval_seconds(),
-                    "next_ai_analysis_at": datetime.fromtimestamp(next_ai_analysis, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "ai_interval_seconds": self._ai_interval_seconds(),
-                    "next_market_sync_at": datetime.fromtimestamp(next_market_sync, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "market_interval_seconds": self._market_interval_seconds(),
-                    "next_kline_fill_at": datetime.fromtimestamp(next_kline_fill, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "kline_fill_interval_seconds": self._kline_fill_interval_seconds(),
-                    "next_lhb_sync_at": datetime.fromtimestamp(next_lhb_sync, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "lhb_sync_interval_seconds": self._lhb_sync_interval_seconds(),
-                    "data_backfill_start_date": self._default_backfill_start_date(),
-                    "data_backfill_end_date": os.getenv("DATA_BACKFILL_END_DATE") or "",
-                    "data_backfill_max_codes": self._auto_backfill_max_codes(),
-                    "next_trade_cycle_at": datetime.fromtimestamp(next_trade_cycle, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "trade_interval_seconds": self._trade_interval_seconds(),
-                    "next_strategy_replay_at": datetime.fromtimestamp(next_strategy_replay, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "strategy_replay_interval_seconds": self._strategy_replay_interval_seconds(),
-                    "strategy_replay_start_date": self._default_backfill_start_date(),
-                    "strategy_replay_batch_days": self._strategy_replay_batch_days(),
-                    "strategy_replay_enabled": _env_bool("STRATEGY_REPLAY_ENABLED", False),
-                    "strategy_replay_process_enabled": _env_bool("QT_STRATEGY_REPLAY_PROCESS_ENABLED", True),
-                    "next_strategy_evolution_at": datetime.fromtimestamp(next_strategy_evolution, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "strategy_evolution_interval_seconds": self._strategy_evolution_interval_seconds(),
-                    "strategy_evolution_start_date": self._default_backfill_start_date(),
-                    "strategy_evolution_generations": self._strategy_evolution_generations(),
-                    "strategy_evolution_population_size": self._strategy_evolution_population_size(),
-                    "strategy_evolution_enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", False),
-                    "strategy_evolution_process_enabled": _env_bool("QT_STRATEGY_EVOLUTION_PROCESS_ENABLED", True),
-                    "research_tasks_manual_only": research_tasks_manual_only,
-                    "next_frontend_payload_precompute_at": datetime.fromtimestamp(next_frontend_payload_precompute, ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-                    "frontend_payload_precompute_interval_seconds": self._frontend_payload_precompute_interval_seconds(),
-                    "frontend_payload_precompute_initial_delay_seconds": self._frontend_payload_precompute_initial_delay_seconds(),
-                    "frontend_payload_precompute_limit_users": self._frontend_payload_precompute_limit_users(),
-                    "frontend_payload_precompute_enabled": _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", False),
-                }
+                backfill_start_date = self._default_backfill_start_date()
+                state["scheduler"] = build_scheduler_status(
+                    last_tick_at=_iso_now(),
+                    market_open=self._is_market_open(),
+                    trading_day=self._is_trading_day(),
+                    next_runs={
+                        "news_fetch": next_news_fetch,
+                        "ai_analysis": next_ai_analysis,
+                        "market_sync": next_market_sync,
+                        "kline_fill": next_kline_fill,
+                        "lhb_sync": next_lhb_sync,
+                        "strategy_daily_refresh": next_strategy_daily_refresh,
+                        "trade_cycle": next_trade_cycle,
+                        "strategy_replay": next_strategy_replay,
+                        "strategy_evolution": next_strategy_evolution,
+                        "frontend_payload_precompute": next_frontend_payload_precompute,
+                    },
+                    intervals={
+                        "news": self._news_interval_seconds(),
+                        "ai": self._ai_interval_seconds(),
+                        "market": self._market_interval_seconds(),
+                        "kline_fill": self._kline_fill_interval_seconds(),
+                        "lhb_sync": self._lhb_sync_interval_seconds(),
+                        "strategy_daily_refresh": self._strategy_daily_refresh_interval_seconds(),
+                        "trade": self._trade_interval_seconds(),
+                        "strategy_replay": self._strategy_replay_interval_seconds(),
+                        "strategy_evolution": self._strategy_evolution_interval_seconds(),
+                        "frontend_payload_precompute": self._frontend_payload_precompute_interval_seconds(),
+                    },
+                    data_backfill={
+                        "start_date": backfill_start_date,
+                        "end_date": os.getenv("DATA_BACKFILL_END_DATE") or "",
+                        "max_codes": self._auto_backfill_max_codes(),
+                    },
+                    strategy_daily_refresh={
+                        "initial_delay_seconds": self._strategy_daily_refresh_initial_delay_seconds(),
+                        "enabled": self._strategy_daily_refresh_enabled(),
+                        "process_enabled": self._strategy_daily_refresh_process_enabled(),
+                        "waits_for_heavy_jobs": self._strategy_daily_refresh_waits_for_heavy_jobs(),
+                        "mode": os.getenv("QT_STRATEGY_DAILY_REFRESH_MODE", "daily"),
+                    },
+                    strategy_replay={
+                        "start_date": backfill_start_date,
+                        "batch_days": self._strategy_replay_batch_days(),
+                        "enabled": _env_bool("STRATEGY_REPLAY_ENABLED", False),
+                        "process_enabled": _env_bool("QT_STRATEGY_REPLAY_PROCESS_ENABLED", True),
+                    },
+                    strategy_evolution={
+                        "start_date": backfill_start_date,
+                        "generations": self._strategy_evolution_generations(),
+                        "population_size": self._strategy_evolution_population_size(),
+                        "enabled": _env_bool("STRATEGY_EVOLUTION_ENABLED", False),
+                        "process_enabled": _env_bool("QT_STRATEGY_EVOLUTION_PROCESS_ENABLED", True),
+                    },
+                    frontend_payload_precompute={
+                        "initial_delay_seconds": self._frontend_payload_precompute_initial_delay_seconds(),
+                        "limit_users": self._frontend_payload_precompute_limit_users(),
+                        "enabled": _env_bool("QT_FRONT_PAYLOAD_PRECOMPUTE_ENABLED", False),
+                    },
+                    research_tasks_manual_only=research_tasks_manual_only,
+                )
                 self._save_state(state)
                 self._append_log(
                     "info",

@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Request
 
-from app.quant.engine import DATA_DIR, read_json, safe_float, write_json
+from app.quant.engine_utils import read_json, safe_float, write_json
+from app.quant.quant_paths import DATA_DIR
 
 
 ACCESS_LOG_FILE = DATA_DIR / "access_logs.json"

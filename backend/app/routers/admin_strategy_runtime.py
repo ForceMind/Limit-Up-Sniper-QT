@@ -1,6 +1,8 @@
 from typing import Any, Callable, Dict, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+
+from app.quant.strategy_runtime_admin import StrategyRuntimeModelNotFound
 
 
 StrategyRuntimeMatrixPayload = Callable[[Optional[str], int, bool], Dict[str, Any]]
@@ -13,6 +15,12 @@ def build_admin_strategy_runtime_router(
     replay_payload: StrategyRuntimeAccountPayload,
 ) -> APIRouter:
     router = APIRouter()
+
+    def runtime_payload(payload_fn: StrategyRuntimeAccountPayload, **kwargs: Any) -> Dict[str, Any]:
+        try:
+            return payload_fn(**kwargs)
+        except StrategyRuntimeModelNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.get("/api/admin/strategy_runtime/matrix")
     def admin_strategy_runtime_matrix(
@@ -34,7 +42,8 @@ def build_admin_strategy_runtime_router(
         start_date: Optional[str] = Query(default=None),
         limit: int = Query(default=1000, ge=1, le=2000),
     ):
-        return trading_account_payload(
+        return runtime_payload(
+            trading_account_payload,
             as_of=as_of,
             model_id=model_id,
             initial_cash=initial_cash,
@@ -50,7 +59,8 @@ def build_admin_strategy_runtime_router(
         start_date: Optional[str] = Query(default=None),
         limit: int = Query(default=1000, ge=1, le=2000),
     ):
-        return replay_payload(
+        return runtime_payload(
+            replay_payload,
             as_of=as_of,
             model_id=model_id,
             initial_cash=initial_cash,

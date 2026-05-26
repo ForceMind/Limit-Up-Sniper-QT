@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from app.quant.engine import safe_float
+from app.quant.engine_utils import safe_float
 
 
 DEFAULT_FRONTEND_STRATEGY_ID = "capital_10000"

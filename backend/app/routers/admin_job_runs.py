@@ -7,6 +7,7 @@ NewsFetchPayload = Callable[[int, int, int, bool, bool], Dict[str, Any]]
 MarketSyncPayload = Callable[[Optional[str], str, int, bool, bool, bool, bool], Dict[str, Any]]
 AiAnalyzePayload = Callable[[Optional[str], int, int, bool, bool], Dict[str, Any]]
 TradingRunPayload = Callable[[Optional[str], bool, bool, bool], Dict[str, Any]]
+StrategyDailyRefreshPayload = Callable[[Optional[str], str, bool, bool], Dict[str, Any]]
 StrategyReplayPayload = Callable[[Optional[str], Optional[str], str, Optional[int], bool, bool, bool], Dict[str, Any]]
 FrontendPayloadPrecomputePayload = Callable[
     [Optional[str], Optional[str], int, bool, bool, bool, int, int, int, Optional[int]],
@@ -27,6 +28,7 @@ def build_admin_job_runs_router(
     market_sync_payload: MarketSyncPayload,
     ai_analyze_payload: AiAnalyzePayload,
     trading_run_payload: TradingRunPayload,
+    strategy_daily_refresh_payload: StrategyDailyRefreshPayload,
     strategy_replay_payload: StrategyReplayPayload,
     frontend_payload_precompute_payload: FrontendPayloadPrecomputePayload,
     frontend_account_precompute_payload: FrontendAccountPrecomputePayload,
@@ -36,6 +38,7 @@ def build_admin_job_runs_router(
     market_sync_process_default: bool = True,
     ai_analysis_process_default: bool = True,
     trade_cycle_process_default: bool = True,
+    strategy_daily_refresh_process_default: bool = True,
     heavy_job_process_default: bool = True,
     frontend_payload_process_default: bool = True,
     frontend_account_process_default: bool = True,
@@ -84,6 +87,15 @@ def build_admin_job_runs_router(
         process: bool = Query(default=trade_cycle_process_default),
     ):
         return trading_run_payload(date, notify, background, process)
+
+    @router.post("/api/jobs/strategy/daily_refresh")
+    def jobs_strategy_daily_refresh(
+        date: Optional[str] = Query(default=None),
+        mode: str = Query(default="daily"),
+        background: bool = Query(default=True),
+        process: bool = Query(default=strategy_daily_refresh_process_default),
+    ):
+        return strategy_daily_refresh_payload(date, mode, background, process)
 
     @router.post("/api/jobs/strategy/replay")
     def jobs_strategy_replay(

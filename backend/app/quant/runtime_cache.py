@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from app.quant.engine import QUANT_DB_FILE
+from app.quant.quant_paths import QUANT_DB_FILE
 
 
 def _json_text(value: Any) -> str:

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from typing import Any, Dict, Optional
 
 from app.quant.capital_strategy import DEFAULT_FRONTEND_STRATEGY_ID, recommended_strategy_id
-from app.quant.engine import safe_float
+from app.quant.engine_utils import safe_float
 
 
 def strategy_catalog_items(models_payload: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -65,12 +65,11 @@ def resolve_front_profile_updates(
     items = strategy_catalog_items(load_models())
     selected = next((item for item in items if str(item.get("id") or "") == requested_id), None)
     if not include_catalog and requested_id and requested_id != "active" and selected is None:
-        try:
-            selected = model_loader(requested_id, include_records=False) or None
-            if isinstance(selected, dict) and selected:
-                resolved_model = selected
-        except Exception:
-            selected = None
+        models_payload = models_loader(True)
+        items = strategy_catalog_items(models_payload)
+        selected = next((item for item in items if str(item.get("id") or "") == requested_id), None)
+        if isinstance(selected, dict):
+            resolved_model = {**selected, "frontend_target_verified": True}
     if not requested_id or requested_id == "active" or selected is None:
         resolved["strategy_model_id"] = recommended_strategy_id(cash, items) or DEFAULT_FRONTEND_STRATEGY_ID
         resolved_model = None

@@ -278,6 +278,11 @@
             <button class="mobile-link" @click="loadAll">刷新</button>
           </div>
           <div class="summary-grid">
+            <div class="summary-tile">
+              <div class="label">跟随策略</div>
+              <div class="value text-base" :class="strategyDailyStatusClass">{{ strategyDailyStatusText }}</div>
+              <div class="mt-1 text-xs text-neutral-500">{{ strategyDailyStatusDetail }}</div>
+            </div>
             <button class="summary-tile text-left" @click="setMobileView('buy')">
               <div class="label">买入信号</div>
               <div class="value text-red-600">{{ buySignalCount }}</div>
@@ -293,6 +298,10 @@
             <button class="summary-tile text-left" @click="setMobileView('news')">
               <div class="label">最新新闻</div>
               <div class="value">{{ latestNewsCount }}</div>
+            </button>
+            <button class="summary-tile text-left" @click="setMobileView('news'); newsFilter = 'linked'">
+              <div class="label">策略相关新闻</div>
+              <div class="value">{{ relatedStrategyNewsCount }}</div>
             </button>
             <button class="summary-tile text-left" @click="setMobileView('strategy')">
               <div class="label">策略模型</div>
@@ -352,7 +361,7 @@
               </div>
             </div>
           </article>
-          <div v-if="!buyList.length" class="p-10 text-center text-neutral-500 text-sm">这一天没有达到买入阈值的股票</div>
+          <div v-if="!buyList.length" class="p-10 text-center text-neutral-500 text-sm">{{ strategyDailyBuyEmptyText }}</div>
         </section>
 
         <section v-if="isLoggedIn" v-show="mobileView === 'positions'" class="mobile-panel">
@@ -416,7 +425,7 @@
               </div>
               <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
             </article>
-            <div v-if="!historyDeals.length" class="p-10 text-center text-neutral-500 text-sm">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</div>
+            <div v-if="!historyDeals.length" class="p-10 text-center text-neutral-500 text-sm">{{ strategyDailyDealsEmptyText }}</div>
           </div>
           <div v-show="activeTab === 'delivery'">
             <article v-for="record in deliveryRecords" :key="'m-delivery-' + record.deal_id" class="deal-row">
@@ -484,6 +493,7 @@
                 <div class="tag-line">
                   <span class="tag">持仓 {{ fixed((model.params || {}).max_positions, 0) }}</span>
                   <span class="tag">单票 {{ money((model.params || {}).paper_position_value) }}</span>
+                  <span class="tag" :class="followReadinessClass(model)">{{ followReadinessText(model) }}</span>
                 </div>
               </div>
               <div>
@@ -539,7 +549,7 @@
               <div class="score-buy" :class="Number(event.sentiment || 0) < 0 ? 'text-green-700' : 'text-red-600'">{{ Number(event.sentiment || 0) < 0 ? '利空' : '利好' }}</div>
             </div>
           </article>
-          <div v-if="!filteredMobileEventList.length" class="p-10 text-center text-neutral-500 text-sm">当前筛选下暂无结构化事件</div>
+          <div v-if="!filteredMobileEventList.length" class="p-10 text-center text-neutral-500 text-sm">{{ newsFilter === 'linked' ? '当前跟随策略暂无相关新闻' : '当前筛选下暂无结构化事件' }}</div>
         </section>
       </main>
 
@@ -621,6 +631,14 @@
           <div class="text-xs text-neutral-500">今日成交/持仓</div>
           <div class="text-lg font-semibold mt-1">{{ todayDeals.length }} / {{ positions.length }}</div>
         </div>
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">策略日状态</div>
+          <div class="text-lg font-semibold mt-1" :class="strategyDailyStatusClass">{{ strategyDailyStatusText }}</div>
+        </div>
+        <div v-if="isLoggedIn" class="metric-card bg-white border border-neutral-300 p-3">
+          <div class="text-xs text-neutral-500">策略相关新闻</div>
+          <div class="text-lg font-semibold mt-1">{{ relatedStrategyNewsCount }}</div>
+        </div>
       </section>
 
       <section v-if="isLoggedIn && mobileView !== 'overview'" class="mobile-only terminal-panel p-3">
@@ -656,6 +674,37 @@
       <section v-if="isLoggedIn && accountPending" class="bg-amber-50 border border-amber-200 p-3 text-sm text-amber-900 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>{{ pendingAccountText }}</div>
         <button class="h-8 px-3 border border-amber-300 bg-white text-amber-900" @click="loadMarketData(true)">刷新账户</button>
+      </section>
+
+      <section v-if="isLoggedIn" class="bg-white border border-neutral-300 p-4 text-sm">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 class="font-semibold">跟随策略今日状态</h2>
+            <div class="text-xs text-neutral-500 mt-1">{{ followedModelName }} · {{ strategyDailyStatusDetail }}</div>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3 min-w-0">
+            <div>
+              <div class="text-xs text-neutral-500">状态</div>
+              <div class="font-semibold" :class="strategyDailyStatusClass">{{ strategyDailyStatusText }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">买入</div>
+              <div class="font-semibold text-red-600">{{ strategyDailyBuyCount }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">卖出</div>
+              <div class="font-semibold text-green-700">{{ strategyDailySellCount }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">相关新闻</div>
+              <div class="font-semibold">{{ relatedStrategyNewsCount }}</div>
+            </div>
+            <div>
+              <div class="text-xs text-neutral-500">数据日期</div>
+              <div class="font-semibold">{{ strategyDaily.data_date || strategyDaily.as_of || asOf || '-' }}</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section v-if="isLoggedIn" class="mobile-page bg-white border border-neutral-300 p-4" :class="{ 'active-mobile': mobileView === 'strategy' }">
@@ -740,6 +789,7 @@
                 <th class="text-right px-3 py-2">回撤</th>
                 <th class="text-right px-3 py-2">胜率</th>
                 <th class="text-right px-3 py-2">交易</th>
+                <th class="text-right px-3 py-2">状态</th>
                 <th class="text-right px-3 py-2">买入阈值</th>
                 <th class="text-right px-3 py-2">单票资金</th>
                 <th class="text-right px-3 py-2">跟随</th>
@@ -756,6 +806,7 @@
                 <td class="px-3 py-2 text-right">{{ metricPct(model.max_drawdown_pct) }}</td>
                 <td class="px-3 py-2 text-right">{{ metricPct(model.win_rate) }}</td>
                 <td class="px-3 py-2 text-right">{{ model.closed_trades || 0 }}</td>
+                <td class="px-3 py-2 text-right" :class="followReadinessClass(model)">{{ followReadinessText(model) }}</td>
                 <td class="px-3 py-2 text-right">{{ fixed((model.params || {}).buy_threshold) }}</td>
                 <td class="px-3 py-2 text-right">{{ money((model.params || {}).paper_position_value) }}</td>
                 <td class="px-3 py-2 text-right">
@@ -763,7 +814,7 @@
                 </td>
               </tr>
               <tr v-if="!strategyItems.length">
-                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">暂无进化策略模型，请在后台启动遗传进化。</td>
+                <td colspan="10" class="px-3 py-10 text-center text-neutral-500">暂无进化策略模型，请在后台启动遗传进化。</td>
               </tr>
             </tbody>
           </table>
@@ -829,9 +880,9 @@
           <div class="section-head px-4 py-3 border-b border-neutral-300 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 class="font-semibold">今日买入计划</h2>
-              <div class="text-xs text-neutral-500">达到买入阈值的股票，按 0-100 买入评分排序；评分不是上涨概率</div>
+              <div class="text-xs text-neutral-500">{{ strategyDailyUsable ? '当前跟随策略当天落库信号；没有记录即今日无买入动作' : '达到买入阈值的股票，按 0-100 买入评分排序；评分不是上涨概率' }}</div>
             </div>
-            <div class="text-xs text-neutral-500">买入阈值 {{ fixed(rules.buy_threshold) }}，单票资金 {{ money(rules.paper_position_value) }}</div>
+            <div class="text-xs text-neutral-500">{{ strategyDailyStatusDetail }}</div>
           </div>
           <div class="compact-list mobile-only">
             <article v-for="item in buyList" :key="item.code" class="compact-card">
@@ -865,7 +916,7 @@
                 </div>
               </div>
             </article>
-            <div v-if="!buyList.length" class="px-4 py-10 text-center text-neutral-500">这一天没有达到买入阈值的股票</div>
+            <div v-if="!buyList.length" class="px-4 py-10 text-center text-neutral-500">{{ strategyDailyBuyEmptyText }}</div>
           </div>
           <div class="table-wrap desktop-mobile-table overflow-auto max-h-[510px]">
             <table class="w-full text-sm">
@@ -897,7 +948,7 @@
                   <td class="px-3 py-3 text-right">{{ item.event_count || 0 }}</td>
                 </tr>
                 <tr v-if="!buyList.length">
-                  <td colspan="7" class="px-3 py-10 text-center text-neutral-500">这一天没有达到买入阈值的股票</td>
+                  <td colspan="7" class="px-3 py-10 text-center text-neutral-500">{{ strategyDailyBuyEmptyText }}</td>
                 </tr>
               </tbody>
             </table>
@@ -993,7 +1044,7 @@
             </button>
           </div>
           <div class="text-xs text-neutral-500">
-            历史成交 {{ historyDeals.length }}，交割单 {{ deliveryRecords.length }}，历史计划 {{ historyDays.length }}
+            成交 {{ historyDeals.length }}，交割单 {{ deliveryRecords.length }}，历史计划 {{ historyDays.length }}
           </div>
         </div>
 
@@ -1025,7 +1076,7 @@
             </div>
             <p class="mt-2 text-xs text-neutral-500 line-clamp-2">{{ deal.reason || '-' }}</p>
           </article>
-          <div v-if="!historyDeals.length" class="px-4 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</div>
+          <div v-if="!historyDeals.length" class="px-4 py-10 text-center text-neutral-500">{{ strategyDailyDealsEmptyText }}</div>
         </div>
         <div v-show="activeTab === 'deals'" class="table-wrap desktop-mobile-table overflow-auto max-h-[560px]">
           <table class="w-full text-sm">
@@ -1055,7 +1106,7 @@
                 <td class="px-3 py-2 line-clamp-2">{{ deal.reason || '-' }}</td>
               </tr>
               <tr v-if="!historyDeals.length">
-                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">{{ accountPending ? pendingAccountText : '暂无历史成交' }}</td>
+                <td colspan="9" class="px-3 py-10 text-center text-neutral-500">{{ strategyDailyDealsEmptyText }}</td>
               </tr>
             </tbody>
           </table>
@@ -1224,9 +1275,10 @@
           profileMessage: '',
           marketSentiment: {},
           newsFeed: {},
+          strategyDaily: {},
           syncResult: {},
           tabs: [
-            { key: 'deals', label: '历史成交' },
+            { key: 'deals', label: '当日成交' },
             { key: 'delivery', label: '交割单' },
             { key: 'history', label: '历史计划收益' },
           ],
@@ -1252,18 +1304,158 @@
         },
         scheduler() { return this.jobStatus.scheduler || {}; },
         dataDate() { return this.status.data_date || this.status.latest_event_date || ''; },
-        latestNews() { return this.newsFeed.items || []; },
-        structuredEvents() { return this.newsFeed.events || []; },
+        strategyDailyFresh() { return Boolean(this.strategyDaily.as_of && (!this.asOf || this.strategyDaily.as_of === this.asOf)); },
+        strategyDailyResult() { return this.strategyDaily.daily || {}; },
+        strategyDailySummary() { return this.strategyDaily.daily_summary || {}; },
+        strategyDailyReadiness() { return this.strategyDaily.follow_readiness || {}; },
+        strategyDailyUsable() {
+          if (!this.strategyDailyFresh) return false;
+          if (this.strategyDailyReadiness.ready_for_follow === true) return true;
+          return this.strategyDaily.status === 'ok' && Object.keys(this.strategyDailyResult || {}).length > 0;
+        },
+        strategyDailyBlockingReasons() {
+          const reasons = this.strategyDailyReadiness.blocking_reasons || [];
+          return Array.isArray(reasons) ? reasons.map(item => String(item || '')) : [];
+        },
+        strategyDailyNotes() {
+          const notes = this.strategyDailyReadiness.notes || this.strategyDailyReadiness.warnings || [];
+          return Array.isArray(notes) ? notes.map(item => String(item || '')) : [];
+        },
+        strategyDailyBuyCount() {
+          const trades = this.strategyDaily.buy_trades || [];
+          if (Array.isArray(trades) && trades.length) return trades.length;
+          return this.strategyDailyUsable ? this.buyList.length : 0;
+        },
+        strategyDailySellCount() {
+          const trades = this.strategyDaily.sell_trades || [];
+          if (Array.isArray(trades) && trades.length) return trades.length;
+          return this.strategyDailyUsable ? this.strategyDailyTrades.filter(deal => deal.side === 'SELL').length : 0;
+        },
+        relatedStrategyNewsCount() {
+          const related = this.strategyDaily.related_news || {};
+          return Number(related.count || (related.events || []).length || (related.items || []).length || 0);
+        },
+        relatedStrategyEvents() {
+          const related = this.strategyDaily.related_news || {};
+          const rows = [];
+          const pushRow = item => {
+            if (!item) return;
+            const code = item.code || item.stock_code || '';
+            const name = item.name || item.stock_name || item.title || '-';
+            const title = item.title || item.summary || item.name || '-';
+            rows.push({
+              ...item,
+              event_id: item.event_id || item.id || item.url || `${code}-${title}`,
+              code,
+              name,
+              title,
+              impact_score: Number(item.impact_score || item.score || 0),
+              sentiment: Number(item.sentiment || 0),
+              occurred_at: item.occurred_at || item.published_at || item.time || item.date || '',
+              source: item.source || item.provider || '策略相关新闻',
+            });
+          };
+          (Array.isArray(related.events) ? related.events : []).forEach(pushRow);
+          (Array.isArray(related.items) ? related.items : []).forEach(pushRow);
+          return rows;
+        },
+        strategyDailyStatusText() {
+          if (!this.isLoggedIn) return '-';
+          if (!this.strategyDaily.as_of) return '等待刷新';
+          if (this.strategyDailyUsable) {
+            const notes = this.strategyDailyNotes.join(',');
+            if (notes.includes('no_signal') && notes.includes('no_trade')) return '今日无操作';
+            if (notes.includes('no_signal')) return '无买入信号';
+            if (notes.includes('no_trade')) return '无成交';
+            return '可跟随';
+          }
+          const reasons = this.strategyDailyBlockingReasons.join(',');
+          if (reasons.includes('stale')) return '运行结果过期';
+          if (reasons.includes('missing')) return '运行结果缺失';
+          return '等待运行结果';
+        },
+        strategyDailyStatusClass() {
+          if (this.strategyDailyUsable) {
+            return this.strategyDailyNotes.length ? 'text-amber-700' : 'text-emerald-700';
+          }
+          if (this.strategyDailyBlockingReasons.length || this.strategyDaily.as_of) return 'text-amber-700';
+          return 'text-neutral-700';
+        },
+        strategyDailyStatusDetail() {
+          if (!this.isLoggedIn) return '登录后可查看当前跟随策略的当天运行结果。';
+          if (!this.strategyDaily.as_of) return '尚未加载当前跟随策略的当天运行结果。';
+          if (this.strategyDailyUsable) {
+            return `数据 ${this.strategyDaily.as_of || '-'} · 信号 ${this.strategyDailySignals.length} · 成交 ${this.strategyDailyTrades.length}`;
+          }
+          const reasons = this.strategyDailyBlockingReasons.join(',');
+          if (reasons.includes('stale')) return `当前结果日期 ${this.strategyDaily.as_of || '-'}，不是最新交易日 ${this.asOf || this.dataDate || '-'}。`;
+          if (reasons.includes('missing')) return '当前跟随策略还没有当天运行结果，等待后台策略日刷新。';
+          return '当前跟随策略当天运行结果尚不可用。';
+        },
+        strategyDailyBuyEmptyText() {
+          if (this.strategyDailyUsable) {
+            return this.strategyDailyNotes.join(',').includes('no_signal')
+              ? '当前跟随策略今日没有买入信号。'
+              : '当前跟随策略今日没有达到买入条件的股票。';
+          }
+          return this.strategyDailyStatusDetail || '暂无买入候选';
+        },
+        strategyDailyDealsEmptyText() {
+          if (this.strategyDailyUsable) return '当前跟随策略今日没有成交。';
+          return this.accountPending ? this.pendingAccountText : '暂无历史成交';
+        },
+        strategyDailySignals() {
+          const signals = this.strategyDailyResult.signals || [];
+          return signals.map((item, index) => ({
+            signal_id: item.signal_id || `daily-signal-${index}`,
+            action: item.action || '',
+            code: item.code || '',
+            name: item.name || item.code || '-',
+            buy_score: Number(item.buy_score || 0),
+            sell_score: Number(item.sell_score || 0),
+            reason: item.reason || '',
+            event_type: item.mode || item.source || '策略信号',
+            event_count: item.event_count || 0,
+            generated_at: item.generated_at || '',
+            execute_on: item.execute_on || '',
+            components: item.components || {},
+            daily_runtime: true,
+          }));
+        },
+        strategyDailyTrades() {
+          const trades = this.strategyDailyResult.trades || [];
+          return trades.map((item, index) => {
+            const side = String(item.side || '').toUpperCase();
+            return {
+              ...item,
+              deal_id: item.deal_id || `daily-trade-${index}-${item.code || ''}-${side}`,
+              direction: item.direction || (side === 'BUY' ? '买入' : (side === 'SELL' ? '卖出' : side || '-')),
+              side,
+              total_fee: Number(item.total_fee || 0),
+              realized_pnl: Number(item.realized_pnl || item.pnl_amount || 0),
+              daily_runtime: true,
+            };
+          });
+        },
+        hasStrategyDailySignals() { return this.strategyDailyFresh && this.strategyDailySignals.length > 0; },
+        hasStrategyDailyTrades() { return this.strategyDailyFresh && this.strategyDailyTrades.length > 0; },
+        latestNews() {
+          const dailyItems = (this.strategyDaily.news || {}).items;
+          return Array.isArray(dailyItems) && dailyItems.length ? dailyItems : (this.newsFeed.items || []);
+        },
+        structuredEvents() {
+          const dailyEvents = (this.strategyDaily.news || {}).events;
+          return Array.isArray(dailyEvents) && dailyEvents.length ? dailyEvents : (this.newsFeed.events || []);
+        },
         positions() { return this.accountView.positions || []; },
-        todayDeals() { return this.accountView.today_deals || []; },
-        historyDeals() { return this.accountView.history_deals || []; },
+        todayDeals() { return this.strategyDailyUsable ? this.strategyDailyTrades : []; },
+        historyDeals() { return this.strategyDailyUsable ? this.strategyDailyTrades : []; },
         deliveryRecords() { return this.accountView.delivery_records || []; },
         frozenMarketValue() {
           return this.positions.reduce((sum, pos) => sum + Number(pos.frozen_qty || 0) * Number(pos.last_price || 0), 0);
         },
         buySignalCount() {
-          const items = this.recommendations.items || this.plan.buy_list || [];
-          return items.filter(item => String(item.action || '买入').includes('买入') || Number(item.buy_score || 0) >= Number(this.rules.buy_threshold || 72)).length;
+          return this.strategyDailyUsable ? this.buyList.length : 0;
         },
         todaySellCount() {
           return this.todayDeals.filter(deal => deal.side === 'SELL').length;
@@ -1273,11 +1465,11 @@
         },
         latestNewsCount() {
           const byDate = (((this.status.jobs || {}).news_fetcher || {}).recent_dates || {})[this.asOf];
-          return Number(this.newsFeed.count || this.latestNews.length || byDate || this.status.news_count || this.status.latest_news_count || 0);
+          return Number(((this.strategyDaily.news || {}).count) || this.newsFeed.count || this.latestNews.length || byDate || this.status.news_count || this.status.latest_news_count || 0);
         },
         mobileEventList() {
-          const fallbackEvents = (this.recommendations.items || []).flatMap(item => item.events || []);
-          const events = (this.structuredEvents || []).length ? this.structuredEvents : fallbackEvents;
+          if (this.newsFilter === 'linked') return this.relatedStrategyEvents;
+          const events = this.structuredEvents || [];
           return events
             .slice()
             .sort((a, b) => Number(b.impact_score || 0) - Number(a.impact_score || 0))
@@ -1292,19 +1484,21 @@
             return items.filter(event => Number(event.sentiment || 0) < 0);
           }
           if (this.newsFilter === 'linked') {
-            return items.filter(event => event.code || event.name);
+            return items;
           }
           return items.filter(event => Number(event.impact_score || 0) >= 70).length
             ? items.filter(event => Number(event.impact_score || 0) >= 70)
             : items;
         },
         buyList() {
-          const planned = this.plan.buy_list || [];
-          const sample = item => ['600001', '600002'].includes(String((item || {}).code || '').trim()) || JSON.stringify(item || {}).includes('样例');
-          const items = (planned.length ? planned : ((this.recommendations.items || []).filter(item => String(item.action || '').includes('买入'))))
-            .filter(item => !sample(item));
-          const mobileLimit = Math.max(3, Number(this.rules.top_n || 5));
-          return window.innerWidth <= 767 ? items.slice(0, mobileLimit) : items;
+          const runtimeSignals = this.strategyDailySignals.filter(item => {
+            const action = String(item.action || '').toUpperCase();
+            return action.includes('BUY') || String(item.action || '').includes('买') || Number(item.buy_score || 0) >= Number(this.rules.buy_threshold || 72);
+          });
+          if (this.strategyDailyUsable) {
+            return runtimeSignals;
+          }
+          return [];
         },
         historyDays() { return this.plan.history_days || []; },
         strategyItems() {
@@ -1536,6 +1730,32 @@
         isFollowing(model) {
           return String((model || {}).id || '') === String(this.userProfile.strategy_model_id || 'capital_10000');
         },
+        followReadiness(model) {
+          const item = model || {};
+          return item.follow_readiness || {
+            ready_for_follow: Boolean(item.ready_for_follow || item.has_runtime_data),
+            status: item.runtime_data_status || item.runtime_status || '',
+            blocking_reasons: [],
+            runtime_end_date: item.runtime_end_date || '',
+          };
+        },
+        followReadinessText(model) {
+          const readiness = this.followReadiness(model);
+          if (readiness.ready_for_follow) {
+            const end = readiness.runtime_end_date || (model || {}).runtime_end_date || '';
+            return end ? `可跟随至 ${end}` : '可跟随';
+          }
+          const reasons = readiness.blocking_reasons || [];
+          if (reasons.includes('stale_runtime')) return '运行过期';
+          if (reasons.includes('missing_runtime') || readiness.status === 'missing') return '待运行';
+          if (readiness.status === 'not_loaded') return '待读取';
+          return '待准备';
+        },
+        followReadinessClass(model) {
+          const readiness = this.followReadiness(model);
+          if (readiness.ready_for_follow) return 'text-emerald-700';
+          return 'text-amber-700';
+        },
         async followStrategy(model) {
           if (!model || !model.id) return;
           this.profileForm.strategy_model_id = model.id;
@@ -1604,11 +1824,9 @@
             } else {
               this.profileMessage = `已保存，当前跟随：${this.followedModelName}；账户会由后台预热或手动刷新`;
             }
-            if (this.mobileView === 'buy') {
-              this.loadRecommendations(true);
-              this.loadPlan(true);
-            }
             if (precomputeQueued) this.profileMessage = `${this.profileMessage}；账户预热已排队`;
+            this.strategyDaily = {};
+            await this.loadStrategyDaily(true);
           } catch (err) {
             this.profileMessage = String(err.message || err);
           } finally {
@@ -1629,6 +1847,7 @@
             this.jobStatus = snapshot.jobs || {};
             if (snapshot.trading_account) this.accountView = snapshot.trading_account;
             if (snapshot.news) this.newsFeed = snapshot.news;
+            if (snapshot.strategy_daily) this.strategyDaily = snapshot.strategy_daily;
             if (snapshot.recommendations) this.recommendations = snapshot.recommendations;
             if (snapshot.strategy_models) this.strategyModels = snapshot.strategy_models;
             this.userProfile = { ...this.userProfile, ...(snapshot.frontend_profile || {}) };
@@ -1661,23 +1880,22 @@
           const mobile = window.innerWidth <= 767;
           window.setTimeout(async () => {
             if (!this.isLoggedIn) return;
+            const viewUsesDaily = !mobile || ['overview', 'buy', 'deals', 'news'].includes(this.mobileView);
+            if (viewUsesDaily && !this.strategyDailyFresh) {
+              await this.loadStrategyDaily(true);
+            }
             if (!mobile) {
               const tasks = [];
               if (!this.accountView.account) tasks.push(this.loadMarketData(true));
-              if (!this.recommendations.items) tasks.push(this.loadRecommendations(true));
-              if (!this.plan.as_of) tasks.push(this.loadPlan(true));
               await Promise.all(tasks);
               return;
             }
             const tasks = [];
-            if (['overview', 'positions', 'deals'].includes(this.mobileView) && !this.accountView.account) {
+            if (['overview', 'positions'].includes(this.mobileView) && !this.accountView.account) {
               tasks.push(this.loadMarketData(true));
             }
-            if (['overview', 'buy'].includes(this.mobileView) && !this.recommendations.items) {
-              tasks.push(this.loadRecommendations(true));
-            }
-            if (this.mobileView === 'buy' && !this.plan.as_of) {
-              tasks.push(this.loadPlan(true));
+            if (this.mobileView === 'deals' && !this.hasStrategyDailyTrades && !this.accountView.account) {
+              tasks.push(this.loadMarketData(true));
             }
             await Promise.all(tasks);
           }, 0);
@@ -1693,6 +1911,19 @@
             const account = await this.api(`/api/front/trading_account${accountQuery}`);
             this.accountView = account;
             if (!this.asOf && account.as_of) this.asOf = account.as_of;
+          } catch (err) {
+            if (!quiet) throw err;
+          }
+        },
+        async loadStrategyDaily(quiet = false) {
+          try {
+            if (!this.isLoggedIn) return;
+            const q = new URLSearchParams({ news_limit: String(window.innerWidth <= 767 ? 30 : 60) });
+            if (this.asOf) q.set('as_of', this.asOf);
+            const payload = await this.api(`/api/front/strategy_daily?${q.toString()}`);
+            this.strategyDaily = payload || {};
+            if (payload && payload.news) this.newsFeed = payload.news;
+            if (!this.asOf && payload && payload.as_of) this.asOf = payload.as_of;
           } catch (err) {
             if (!quiet) throw err;
           }
@@ -1740,20 +1971,18 @@
             this.syncing = false;
           }
         },
-        setMobileView(view) {
+        async setMobileView(view) {
           if (!this.isPublicView(view) && !this.auth.token) {
             this.openAuth('login');
             return;
           }
           this.mobileView = view;
-          if (view === 'overview' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
-          if (view === 'overview' && !this.newsFeed.items) this.loadNews(true);
-          if (view === 'buy' && !this.recommendations.items) this.loadRecommendations(true);
-          if (view === 'buy' && !this.plan.as_of) this.loadPlan(true);
+          if (['overview', 'buy', 'deals', 'news'].includes(view) && this.auth.token && !this.strategyDailyFresh) await this.loadStrategyDaily(true);
+          if (view === 'overview' && !this.latestNews.length) this.loadNews(true);
           if (view === 'strategy' && !this.strategyModels.catalog_included) this.loadStrategyModels(true);
-          if (view === 'news' && !this.newsFeed.items) this.loadNews(true);
-          if (view === 'news' && this.auth.token && !this.recommendations.items) this.loadRecommendations(true);
-          if (['positions', 'deals'].includes(view) && this.auth.token && !this.accountView.account) this.loadMarketData(true);
+          if (view === 'news' && !this.latestNews.length) this.loadNews(true);
+          if (view === 'positions' && this.auth.token && !this.accountView.account) this.loadMarketData(true);
+          if (view === 'deals' && this.auth.token && !this.hasStrategyDailyTrades && !this.accountView.account) this.loadMarketData(true);
           if (view === 'deals') this.activeTab = 'deals';
         },
         isPublicView(view) {

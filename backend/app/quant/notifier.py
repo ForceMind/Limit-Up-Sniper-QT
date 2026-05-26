@@ -10,7 +10,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
 
-from app.quant.engine import DATA_DIR, read_json, safe_float, write_json
+from app.quant.engine_utils import read_json, safe_float, write_json
+from app.quant.quant_paths import DATA_DIR
 
 
 CONFIG_FILE = DATA_DIR / "config.json"

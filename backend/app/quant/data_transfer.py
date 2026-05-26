@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable
 from zoneinfo import ZoneInfo
 
-from app.quant.engine import DATA_DIR
+from app.quant.quant_paths import DATA_DIR
 
 
 SAFE_FILES = {

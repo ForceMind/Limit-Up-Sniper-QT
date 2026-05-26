@@ -14,9 +14,11 @@ from app.quant.capital_strategy import (
     capital_presets,
     recommended_strategy_id,
 )
-from app.quant.engine import quant_engine, safe_float
+from app.quant.engine import quant_engine
+from app.quant.engine_utils import safe_float
 from app.quant.evolution import strategy_evolution
 from app.quant.runtime_cache import env_int, load_payload_cache, save_payload_cache
+from app.quant.runtime_policy import target_strategy_count
 from app.quant.security import frontend_user_summary
 
 
@@ -58,11 +60,18 @@ def _active_strategy_model() -> Dict[str, Any]:
 
 
 def _strategy_models_payload() -> Dict[str, Any]:
-    payload = strategy_evolution.models(limit=80, include_records=False)
+    clean_target_count = max(1, min(int(target_strategy_count()), 200))
+    presets = capital_presets(quant_engine.strategy_params())[:clean_target_count]
+    catalog_limit = max(0, clean_target_count - len(presets))
+    payload = strategy_evolution.models(limit=max(1, catalog_limit), include_records=False) if catalog_limit else {"status": "ok", "items": [], "count": 0}
     if not isinstance(payload, dict):
         payload = {"status": "ok", "active": _active_strategy_model(), "items": [], "count": 0}
     payload["active"] = {**_active_strategy_model(), **(payload.get("active") if isinstance(payload.get("active"), dict) else {})}
-    payload["capital_presets"] = capital_presets(quant_engine.strategy_params())
+    raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    payload["items"] = [dict(item) for item in raw_items if isinstance(item, dict) and item.get("reusable", True)][:catalog_limit]
+    payload["count"] = len(payload["items"])
+    payload["capital_presets"] = presets
+    payload["target_strategy_count"] = clean_target_count
     return payload
 
 
@@ -187,11 +196,6 @@ def frontend_user_contexts(usernames: Optional[Iterable[str]] = None, limit_user
         simulated_cash = max(10_000.0, min(10_000_000.0, safe_float(profile.get("simulated_cash"), 10_000.0)))
         selected_id = str(profile.get("strategy_model_id") or "").strip()
         selected = next((model for model in model_items if str(model.get("id") or "") == selected_id), None)
-        if selected is None and selected_id and selected_id != "active":
-            fetched = strategy_evolution.model(selected_id, include_records=False) or {}
-            if fetched:
-                selected = fetched
-                model_items.append(fetched)
         recommended_id = recommended_strategy_id(simulated_cash, model_items)
         if not selected_id or selected_id == "active" or selected is None:
             selected_id = recommended_id or DEFAULT_FRONTEND_STRATEGY_ID
