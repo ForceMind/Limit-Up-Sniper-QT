@@ -1,8 +1,11 @@
 ﻿param(
   [string]$HostAddress = "127.0.0.1",
   [int]$Port = 8000,
+  [int]$GoPort = 8090,
   [switch]$Reload,
   [switch]$SkipInstall,
+  [switch]$SkipGoControl,
+  [switch]$SkipGoInstall,
   [switch]$CheckOnly
 )
 
@@ -30,6 +33,7 @@ $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 $RequirementsFile = Join-Path $BackendDir "requirements.txt"
 $EnvExampleFile = Join-Path $RootDir ".env.example"
 $EnvFile = Join-Path $RootDir ".env"
+$LocalGoExe = Join-Path $RootDir ".tools\go\bin\go.exe"
 
 function Write-Step {
   param([string]$Message)
@@ -95,6 +99,87 @@ function Invoke-SystemPython {
   $allArgs += $Python.Args
   $allArgs += $Arguments
   & $Python.File @allArgs
+}
+
+function Install-LocalGo {
+  if ($SkipGoInstall) {
+    return $false
+  }
+
+  Write-Step "安装便携 Go 工具链"
+  $toolsDir = Join-Path $RootDir ".tools"
+  New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+
+  $releases = Invoke-RestMethod -Uri "https://go.dev/dl/?mode=json" -UseBasicParsing
+  $archive = $null
+  foreach ($release in $releases) {
+    foreach ($candidate in $release.files) {
+      if ($candidate.os -eq "windows" -and $candidate.arch -eq "amd64" -and $candidate.kind -eq "archive" -and $candidate.filename.EndsWith(".zip")) {
+        $archive = $candidate
+        break
+      }
+    }
+    if ($archive) {
+      break
+    }
+  }
+  if (-not $archive) {
+    throw "无法从 go.dev 获取 Windows amd64 Go 安装包。"
+  }
+
+  $zipPath = Join-Path $toolsDir $archive.filename
+  $downloadUrl = "https://go.dev/dl/$($archive.filename)"
+  Write-Host "下载：$downloadUrl"
+  Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+
+  $goRoot = Join-Path $toolsDir "go"
+  if (Test-Path $goRoot) {
+    Remove-Item -LiteralPath $goRoot -Recurse -Force
+  }
+  Expand-Archive -LiteralPath $zipPath -DestinationPath $toolsDir -Force
+  Remove-Item -LiteralPath $zipPath -Force
+  return (Test-Path $LocalGoExe)
+}
+
+function Get-GoCommand {
+  if (Test-Path $LocalGoExe) {
+    try {
+      $version = & $LocalGoExe version 2>&1
+      if ($LASTEXITCODE -eq 0) {
+        return [pscustomobject]@{
+          File = $LocalGoExe
+          Version = "$version"
+        }
+      }
+    } catch {
+    }
+  }
+
+  $go = Get-Command go -ErrorAction SilentlyContinue
+  if ($go) {
+    try {
+      $version = & $go.Source version 2>&1
+      if ($LASTEXITCODE -eq 0) {
+        return [pscustomobject]@{
+          File = $go.Source
+          Version = "$version"
+        }
+      }
+    } catch {
+    }
+  }
+
+  if (Install-LocalGo) {
+    $version = & $LocalGoExe version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      return [pscustomobject]@{
+        File = $LocalGoExe
+        Version = "$version"
+      }
+    }
+  }
+
+  throw "未找到 Go。请先安装 Go，或把便携 Go 放到 .tools\go。"
 }
 
 function Import-DotEnv {
@@ -193,6 +278,26 @@ function Get-AdminEntryPathFromConfig {
   return ""
 }
 
+function Wait-HttpReady {
+  param(
+    [string]$Url,
+    [int]$TimeoutSeconds = 20
+  )
+
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    try {
+      $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+        return $true
+      }
+    } catch {
+      Start-Sleep -Milliseconds 400
+    }
+  }
+  return $false
+}
+
 try {
   Write-Host "涨停狙击手 - 本地一键启动" -ForegroundColor White
   Write-Host "项目目录：$RootDir"
@@ -245,6 +350,28 @@ try {
     Write-WarnCn "端口 $Port 已被占用，自动改用 $effectivePort"
   }
 
+  $goProcess = $null
+  $effectiveGoPort = 0
+  if (-not $SkipGoControl) {
+    Write-Step "检查 Go 控制面"
+    $goCommand = Get-GoCommand
+    Write-Ok "检测到 $($goCommand.Version)"
+
+    $effectiveGoPort = Resolve-Port -Address $HostAddress -PreferredPort $GoPort
+    if ($effectiveGoPort -eq $effectivePort) {
+      $effectiveGoPort = Resolve-Port -Address $HostAddress -PreferredPort ($effectiveGoPort + 1)
+    }
+    if ($effectiveGoPort -ne $GoPort) {
+      Write-WarnCn "Go 控制面端口 $GoPort 不可用，自动改用 $effectiveGoPort"
+    }
+
+    $env:QT_GO_CONTROL_HOST = $HostAddress
+    $env:QT_GO_CONTROL_PORT = "$effectiveGoPort"
+    $env:QT_PYTHON = $VenvPython
+  } else {
+    Write-WarnCn "已跳过 Go 控制面"
+  }
+
   $env:QUANT_HOST = $HostAddress
   $env:QUANT_PORT = "$effectivePort"
 
@@ -254,6 +381,9 @@ try {
   Write-Step "启动信息"
   Write-Host "前台地址：$baseUrl"
   Write-Host "接口文档：$baseUrl/docs"
+  if (-not $SkipGoControl) {
+    Write-Host "Go 控制面：http://127.0.0.1:$effectiveGoPort/api/go/status"
+  }
   if ($adminPath) {
     Write-Host "后台地址：$baseUrl$adminPath"
   } else {
@@ -264,6 +394,32 @@ try {
   if ($CheckOnly) {
     Write-Ok "检查完成，未启动服务"
     exit 0
+  }
+
+  if (-not $SkipGoControl) {
+    Write-Step "启动 Go 控制面"
+    $goOutLog = Join-Path $BackendDir "data\go_control.out.log"
+    $goErrLog = Join-Path $BackendDir "data\go_control.err.log"
+    Remove-Item -LiteralPath $goOutLog, $goErrLog -Force -ErrorAction SilentlyContinue
+    $goArgs = @("run", "./cmd/qtctl", "serve", "-host", $HostAddress, "-port", "$effectiveGoPort")
+    $goProcess = Start-Process `
+      -FilePath $goCommand.File `
+      -ArgumentList $goArgs `
+      -WorkingDirectory $RootDir `
+      -WindowStyle Hidden `
+      -RedirectStandardOutput $goOutLog `
+      -RedirectStandardError $goErrLog `
+      -PassThru
+
+    $goHealthUrl = "http://127.0.0.1:$effectiveGoPort/healthz"
+    if (-not (Wait-HttpReady -Url $goHealthUrl -TimeoutSeconds 30)) {
+      $tail = ""
+      if (Test-Path $goErrLog) {
+        $tail = (Get-Content -Path $goErrLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+      }
+      throw "Go 控制面启动失败。$tail"
+    }
+    Write-Ok "Go 控制面已启动"
   }
 
   Write-Step "启动 FastAPI 服务"
@@ -277,8 +433,15 @@ try {
     & $VenvPython -m uvicorn @uvicornArgs
   } finally {
     Pop-Location
+    if ($goProcess -and -not $goProcess.HasExited) {
+      Stop-Process -Id $goProcess.Id -Force -ErrorAction SilentlyContinue
+      Write-Ok "Go 控制面已停止"
+    }
   }
 } catch {
+  if ((Get-Variable -Name goProcess -ErrorAction SilentlyContinue) -and $goProcess -and -not $goProcess.HasExited) {
+    Stop-Process -Id $goProcess.Id -Force -ErrorAction SilentlyContinue
+  }
   Write-FailCn $_.Exception.Message
   Write-Host ""
   Write-Host "常见处理："

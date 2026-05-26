@@ -1763,9 +1763,12 @@
           展开计算载荷
         </label>
         <div class="log-window mt-3 overflow-auto space-y-2 pr-1">
-          <div v-for="item in logs" :key="`${item.ts}-${item.job}-${item.message}`" class="border border-neutral-800 bg-[#161c22] rounded-md p-3">
+          <div v-for="item in logs" :key="`${item.ts}-${item.job}-${item.message}`" :class="logCardClass(item)" class="rounded-md p-3">
             <div class="flex items-center justify-between gap-2 text-xs">
-              <span :class="logLevelClass(item.level)" class="font-semibold">{{ item.level || 'info' }}</span>
+              <div class="flex flex-wrap items-center gap-2 min-w-0">
+                <span :class="logLevelClass(item.level)" class="font-semibold">{{ item.level || 'info' }}</span>
+                <span v-if="logResolutionText(item)" class="px-2 py-0.5 rounded bg-emerald-900/40 text-emerald-300 border border-emerald-800/70">{{ logResolutionText(item) }}</span>
+              </div>
               <span class="text-neutral-500">{{ shortTime(item.ts) }}</span>
             </div>
             <div class="mt-1 text-sm">{{ logMessage(item) }}</div>
@@ -4117,6 +4120,32 @@
           if (text === 'error') return 'text-red-400';
           if (text === 'warning') return 'text-amber-300';
           return 'text-emerald-300';
+        },
+        logCardClass(item) {
+          const level = String((item || {}).level || '').toLowerCase();
+          if (this.isResolvedJobErrorLog(item)) return 'border border-emerald-900/50 bg-[#142019]';
+          if (level === 'error') return 'border border-red-900/60 bg-[#1b1518]';
+          if (level === 'warning') return 'border border-amber-900/50 bg-[#1c1a12]';
+          return 'border border-neutral-800 bg-[#161c22]';
+        },
+        logTimestampMs(value) {
+          const ms = Date.parse(String(value || ''));
+          return Number.isFinite(ms) ? ms : 0;
+        },
+        isResolvedJobErrorLog(item) {
+          const entry = item || {};
+          if (String(entry.level || '').toLowerCase() !== 'error') return false;
+          const jobKey = String(entry.job || '');
+          if (!jobKey) return false;
+          const state = this.jobState(jobKey);
+          if (String(state.status || '').toLowerCase() !== 'ok') return false;
+          if (String(state.last_error || '').trim()) return false;
+          const logMs = this.logTimestampMs(entry.ts);
+          const finishedMs = this.logTimestampMs(state.last_finished_at);
+          return Boolean(logMs && finishedMs && finishedMs > logMs);
+        },
+        logResolutionText(item) {
+          return this.isResolvedJobErrorLog(item) ? '历史错误，当前已恢复' : '';
         },
         logMessage(item) {
           const raw = String((item || {}).message || '');

@@ -369,9 +369,12 @@ def main() -> int:
         ],
     )
     parser.add_argument("--payload-json", default="")
+    parser.add_argument("--emit-json", action="store_true")
     args = parser.parse_args()
     _load_env_file()
     result = _run(args.job, _payload(args))
+    if args.emit_json:
+        print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
     status = str(result.get("status") if isinstance(result, dict) else "")
     return 0 if status in {"ok", "running", "skipped"} else 1
 

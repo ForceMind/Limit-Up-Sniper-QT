@@ -7,7 +7,7 @@ echo Limit-Up Sniper QT - Local Start
 echo Project directory: %CD%
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$scriptPath = Join-Path (Get-Location) 'start-local.ps1'; $scriptText = Get-Content -Raw -Encoding UTF8 -LiteralPath $scriptPath; & ([scriptblock]::Create($scriptText))"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-local.ps1" %*
 set EXIT_CODE=%ERRORLEVEL%
 
 echo.

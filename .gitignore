@@ -114,6 +114,7 @@ celerybeat.pid
 .env.*
 !.env.example
 .venv
+.tools/
 env/
 venv/
 ENV/
@@ -188,3 +189,5 @@ config.bat
 Desktop-Version/config.bat
 package_frontend.local.conf
 backend/tests/
+backend/data/news_analysis_records.json
+backend/data/news_history.json
